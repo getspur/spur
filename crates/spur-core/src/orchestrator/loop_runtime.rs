@@ -48,6 +48,10 @@ impl ProjectLoopRuntimeDrain {
 pub(crate) trait ProjectLoopRuntimeInstance: Send {
     async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain;
 
+    async fn shutdown_immediately(self: Box<Self>) -> ProjectLoopRuntimeDrain {
+        self.shutdown().await
+    }
+
     async fn wait_for_exit(&mut self) {
         std::future::pending::<()>().await;
     }
@@ -62,6 +66,7 @@ pub(crate) struct ProjectLoopRuntimeSupervisor {
     #[cfg(test)]
     state_rx: watch::Receiver<ProjectLoopRuntimeState>,
     cancel: CancellationToken,
+    force_shutdown: CancellationToken,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -85,6 +90,8 @@ impl ProjectLoopRuntimeSupervisor {
         let (state_tx, state_rx) = watch::channel(ProjectLoopRuntimeState::Standby);
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
+        let force_shutdown = CancellationToken::new();
+        let task_force_shutdown = force_shutdown.clone();
         let handle = tokio::spawn(async move {
             run_supervisor(
                 repo_root,
@@ -92,6 +99,7 @@ impl ProjectLoopRuntimeSupervisor {
                 acquire,
                 retry_interval,
                 task_cancel,
+                task_force_shutdown,
                 state_tx,
             )
             .await;
@@ -102,6 +110,7 @@ impl ProjectLoopRuntimeSupervisor {
             #[cfg(test)]
             state_rx,
             cancel,
+            force_shutdown,
             handle: Some(handle),
         }
     }
@@ -117,6 +126,14 @@ impl ProjectLoopRuntimeSupervisor {
     }
 
     pub(crate) async fn shutdown(&mut self) {
+        self.cancel.cancel();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+
+    pub(crate) async fn shutdown_immediately(&mut self) {
+        self.force_shutdown.cancel();
         self.cancel.cancel();
         if let Some(handle) = self.handle.take() {
             let _ = handle.await;
@@ -154,6 +171,7 @@ async fn run_supervisor(
     acquire: Arc<LeadershipAcquirer>,
     retry_interval: Duration,
     cancel: CancellationToken,
+    force_shutdown: CancellationToken,
     state_tx: watch::Sender<ProjectLoopRuntimeState>,
 ) {
     loop {
@@ -200,7 +218,19 @@ async fn run_supervisor(
                         _ = cancel.cancelled() => false,
                         _ = runtime.wait_for_exit() => true,
                     };
-                    let mut drain = runtime.shutdown().await;
+                    let immediate = force_shutdown.is_cancelled();
+                    let mut drain = if immediate {
+                        runtime.shutdown_immediately().await
+                    } else {
+                        runtime.shutdown().await
+                    };
+                    if immediate {
+                        state_tx.send_replace(ProjectLoopRuntimeState::LeaderDraining);
+                        drain.completion.await;
+                        drop(leadership);
+                        state_tx.send_replace(ProjectLoopRuntimeState::Stopped);
+                        return;
+                    }
                     if !unexpected_exit || cancel.is_cancelled() {
                         detach_leader_drain(leadership, drain, state_tx.clone());
                         return;
@@ -483,6 +513,37 @@ impl ProjectLoopRuntimeInstance for RunningProjectLoopRuntime {
                         );
                     }
                     worker_server.force_abort_handlers_and_wait().await;
+                }
+            };
+            let server_drain = async move {
+                server.force_abort_and_wait().await;
+            };
+            tokio::join!(delegation_drain, worker_server_drain, server_drain);
+        })
+    }
+
+    async fn shutdown_immediately(mut self: Box<Self>) -> ProjectLoopRuntimeDrain {
+        self.server.mark_retiring();
+        self.server.cancel_in_flight_workers();
+        self.delegation_shutdown.cancel();
+        let delegation_handle = self.delegation_handle.take();
+        let worker_server = self
+            .worker_mcp_servers
+            .remove(&self.system_id)
+            .map(|(_system_id, worker_server)| worker_server);
+        let server = Arc::clone(&self.server);
+        self.shutdown_transferred_to_drain = true;
+
+        ProjectLoopRuntimeDrain::new(async move {
+            let delegation_drain = async move {
+                if let Some(handle) = delegation_handle {
+                    handle.abort();
+                    let _ = handle.await;
+                }
+            };
+            let worker_server_drain = async move {
+                if let Some(worker_server) = worker_server {
+                    worker_server.shutdown_immediately().await;
                 }
             };
             let server_drain = async move {
