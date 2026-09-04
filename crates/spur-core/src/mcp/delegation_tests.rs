@@ -68,6 +68,7 @@ mod retirement_state_tests {
 
     use spur_acp::{BrainSessionId, SessionId};
     use tokio::sync::{oneshot, Notify};
+    use tokio_util::sync::CancellationToken;
 
     fn no_op_ctx() -> super::DetachedContinuationCtx {
         super::DetachedContinuationCtx {
@@ -184,6 +185,47 @@ mod retirement_state_tests {
         assert!(
             server.__test_root_handle_is_none(),
             "force_abort_and_wait must consume the retained join ownership"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_server_force_abort_preserves_cooperative_root_callback() {
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let (server, _channel) = super::McpCallbackServer::new(
+            Some(&session_id),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
+        );
+        let force = CancellationToken::new();
+        *server.root_force_shutdown.lock().unwrap() = Some(force.clone());
+
+        let callback_joined = Arc::new(AtomicBool::new(false));
+        server.__test_set_root_handle(tokio::spawn({
+            let callback_joined = Arc::clone(&callback_joined);
+            async move {
+                force.cancelled().await;
+                // An unconditional root abort after signalling wins at this
+                // suspension point and skips the callback acknowledgement.
+                tokio::task::yield_now().await;
+                callback_joined.store(true, Ordering::SeqCst);
+            }
+        }));
+
+        server.force_abort();
+        assert!(
+            !server.__test_root_handle_is_none(),
+            "signal-only force must retain cooperative root join ownership"
+        );
+        tokio::time::timeout(Duration::from_millis(200), server.force_abort_and_wait())
+            .await
+            .expect("cooperative root must acknowledge force promptly");
+
+        assert!(
+            callback_joined.load(Ordering::SeqCst),
+            "force shutdown returned before the root callback acknowledged its child"
         );
     }
 
