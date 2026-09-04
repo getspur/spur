@@ -21,9 +21,9 @@ pub const INSTALL_HINTS: &[(&str, &str)] = &[
     ),
     (
         "codex-bin",
-        "npm install -g @agentclientprotocol/codex-acp@1.7.0",
+        "npm install -g @agentclientprotocol/codex-acp@1.9.0",
     ),
-    ("codex", "npx @agentclientprotocol/codex-acp@1.7.0"),
+    ("codex", "npx @agentclientprotocol/codex-acp@1.9.0"),
     ("gemini", "npm install -g @google/gemini-cli"),
     ("opencode", "npm install -g opencode"),
     ("kimi", "see docs/spur/agent-onboarding-cookbook.md"),
