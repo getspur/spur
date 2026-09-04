@@ -1787,6 +1787,10 @@ pub(super) trait RetirableMcpServer: Send + Sync {
     fn mark_retiring(&self);
     fn cancel_in_flight_workers(&self);
     fn force_abort(&self);
+    fn force_abort_and_wait(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.force_abort();
+        Box::pin(std::future::ready(()))
+    }
     fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
@@ -1803,9 +1807,38 @@ impl RetirableMcpServer for McpCallbackServer {
         McpCallbackServer::force_abort(self);
     }
 
+    fn force_abort_and_wait(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(McpCallbackServer::force_abort_and_wait(self))
+    }
+
     fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(McpCallbackServer::shutdown(self))
     }
+}
+
+pub(super) async fn shutdown_mcp_server_immediately<S: RetirableMcpServer + ?Sized>(
+    mcp_server: &mut Option<Arc<S>>,
+    mcp_guard: Option<&mut Option<AbortOnDropHandle<()>>>,
+) {
+    let server = mcp_server.take();
+    let guard = mcp_guard.and_then(|guard| guard.take());
+
+    if let Some(server) = server.as_ref() {
+        server.mark_retiring();
+        server.cancel_in_flight_workers();
+    }
+
+    let server_shutdown = async move {
+        if let Some(server) = server {
+            server.force_abort_and_wait().await;
+        }
+    };
+    let guard_shutdown = async move {
+        if let Some(guard) = guard {
+            abort_mcp_handle(guard).await;
+        }
+    };
+    tokio::join!(server_shutdown, guard_shutdown);
 }
 
 pub(super) async fn shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
@@ -1895,6 +1928,24 @@ pub(super) async fn retire_brain_session<S: RetirableMcpServer + ?Sized>(
     }
     shutdown_mcp_server(funnel, session, mcp_server, mcp_guard).await;
     scheduler.note_session_swap(new_active, overflow);
+}
+
+async fn shutdown_brain_resources_immediately<S: RetirableMcpServer + ?Sized>(
+    session: &SessionId,
+    mcp_server: &mut Option<Arc<S>>,
+    mcp_guard: Option<&mut Option<AbortOnDropHandle<()>>>,
+    worker_mcp_servers: &DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>,
+) {
+    let worker_server = worker_mcp_servers
+        .remove(&spur_acp::BrainSessionId::from(session.clone()))
+        .map(|(_session, worker_server)| worker_server);
+    let worker_shutdown = async move {
+        if let Some(worker_server) = worker_server {
+            worker_server.shutdown_immediately().await;
+        }
+    };
+    let root_shutdown = shutdown_mcp_server_immediately(mcp_server, mcp_guard);
+    tokio::join!(worker_shutdown, root_shutdown);
 }
 
 pub(super) async fn resume_orphaned_dispatch_session(
@@ -2152,23 +2203,47 @@ impl Orchestrator {
         scheduler: &mut crate::scheduler::BrainScheduler,
         overflow: &crate::continuation_bridge::OverflowBuf,
     ) {
-        self.retire_active_brain(
-            brain,
-            agent_connection,
-            scheduler,
-            overflow,
-            spur_acp::domain::events::BrainRetireReason::Shutdown,
-            None,
-        )
-        .await;
+        let Some(mut active_brain) = brain.take() else {
+            drop(agent_connection.take());
+            return;
+        };
 
-        if let Some(ActiveConnection {
-            transport: mut conn,
-            ..
-        }) = agent_connection.take()
-        {
-            let _ = conn.shutdown().await;
+        self.self_held.remove(&spur_acp::BrainSessionId::from(
+            active_brain.spur_session_id.clone(),
+        ));
+        self.remove_notebook_socket(&spur_acp::BrainSessionId::from(
+            active_brain.spur_session_id.clone(),
+        ));
+        self.emit(SpurEvent::now(SpurEventBody::BrainRetired {
+            session: active_brain.spur_session_id.clone(),
+            reason: spur_acp::domain::events::BrainRetireReason::Shutdown,
+        }));
+        scheduler.note_session_swap(None, overflow);
+
+        if let Some(pump) = active_brain.notification_pump_handle.take() {
+            pump.abort();
+            drop(pump);
         }
+        active_brain.delegation_handle.abort();
+        let delegation_handle = active_brain.delegation_handle;
+
+        // Dropping the transport is the immediate process-exit operation:
+        // native adapters synchronously kill their process group and Tokio
+        // child adapters use kill_on_drop.
+        drop(active_brain.connection);
+        drop(active_brain.attach_guard.take());
+        drop(agent_connection.take());
+
+        let delegation_shutdown = async move {
+            let _ = delegation_handle.await;
+        };
+        let resource_shutdown = shutdown_brain_resources_immediately(
+            &active_brain.spur_session_id,
+            &mut active_brain.mcp_server,
+            Some(&mut active_brain.mcp_guard),
+            &self.worker_mcp_servers,
+        );
+        tokio::join!(delegation_shutdown, resource_shutdown);
     }
 
     fn acquire_attach_guard_for_load(
