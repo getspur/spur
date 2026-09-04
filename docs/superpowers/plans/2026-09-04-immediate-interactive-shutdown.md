@@ -149,6 +149,33 @@ Final review also found that dropping a nested delegation skipped its async regi
 - Verification: the exact structural-abort regression passed, as did all 3 cancellation-control behavior tests.
 - Solver evidence: pre-solve `sol_30ce22f9a02c4a0c`; post-solve `sol_f8fc56c7e464409c` passed the registration-drop-before-parent-ack workflow at horizon 5, excluding `ParentAckWithRegistration`.
 
+## Review remediation — `bd-otdln`: Join partially published brain startup
+
+Review found that cancellation could drop startup after it had acquired root MCP and guard ownership but before the completed `BrainSession` reached the caller.
+
+- RED: `51fe029c9` added a partial-startup barrier that requires transport drop and root/guard acknowledgement before cancellation returns.
+- GREEN: `b7b645ce9` carries cancellation as `BrainStartupOutcome`, keeps resource-owning startup out of outer `select!` drops, reconciles the peer mailbox before publication, and leaves only a synchronous no-fail publication tail.
+- Verification: the session ownership module passed 26 tests with 1 fixture-dependent test ignored at that point.
+- Solver evidence: pre-solve `sol_056b61e6fbbb4a9b`; post-solve `sol_54b82c4c42834876` proved transport release precedes root/guard acknowledgement and caller return.
+
+## Review remediation — `bd-1behx`: Retain retirement ownership through force
+
+Review found that late force escalation could drop shutdown futures after they had taken root, notification-pump, or transport ownership, and timeout paths could still return a stale reusable transport.
+
+- RED: `f250534ec` and `41a30b37c` added late-escalation and taken-handle acknowledgement regressions.
+- GREEN: `83127ad40` pins one retirement future across escalation; aborts and joins notification, delegation, root, guard, and worker resources; drops transport on every non-graceful outcome; and performs a final worker-server sweep after the delegation parent joins.
+- Verification: all 27 active session ownership tests passed with 1 ignored; all 3 force-aware shutdown tests and all 5 legacy retirement tests passed.
+- Solver evidence: repair pre-solve `sol_0355997b8bde4264`; post-solve `sol_fd977154215a4078` found the unsafe ownership counterexample UNSAT.
+
+## Review remediation — `bd-30unc`: Fence interactive waits and own root HTTP children
+
+The final review found three emergency-host gaps: `BrainSession` dropped a detachable delegation handle, immediate/reconnect paths aborted notification pumps without joining them, and the root MCP server inherited Axum's detached accepted-connection tasks.
+
+- RED: `1f0ad49ff` requires delegation-parent abort on `BrainSession` drop; `98af4e1e4` requires force shutdown to join an admitted partial HTTP connection.
+- GREEN: `20f95b9f5` makes delegation and root owners abort-on-drop, fences admitted interactive RPC/prompt/terminal/pump waits, joins notification pumps in active and reconnect teardown, and replaces generic Axum serving with SPUR-owned per-connection tasks plus a force token and transitive tracker barrier. The root stop callback also joins its server-specific signal watcher.
+- Verification: 28 session ownership tests passed with 1 ignored; the 26-test shutdown unit slice passed; both streamable-HTTP transport tests passed; all integration targets compiled in the broad filtered run and the pending-collector shutdown integration passed. The run later encountered a reproducible unrelated beads fixture failure before its shutdown assertion (`execute_epic` reported that the generated epic had no children).
+- Solver evidence: pre-solve `sol_99132f5d82cb4ea5`; post-solve `sol_a746d2d953c94993` found the unsafe early-exit/detached-child counterexample UNSAT in 27 ms.
+
 ## Final verification
 
 1. `scripts/spur-cargo fmt --all -- --check`
