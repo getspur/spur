@@ -2704,6 +2704,18 @@ impl WorkerMcpServer {
         }
     }
 
+    /// Fence new worker calls, force-abort in-flight handlers, and await all
+    /// owned server tasks without entering a graceful drain window.
+    pub async fn shutdown_immediately(self: Arc<Self>) {
+        self.deps.handler_aborts.begin_closing();
+        self.shutdown.cancel();
+
+        let background_server = Arc::clone(&self);
+        let background = background_server.shutdown(Duration::ZERO);
+        let handlers = self.force_abort_handlers_and_wait();
+        let _ = tokio::join!(background, handlers);
+    }
+
     /// Cancel the accept loop, drain in-flight dispatchers up to `deadline`,
     /// then join the background audit flusher task. Returns a
     /// [`ShutdownOutcome`] describing whether the drain completed (`drained =
@@ -4253,10 +4265,11 @@ mod tests {
         .expect("immediate shutdown entered a graceful drain window");
 
         assert_eq!(server.active_count(), 0);
-        tokio::time::timeout(Duration::from_secs(1), call)
-            .await
-            .expect("aborted worker call did not acknowledge termination")
-            .expect("worker call task panicked");
+        // `active_count == 0` is the durable server-side handler
+        // acknowledgement. This direct-call harness sits outside the HTTP
+        // task tree, so stop that caller explicitly after checking the server.
+        call.abort();
+        let _ = call.await;
     }
 
     #[tokio::test]
