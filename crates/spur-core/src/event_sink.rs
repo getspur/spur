@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use tokio::sync::broadcast;
 
 use spur_acp::domain::events::SpurEvent;
@@ -102,8 +105,9 @@ struct SinkState {
 
 impl SinkState {
     fn open(dir: &Path, max_bytes: u64) -> std::io::Result<Self> {
+        harden_event_store(dir)?;
         let path = rotated_path(dir);
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = open_event_file(&path)?;
         let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
             dir: dir.to_path_buf(),
@@ -146,10 +150,7 @@ impl SinkState {
     fn rotate(&mut self) -> std::io::Result<()> {
         self.writer.flush()?;
         let new_path = rotated_path(&self.dir);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&new_path)?;
+        let file = open_event_file(&new_path)?;
         self.writer = BufWriter::with_capacity(FLUSH_BYTES, file);
         self.current_path = new_path;
         self.bytes_in_file = 0;
@@ -170,6 +171,43 @@ impl SinkState {
     fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
     }
+}
+
+#[cfg(unix)]
+fn harden_event_store(dir: &Path) -> std::io::Result<()> {
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("ndjson")
+            || !entry.file_type()?.is_file()
+        {
+            continue;
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn harden_event_store(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_event_file(path: &Path) -> std::io::Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_event_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().create(true).append(true).open(path)
 }
 
 fn effective_cap_with_headroom(max_total: u64, max_bytes: u64, phase: &'static str) -> Option<u64> {
@@ -261,6 +299,61 @@ mod tests {
     /// `SPUR_EVENT_LOG_MAX_BYTES` so tests don't race on the process env.
     fn open_with_max(dir: &std::path::Path, max_bytes: u64) -> SinkState {
         SinkState::open(dir, max_bytes).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_sink_hardens_directory_and_existing_event_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("events");
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = dir.join("existing.ndjson");
+        std::fs::write(&existing, b"{}\n").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let state = SinkState::open(&dir, DEFAULT_MAX_BYTES).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&state.current_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotating_sink_opens_private_event_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("events");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = SinkState::open(&dir, DEFAULT_MAX_BYTES).unwrap();
+
+        state.rotate().unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&state.current_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[tokio::test]
