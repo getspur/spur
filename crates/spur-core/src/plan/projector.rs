@@ -4,9 +4,7 @@ use std::sync::OnceLock;
 use spur_acp::{BrainSessionId, SessionId};
 
 use super::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
-use crate::plan::audit_sentinel::{
-    AuditSentinelKind, CompletionState, EpicCompletionOutcome, SystemReviewDecision,
-};
+use crate::plan::audit_sentinel::{AuditSentinelKind, CompletionState, EpicCompletionOutcome};
 use crate::plan::shadow_projector::{shadow_project_plan_from_beads, TaskAuditLog};
 
 const LEGACY_DELEGATION_ID_PREFIX: &str = "delegation-id:";
@@ -365,14 +363,11 @@ pub fn project_status_from_audits(audits: &[AuditSentinelKind]) -> PlanTaskStatu
                     summary: summary.clone(),
                 };
             }
-            AuditSentinelKind::SystemReviewVerdict { decision, .. } => {
-                status = match decision {
-                    SystemReviewDecision::Approve => PlanTaskStatus::Approved {
-                        summary: summary.clone(),
-                    },
-                    SystemReviewDecision::RequestChanges => PlanTaskStatus::Pending,
-                };
-            }
+            // A system-review verdict is an authenticated request to apply a
+            // decision, not the durable task transition itself. The
+            // reconciler converts it to Approval/Rejection/ReviewFeedback in
+            // the same transaction as the issue mutation.
+            AuditSentinelKind::SystemReviewVerdict { .. } => {}
             AuditSentinelKind::Rejection { feedback, .. } => {
                 status = PlanTaskStatus::Rejected {
                     feedback: Some(feedback.clone()),
@@ -1069,14 +1064,7 @@ pub fn project_closed_status(
                     .and_then(|(_, _, result_summary, _, _)| result_summary);
                 return PlanTaskStatus::Approved { summary };
             }
-            AuditSentinelKind::SystemReviewVerdict { decision, .. } => match decision {
-                SystemReviewDecision::Approve => {
-                    let summary = latest_completion_facts(audits)
-                        .and_then(|(_, _, result_summary, _, _)| result_summary);
-                    return PlanTaskStatus::Approved { summary };
-                }
-                SystemReviewDecision::RequestChanges => return PlanTaskStatus::Pending,
-            },
+            AuditSentinelKind::SystemReviewVerdict { .. } => {}
             AuditSentinelKind::Rejection { feedback, .. } => {
                 return PlanTaskStatus::Rejected {
                     feedback: Some(feedback.clone()),
@@ -2581,7 +2569,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_task_with_system_review_approval_projects_approved() {
+    fn system_review_verdict_is_not_an_applied_terminal_transition() {
         let issue = issue("bd-42v", "closed", Vec::new(), Vec::new());
         let audits = vec![
             AuditSentinelKind::Completion {
@@ -2604,11 +2592,18 @@ mod tests {
             },
         ];
 
+        let open_status = super::project_status_from_audits(&audits);
+        assert!(matches!(
+            open_status,
+            PlanTaskStatus::AwaitingReview { summary }
+                if summary.as_deref() == Some("verified change")
+        ));
+
         let status = super::project_closed_status(&issue, &audits);
         assert!(matches!(
             status,
-            PlanTaskStatus::Approved { summary }
-                if summary.as_deref() == Some("verified change")
+            PlanTaskStatus::Failed { error }
+                if error == "closed task missing terminal review audit"
         ));
     }
 

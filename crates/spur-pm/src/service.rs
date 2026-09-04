@@ -278,6 +278,29 @@ impl PmService {
         }
     }
 
+    /// Apply an ordered issue-update set atomically, conditionally, and
+    /// idempotently.
+    ///
+    /// This contract is available only when Beads is the source of truth;
+    /// remote PM APIs cannot provide a cross-issue ACID transaction.
+    pub async fn update_issues_atomically(
+        &self,
+        idempotency_key: &str,
+        preconditions: Vec<AtomicUpdatePrecondition>,
+        updates: Vec<(String, IssueUpdate)>,
+    ) -> anyhow::Result<AtomicUpdateOutcome> {
+        match &self.inner {
+            PmBackendInner::Beads { beads, .. } => {
+                beads
+                    .update_issues_atomically(idempotency_key, preconditions, updates)
+                    .await
+            }
+            PmBackendInner::GitHub { .. } => {
+                anyhow::bail!("atomic multi-issue updates require the beads backend")
+            }
+        }
+    }
+
     pub async fn create_pr(&self, params: PrParams) -> anyhow::Result<String> {
         match &self.inner {
             PmBackendInner::Beads {

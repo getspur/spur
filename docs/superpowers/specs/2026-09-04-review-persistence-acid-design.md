@@ -1,7 +1,7 @@
 # ACID Review Persistence Design
 
 **Issue:** `bd-2zxiu`  
-**Status:** Accepted for implementation
+**Status:** Implemented
 
 ## Problem
 
@@ -32,6 +32,11 @@ For a task participating in a terminal review, the observable tuple
 the partial state is unsatisfiable with
 `data_integrity.mutually_consistent.violation`.
 
+A `SystemReviewVerdict` is intentionally not terminal task evidence. It is an
+authenticated request for the reconciler to apply a decision; only the
+approval/rejection/review-feedback audit committed with the issue mutation may
+advance projected task state.
+
 ## Transaction boundary
 
 Add an atomic multi-issue update operation to the PM abstraction. The Beads
@@ -44,17 +49,25 @@ idempotency marker.
 The operation is deliberately unavailable on backends that cannot provide the
 contract. Non-advisory reviews already require the Beads advanced surface, so a
 backend without atomic updates fails before any write. Advisory mode keeps its
-existing best-effort behavior.
+existing best-effort behavior. Non-advisory mode also rejects a missing PM
+backend or a task without a durable issue ID before publishing candidate state.
 
-The transaction accepts only the `IssueUpdate` fields required by review
-transitions: status, labels, and comment. Unsupported fields are rejected during
-preflight, before the transaction begins.
+The transaction preserves the complete current `IssueUpdate` surface so the
+same primitive can also make a single mixed field/label/comment update atomic.
+Review currently uses status, labels, and comments. Labels, issue existence,
+the idempotency key, and optimistic concurrency preconditions are validated
+before any mutation becomes durable.
 
 ## Retry and read-back
 
 The caller supplies a deterministic idempotency key containing plan, task,
-attempt, and decision. The Beads transaction inserts a namespaced marker in the
-existing metadata table. Marker and review rows commit together:
+attempt, and maker delegation, deliberately excluding the decision. Approve,
+reject, and request-changes calls for the same review epoch therefore share one
+identity. The caller also supplies the observed per-issue comment counts; the
+transaction compares them before writing, so a differently keyed stale writer
+cannot overwrite a review that just committed. The Beads transaction inserts a
+namespaced marker in the existing metadata table. Marker and review rows commit
+together:
 
 - no marker means the transaction may be attempted;
 - an existing marker means the exact logical transition already committed and
@@ -72,7 +85,9 @@ without appending comments again.
 - **Consistency:** preflight validation plus the allowed-snapshot invariant
   prevents a committed terminal status without its audit.
 - **Isolation:** the adapter's cross-process write lock and SQLite IMMEDIATE
-  transaction serialize writers.
+  transaction serialize writers; in-transaction comment-count compare-and-set
+  guards prevent two decisions based on the same review snapshot from both
+  committing.
 - **Durability:** cache publication follows successful commit and read-back;
   the idempotency marker survives process restart.
 
@@ -82,5 +97,5 @@ A trigger-injected failure on a late audit-comment insert must leave the task
 open, preserve review-ready labels, add no review comments or events, mark no
 issue dirty, and persist no idempotency marker. Removing the trigger and
 retrying must commit the complete transition. Repeating the successful request
-with the same key must not duplicate comments.
-
+with the same key must not duplicate comments. A competing decision using stale
+preconditions must fail without changing the winning status or audits.

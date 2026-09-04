@@ -33,7 +33,8 @@ does not exist. Commit the regression tests separately.
 - Modify: `crates/spur-pm/src/adapter.rs`
 - Modify: `crates/spur-pm/src/service.rs`
 
-Add `AtomicUpdateOutcome` and an object-safe `update_issues_atomically` method.
+Add `AtomicUpdateOutcome`, per-issue optimistic concurrency preconditions, and
+an object-safe `update_issues_atomically` method.
 The default implementation must return an unsupported error rather than fall
 back to sequential writes. `PmService` dispatches to Beads and rejects GitHub.
 
@@ -43,7 +44,8 @@ back to sequential writes. `PmService` dispatches to Beads and rejects GitHub.
 
 - Modify: `crates/spur-pm/src/beads_crate/issue_tracker.rs`
 
-Preflight the idempotency key, labels, issue existence, and supported fields.
+Preflight the idempotency key, labels, issue existence, and one observed
+comment-count precondition per updated issue.
 Inside one `SqliteStorage::mutate`, claim the metadata marker and apply every
 status, label, comment, event, dirty marker, and cache invalidation. Preserve
 ordered comments. Return `AlreadyApplied` when the marker exists.
@@ -56,10 +58,11 @@ Run `scripts/spur-cargo test -p spur-pm`.
 
 - Modify: `crates/spur-core/src/plan/mod.rs`
 
-Extend `PmLike`, delegate through `PmService`, derive a deterministic key from
-plan/task/attempt/decision, and replace per-operation suffix retry with whole
-transaction retry. Retain the current post-commit comment read-back for newly
-applied transactions and leave advisory mode unchanged.
+Extend `PmLike`, delegate through `PmService`, derive a decision-independent
+key from plan/task/attempt/maker-delegation, and replace per-operation suffix
+retry with whole-transaction retry. Reject non-advisory mode when no PM backend
+exists. Retain the current post-commit comment read-back for newly applied
+transactions and leave advisory mode unchanged.
 
 Run focused review tests and `scripts/spur-cargo test -p spur-core`.
 
@@ -70,3 +73,8 @@ Run formatting, focused tests, relevant crate tests, and clippy through
 must pass and `closed + absent` must fail. Inspect the final diff, update and
 close `bd-2zxiu`, and commit the implementation with the issue ID.
 
+## Result
+
+Implemented. The post-change solver verification accepts `open + absent` and
+`closed + approval`, and rejects `closed + absent` with
+`data_integrity.mutually_consistent.violation`.
