@@ -2312,6 +2312,19 @@ impl Orchestrator {
             resource_shutdown,
         )
         .await;
+
+        // A delegation that was already completing WorkerMcpServer::start
+        // may insert after the first resource sweep. Parent acknowledgement
+        // now proves every structurally nested delegation child has unwound,
+        // so no later insertion can race this final removal.
+        if let Some((_session, late_worker_server)) =
+            self.worker_mcp_servers
+                .remove(&spur_acp::BrainSessionId::from(
+                    active_brain.spur_session_id.clone(),
+                ))
+        {
+            late_worker_server.shutdown_immediately().await;
+        }
     }
 
     fn acquire_attach_guard_for_load(

@@ -1,4 +1,5 @@
 use super::*;
+use futures::FutureExt;
 
 pub mod base_spec;
 pub mod cleanup;
@@ -85,8 +86,10 @@ fn maybe_spawn_dispatch_lease_heartbeat(
 
 /// Handle delegation requests from the MCP callback server.
 ///
-/// Spawns each delegation as a separate tokio task, allowing multiple
-/// workers to run concurrently. A semaphore limits the number of
+/// Drives each delegation as a child future owned by this parent, allowing
+/// multiple workers to run concurrently. Keeping the children structurally
+/// nested means aborting and awaiting the parent also drops every child before
+/// the parent acknowledges completion. A semaphore limits the number of
 /// simultaneous workers to `max_concurrent`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_delegations(
@@ -116,16 +119,32 @@ pub(crate) async fn handle_delegations(
     let last_refresh_at = Arc::new(tokio::sync::Mutex::new(
         tokio::time::Instant::now() - std::time::Duration::from_secs(60),
     ));
-    let mut delegation_tasks = tokio::task::JoinSet::new();
+    type DelegationTaskFuture =
+        futures::future::BoxFuture<'static, std::result::Result<(), Box<dyn std::any::Any + Send>>>;
+    let mut delegation_tasks = futures::stream::FuturesUnordered::<DelegationTaskFuture>::new();
 
     loop {
-        let request = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => break,
-            request = channel.request_rx.recv() => request,
+        let request = loop {
+            let request = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return,
+                result = delegation_tasks.next(), if !delegation_tasks.is_empty() => {
+                    if result.is_some_and(|result| result.is_err()) {
+                        tracing::error!("delegation task panicked");
+                    }
+                    continue;
+                }
+                request = channel.request_rx.recv() => request,
+            };
+            break request;
         };
         let Some(request) = request else {
-            break;
+            while let Some(result) = delegation_tasks.next().await {
+                if result.is_err() {
+                    tracing::error!("delegation task panicked during shutdown");
+                }
+            }
+            return;
         };
         // Destructure the request — it is not Clone, so we move each field.
         let DelegationRequest {
@@ -216,7 +235,7 @@ pub(crate) async fn handle_delegations(
         let request_id_for_shutdown = request_id.clone();
         let shutdown_for_task = shutdown.clone();
 
-        delegation_tasks.spawn(async move {
+        delegation_tasks.push(Box::pin(std::panic::AssertUnwindSafe(async move {
             let delegation = async move {
                 let mut guard = DelegationGuard {
                     funnel: funnel.clone(),
@@ -509,19 +528,8 @@ pub(crate) async fn handle_delegations(
             cancellation_control_for_shutdown
                 .remove(&request_id_for_shutdown)
                 .await;
-        });
-
-        while let Some(result) = delegation_tasks.try_join_next() {
-            if let Err(error) = result {
-                tracing::error!(%error, "delegation task exited unexpectedly");
-            }
-        }
-    }
-
-    while let Some(result) = delegation_tasks.join_next().await {
-        if let Err(error) = result {
-            tracing::error!(%error, "delegation task exited unexpectedly during shutdown");
-        }
+        })
+        .catch_unwind()));
     }
 }
 

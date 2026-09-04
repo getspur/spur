@@ -495,6 +495,8 @@ impl ProjectLoopRuntimeInstance for RunningProjectLoopRuntime {
             .worker_mcp_servers
             .remove(&self.system_id)
             .map(|(_system_id, worker_server)| worker_server);
+        let worker_mcp_servers = Arc::clone(&self.worker_mcp_servers);
+        let system_id = self.system_id.clone();
         let server = Arc::clone(&self.server);
         self.shutdown_transferred_to_drain = true;
 
@@ -549,6 +551,13 @@ impl ProjectLoopRuntimeInstance for RunningProjectLoopRuntime {
                 server.force_abort_and_wait().await;
             };
             tokio::join!(delegation_drain, worker_server_drain, server_drain);
+
+            // A delegation already completing WorkerMcpServer::start can
+            // insert after the first removal. The delegation parent has now
+            // acknowledged every nested child, so this second sweep is final.
+            if let Some((_system_id, late_worker_server)) = worker_mcp_servers.remove(&system_id) {
+                late_worker_server.shutdown_immediately().await;
+            }
         })
     }
 
