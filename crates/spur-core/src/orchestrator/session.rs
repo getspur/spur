@@ -60,6 +60,7 @@ mod session_attach_guard_transfer_tests {
     use futures::Stream;
     use std::path::PathBuf;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     struct NoopConnection;
@@ -99,6 +100,87 @@ mod session_attach_guard_transfer_tests {
 
         fn health(&self) -> AgentHealth {
             AgentHealth::Ready
+        }
+    }
+
+    struct HangingShutdownConnection {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for HangingShutdownConnection {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl AgentConnection for HangingShutdownConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            panic!("HangingShutdownConnection::initialize must not be called")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
+            panic!("HangingShutdownConnection::new_session must not be called")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            std::future::pending().await
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+    }
+
+    #[derive(Default)]
+    struct ImmediateMcpProbe {
+        marked_retiring: AtomicBool,
+        workers_cancelled: AtomicBool,
+        graceful_polled: Arc<AtomicBool>,
+        force_waited: AtomicBool,
+    }
+
+    impl RetirableMcpServer for ImmediateMcpProbe {
+        fn mark_retiring(&self) {
+            self.marked_retiring.store(true, Ordering::SeqCst);
+        }
+
+        fn cancel_in_flight_workers(&self) {
+            self.workers_cancelled.store(true, Ordering::SeqCst);
+        }
+
+        fn force_abort(&self) {}
+
+        fn force_abort_and_wait(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.force_waited.store(true, Ordering::SeqCst);
+            Box::pin(std::future::ready(()))
+        }
+
+        fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let graceful_polled = Arc::clone(&self.graceful_polled);
+            Box::pin(async move {
+                graceful_polled.store(true, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            })
         }
     }
 
@@ -640,7 +722,12 @@ mod session_attach_guard_transfer_tests {
         let mut event_rx = orchestrator.subscribe();
 
         let retired_session = SessionId("shutdown-session".to_string());
-        let mut brain = Some(fixture_brain_session(retired_session.0.as_str()));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut session = fixture_brain_session(retired_session.0.as_str());
+        session.connection = Box::new(HangingShutdownConnection {
+            dropped: Arc::clone(&dropped),
+        });
+        let mut brain = Some(session);
         let mut agent_connection = None;
         let mut scheduler = crate::scheduler::BrainScheduler::new(
             Some(retired_session.clone().into()),
@@ -649,12 +736,24 @@ mod session_attach_guard_transfer_tests {
         let overflow =
             std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
 
-        orchestrator
-            .shutdown_active_brain(&mut brain, &mut agent_connection, &mut scheduler, &overflow)
-            .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            orchestrator.shutdown_active_brain(
+                &mut brain,
+                &mut agent_connection,
+                &mut scheduler,
+                &overflow,
+            ),
+        )
+        .await
+        .expect("process-exit shutdown polled the graceful transport shutdown future");
 
         assert!(brain.is_none());
         assert!(agent_connection.is_none());
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "process-exit shutdown must drop transport ownership"
+        );
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut saw_shutdown_retire = false;
@@ -678,6 +777,23 @@ mod session_attach_guard_transfer_tests {
         assert!(
             saw_shutdown_retire,
             "live-brain shutdown must emit BrainRetired{{Shutdown}}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_mcp_server_immediately_uses_force_abort_barrier_only() {
+        let probe = Arc::new(ImmediateMcpProbe::default());
+        let mut server = Some(Arc::clone(&probe));
+
+        shutdown_mcp_server_immediately(&mut server, None).await;
+
+        assert!(server.is_none());
+        assert!(probe.marked_retiring.load(Ordering::SeqCst));
+        assert!(probe.workers_cancelled.load(Ordering::SeqCst));
+        assert!(probe.force_waited.load(Ordering::SeqCst));
+        assert!(
+            !probe.graceful_polled.load(Ordering::SeqCst),
+            "immediate MCP shutdown must not poll graceful shutdown"
         );
     }
 
