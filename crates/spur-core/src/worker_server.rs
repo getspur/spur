@@ -4273,6 +4273,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_until_forced_preempts_graceful_handler_drain() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let signal_sink = Arc::new(HangingWorkerSignalSink::default());
+        let signal_sink_trait: Arc<dyn WorkerSignalSink> = signal_sink.clone();
+        let server = WorkerMcpServer::start(
+            "brain-A".into(),
+            worker_mcp_deps_fixture(pm, pro_feature_gate(), signal_sink_trait),
+        )
+        .await
+        .expect("start worker server");
+        server.register_delegation(
+            "del-late-force".into(),
+            DelegationContext {
+                enable_worker_progress: true,
+            },
+        );
+        let token = server.issue_token("del-late-force", Duration::from_secs(60));
+        let call_server = Arc::clone(&server);
+        let call = tokio::spawn(async move {
+            call_report_progress(call_server.as_ref(), &token, "hang until late force").await
+        });
+        signal_sink.entered.notified().await;
+        assert_eq!(server.active_count(), 1);
+
+        let force_shutdown = CancellationToken::new();
+        let shutdown_server = Arc::clone(&server);
+        let shutdown_force = force_shutdown.clone();
+        let shutdown = tokio::spawn(async move {
+            shutdown_server
+                .shutdown_until_forced(Duration::from_secs(5), shutdown_force)
+                .await
+        });
+        while !server.shutdown.is_cancelled() {
+            tokio::task::yield_now().await;
+        }
+        force_shutdown.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("late force request waited for the graceful handler deadline")
+            .expect("worker shutdown task panicked");
+        assert_eq!(server.active_count(), 0);
+        call.abort();
+        let _ = call.await;
+    }
+
+    #[tokio::test]
     async fn retirement_cancels_handler_registration_after_abort_all() {
         let registry = Arc::new(HandlerAbortRegistry::default());
         registry.abort_all();

@@ -665,7 +665,7 @@ mod tests {
         ServiceExt,
     };
     use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -726,6 +726,74 @@ mod tests {
     struct ModeSelectingFactory {
         graceful_calls: Arc<AtomicUsize>,
         immediate_calls: Arc<AtomicUsize>,
+    }
+
+    struct CancellationAwareStartingFactory {
+        start_entered: Arc<Notify>,
+        cleanup_started: Arc<Notify>,
+        cleanup_release: Arc<Notify>,
+        cleanup_complete: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl ProjectLoopRuntimeFactory for CancellationAwareStartingFactory {
+        async fn start(
+            &self,
+            cancel: CancellationToken,
+        ) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+            self.start_entered.notify_one();
+            cancel.cancelled().await;
+            self.cleanup_started.notify_one();
+            self.cleanup_release.notified().await;
+            self.cleanup_complete.store(true, Ordering::SeqCst);
+            anyhow::bail!("runtime start cancelled")
+        }
+    }
+
+    struct EscalatingDrainRuntime {
+        exit: Arc<Notify>,
+        graceful_started: Arc<Notify>,
+        immediate_started: Arc<Notify>,
+        immediate_release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ProjectLoopRuntimeInstance for EscalatingDrainRuntime {
+        fn begin_shutdown(
+            self: Box<Self>,
+            force_shutdown: CancellationToken,
+        ) -> ProjectLoopRuntimeDrain {
+            ProjectLoopRuntimeDrain::new(async move {
+                self.graceful_started.notify_one();
+                force_shutdown.cancelled().await;
+                self.immediate_started.notify_one();
+                self.immediate_release.notified().await;
+            })
+        }
+
+        async fn wait_for_exit(&mut self) {
+            self.exit.notified().await;
+        }
+    }
+
+    struct EscalatingDrainFactory {
+        runtime: std::sync::Mutex<Option<EscalatingDrainRuntime>>,
+    }
+
+    #[async_trait]
+    impl ProjectLoopRuntimeFactory for EscalatingDrainFactory {
+        async fn start(
+            &self,
+            _cancel: CancellationToken,
+        ) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+            Ok(Box::new(
+                self.runtime
+                    .lock()
+                    .expect("single escalating runtime lock")
+                    .take()
+                    .expect("escalating runtime starts once"),
+            ))
+        }
     }
 
     #[async_trait]
@@ -910,6 +978,100 @@ mod tests {
 
         assert_eq!(immediate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(graceful_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn immediate_shutdown_awaits_cancelled_start_cleanup_before_leadership_release() {
+        let repo = TempDir::new().expect("tempdir");
+        let start_entered = Arc::new(Notify::new());
+        let cleanup_started = Arc::new(Notify::new());
+        let cleanup_release = Arc::new(Notify::new());
+        let cleanup_complete = Arc::new(AtomicBool::new(false));
+        let first_factory = Arc::new(CancellationAwareStartingFactory {
+            start_entered: Arc::clone(&start_entered),
+            cleanup_started: Arc::clone(&cleanup_started),
+            cleanup_release: Arc::clone(&cleanup_release),
+            cleanup_complete: Arc::clone(&cleanup_complete),
+        });
+        let second_factory = Arc::new(CountingFactory::immediate());
+        let mut first = ProjectLoopRuntimeSupervisor::start_with(
+            repo.path().to_path_buf(),
+            first_factory,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        start_entered.notified().await;
+        let mut second = ProjectLoopRuntimeSupervisor::start_with(
+            repo.path().to_path_buf(),
+            Arc::clone(&second_factory) as Arc<dyn ProjectLoopRuntimeFactory>,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        wait_for_state(&second, ProjectLoopRuntimeState::Standby).await;
+
+        let first_shutdown = tokio::spawn(async move { first.shutdown_immediately().await });
+        cleanup_started.notified().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(second.state(), ProjectLoopRuntimeState::Standby);
+        assert!(!first_shutdown.is_finished());
+
+        cleanup_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), first_shutdown)
+            .await
+            .expect("immediate shutdown did not await startup cleanup")
+            .expect("startup shutdown task panicked");
+        assert!(cleanup_complete.load(Ordering::SeqCst));
+        wait_for_state(&second, ProjectLoopRuntimeState::LeaderRunning).await;
+        second.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn late_force_escalates_graceful_drain_and_holds_leadership_until_ack() {
+        let repo = TempDir::new().expect("tempdir");
+        let exit = Arc::new(Notify::new());
+        let graceful_started = Arc::new(Notify::new());
+        let immediate_started = Arc::new(Notify::new());
+        let immediate_release = Arc::new(Notify::new());
+        let first_factory = Arc::new(EscalatingDrainFactory {
+            runtime: std::sync::Mutex::new(Some(EscalatingDrainRuntime {
+                exit: Arc::clone(&exit),
+                graceful_started: Arc::clone(&graceful_started),
+                immediate_started: Arc::clone(&immediate_started),
+                immediate_release: Arc::clone(&immediate_release),
+            })),
+        });
+        let second_factory = Arc::new(CountingFactory::immediate());
+        let mut first = ProjectLoopRuntimeSupervisor::start_with(
+            repo.path().to_path_buf(),
+            first_factory,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        wait_for_state(&first, ProjectLoopRuntimeState::LeaderRunning).await;
+        let mut second = ProjectLoopRuntimeSupervisor::start_with(
+            repo.path().to_path_buf(),
+            Arc::clone(&second_factory) as Arc<dyn ProjectLoopRuntimeFactory>,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        wait_for_state(&second, ProjectLoopRuntimeState::Standby).await;
+
+        exit.notify_one();
+        graceful_started.notified().await;
+        let first_shutdown = tokio::spawn(async move { first.shutdown_immediately().await });
+        tokio::time::timeout(Duration::from_secs(1), immediate_started.notified())
+            .await
+            .expect("late force request did not preempt graceful drain");
+        assert!(!first_shutdown.is_finished());
+        assert_eq!(second.state(), ProjectLoopRuntimeState::Standby);
+
+        immediate_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), first_shutdown)
+            .await
+            .expect("immediate drain barrier did not acknowledge")
+            .expect("late-force shutdown task panicked");
+        wait_for_state(&second, ProjectLoopRuntimeState::LeaderRunning).await;
+        second.shutdown().await;
     }
 
     fn filesystem_acquirer() -> Arc<
