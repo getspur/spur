@@ -46,11 +46,13 @@ impl ProjectLoopRuntimeDrain {
 
 #[async_trait]
 pub(crate) trait ProjectLoopRuntimeInstance: Send {
-    async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain;
-
-    async fn shutdown_immediately(self: Box<Self>) -> ProjectLoopRuntimeDrain {
-        self.shutdown().await
-    }
+    /// Transfer runtime resources into one cancellation-aware drain. The
+    /// returned future must switch from graceful draining to force-abort when
+    /// `force_shutdown` is cancelled without dropping task-owning futures.
+    fn begin_shutdown(
+        self: Box<Self>,
+        force_shutdown: CancellationToken,
+    ) -> ProjectLoopRuntimeDrain;
 
     async fn wait_for_exit(&mut self) {
         std::future::pending::<()>().await;
@@ -59,7 +61,12 @@ pub(crate) trait ProjectLoopRuntimeInstance: Send {
 
 #[async_trait]
 pub(crate) trait ProjectLoopRuntimeFactory: Send + Sync {
-    async fn start(&self) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>>;
+    /// Start a runtime, cleaning up any partially-created resources before
+    /// returning when `cancel` is signalled.
+    async fn start(
+        &self,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>>;
 }
 
 pub(crate) struct ProjectLoopRuntimeSupervisor {
@@ -190,16 +197,10 @@ async fn run_supervisor(
                 );
                 loop {
                     let runtime = loop {
-                        let start = factory.start();
-                        tokio::pin!(start);
-                        match tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => None,
-                            result = &mut start => Some(result),
-                        } {
-                            None => break None,
-                            Some(Ok(runtime)) => break Some(runtime),
-                            Some(Err(error)) => {
+                        match factory.start(cancel.clone()).await {
+                            Ok(runtime) => break Some(runtime),
+                            Err(_error) if cancel.is_cancelled() => break None,
+                            Err(error) => {
                                 tracing::warn!(
                                     %error,
                                     "project L3 runtime failed to start; retaining leadership and retrying"
@@ -215,31 +216,45 @@ async fn run_supervisor(
                     let Some(mut runtime) = runtime else {
                         break;
                     };
+                    if cancel.is_cancelled() {
+                        let drain = runtime.begin_shutdown(force_shutdown.clone());
+                        if force_shutdown.is_cancelled() {
+                            state_tx.send_replace(ProjectLoopRuntimeState::LeaderDraining);
+                            drain.completion.await;
+                            drop(leadership);
+                            state_tx.send_replace(ProjectLoopRuntimeState::Stopped);
+                        } else {
+                            detach_leader_drain(leadership, drain, state_tx.clone());
+                        }
+                        return;
+                    }
                     state_tx.send_replace(ProjectLoopRuntimeState::LeaderRunning);
                     let unexpected_exit = tokio::select! {
                         biased;
                         _ = cancel.cancelled() => false,
                         _ = runtime.wait_for_exit() => true,
                     };
-                    let immediate = force_shutdown.is_cancelled();
-                    let mut drain = if immediate {
-                        runtime.shutdown_immediately().await
-                    } else {
-                        runtime.shutdown().await
-                    };
-                    if immediate {
-                        state_tx.send_replace(ProjectLoopRuntimeState::LeaderDraining);
-                        drain.completion.await;
-                        drop(leadership);
-                        state_tx.send_replace(ProjectLoopRuntimeState::Stopped);
-                        return;
-                    }
-                    if !unexpected_exit || cancel.is_cancelled() {
-                        detach_leader_drain(leadership, drain, state_tx.clone());
+                    let mut drain = runtime.begin_shutdown(force_shutdown.clone());
+                    if !unexpected_exit {
+                        if force_shutdown.is_cancelled() {
+                            state_tx.send_replace(ProjectLoopRuntimeState::LeaderDraining);
+                            drain.completion.await;
+                            drop(leadership);
+                            state_tx.send_replace(ProjectLoopRuntimeState::Stopped);
+                        } else {
+                            detach_leader_drain(leadership, drain, state_tx.clone());
+                        }
                         return;
                     }
                     tokio::select! {
                         biased;
+                        _ = force_shutdown.cancelled() => {
+                            state_tx.send_replace(ProjectLoopRuntimeState::LeaderDraining);
+                            drain.completion.await;
+                            drop(leadership);
+                            state_tx.send_replace(ProjectLoopRuntimeState::Stopped);
+                            return;
+                        }
                         _ = cancel.cancelled() => {
                             detach_leader_drain(leadership, drain, state_tx.clone());
                             return;
@@ -468,64 +483,10 @@ struct RunningProjectLoopRuntime {
 
 #[async_trait]
 impl ProjectLoopRuntimeInstance for RunningProjectLoopRuntime {
-    async fn shutdown(mut self: Box<Self>) -> ProjectLoopRuntimeDrain {
-        let deadline = tokio::time::Instant::now() + RUNTIME_SHUTDOWN_TIMEOUT;
-        self.server.mark_retiring();
-        self.server.cancel_in_flight_workers();
-        self.delegation_shutdown.cancel();
-        let mut pending_delegation = None;
-        if let Some(delegation_handle) = self.delegation_handle.take() {
-            let mut delegation_handle = delegation_handle;
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if tokio::time::timeout(remaining, &mut delegation_handle)
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    timeout_ms = RUNTIME_SHUTDOWN_TIMEOUT.as_millis() as u64,
-                    "project L3 delegation shutdown exceeded grace; force-aborting child"
-                );
-                delegation_handle.abort();
-                pending_delegation = Some(delegation_handle);
-            }
-        }
-
-        let pending_worker_server = self
-            .worker_mcp_servers
-            .remove(&self.system_id)
-            .map(|(_system_id, worker_server)| worker_server);
-        let server = Arc::clone(&self.server);
-        self.shutdown_transferred_to_drain = true;
-
-        ProjectLoopRuntimeDrain::new(async move {
-            let delegation_drain = async move {
-                if let Some(handle) = pending_delegation {
-                    let _ = handle.await;
-                }
-            };
-            let worker_server_drain = async move {
-                if let Some(worker_server) = pending_worker_server {
-                    let outcome = Arc::clone(&worker_server)
-                        .shutdown(RUNTIME_SHUTDOWN_TIMEOUT)
-                        .await;
-                    if !outcome.drained {
-                        tracing::warn!(
-                            timeout_ms = RUNTIME_SHUTDOWN_TIMEOUT.as_millis() as u64,
-                            active_at_deadline = outcome.active_at_deadline,
-                            "project L3 worker MCP server exceeded drain grace"
-                        );
-                    }
-                    worker_server.force_abort_handlers_and_wait().await;
-                }
-            };
-            let server_drain = async move {
-                server.force_abort_and_wait().await;
-            };
-            tokio::join!(delegation_drain, worker_server_drain, server_drain);
-        })
-    }
-
-    async fn shutdown_immediately(mut self: Box<Self>) -> ProjectLoopRuntimeDrain {
+    fn begin_shutdown(
+        mut self: Box<Self>,
+        force_shutdown: CancellationToken,
+    ) -> ProjectLoopRuntimeDrain {
         self.server.mark_retiring();
         self.server.cancel_in_flight_workers();
         self.delegation_shutdown.cancel();
@@ -538,15 +499,50 @@ impl ProjectLoopRuntimeInstance for RunningProjectLoopRuntime {
         self.shutdown_transferred_to_drain = true;
 
         ProjectLoopRuntimeDrain::new(async move {
+            let delegation_force = force_shutdown.clone();
             let delegation_drain = async move {
-                if let Some(handle) = delegation_handle {
-                    handle.abort();
-                    let _ = handle.await;
+                if let Some(mut handle) = delegation_handle {
+                    if delegation_force.is_cancelled() {
+                        handle.abort();
+                        let _ = handle.await;
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = delegation_force.cancelled() => {
+                                handle.abort();
+                                let _ = handle.await;
+                            }
+                            _ = tokio::time::sleep(RUNTIME_SHUTDOWN_TIMEOUT) => {
+                                tracing::warn!(
+                                    timeout_ms = RUNTIME_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                                    "project L3 delegation shutdown exceeded grace; force-aborting child"
+                                );
+                                handle.abort();
+                                let _ = handle.await;
+                            }
+                            _ = &mut handle => {}
+                        }
+                    }
                 }
             };
+
             let worker_server_drain = async move {
                 if let Some(worker_server) = worker_server {
-                    worker_server.shutdown_immediately().await;
+                    let outcome = Arc::clone(&worker_server)
+                        .shutdown_until_forced(RUNTIME_SHUTDOWN_TIMEOUT, force_shutdown.clone())
+                        .await;
+                    if !outcome.drained {
+                        tracing::warn!(
+                            timeout_ms = RUNTIME_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                            active_at_deadline = outcome.active_at_deadline,
+                            "project L3 worker MCP server exceeded drain grace"
+                        );
+                    }
+                    // Even a zero-active snapshot can race an already-accepted
+                    // request registering after the fence. Await the handler
+                    // registry's abort acknowledgement before leadership may
+                    // leave the drain.
+                    worker_server.force_abort_handlers_and_wait().await;
                 }
             };
             let server_drain = async move {
@@ -584,7 +580,13 @@ impl Drop for RunningProjectLoopRuntime {
 
 #[async_trait]
 impl ProjectLoopRuntimeFactory for ProjectLoopRuntimeDeps {
-    async fn start(&self) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+    async fn start(
+        &self,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+        if cancel.is_cancelled() {
+            anyhow::bail!("project L3 runtime start cancelled");
+        }
         let system_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(
             crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
         ));
@@ -629,26 +631,48 @@ impl ProjectLoopRuntimeFactory for ProjectLoopRuntimeDeps {
             repo_root: Some(self.repo_root.clone()),
             context_service_config: self.context_service_config.clone(),
         };
+        let enable_reconciler = Arc::clone(&server).enable_reconciler();
+        tokio::pin!(enable_reconciler);
+        let enable_result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                server.force_abort_and_wait().await;
+                anyhow::bail!("project L3 runtime start cancelled");
+            }
+            result = &mut enable_reconciler => result,
+        };
+        if let Err(error) = enable_result {
+            server.force_abort_and_wait().await;
+            return Err(error);
+        }
+        server.fast_forward_reconciler();
+        if cancel.is_cancelled() {
+            server.force_abort_and_wait().await;
+            anyhow::bail!("project L3 runtime start cancelled");
+        }
+
         let delegation_shutdown = CancellationToken::new();
         let delegation_handle = self.spawn_delegation_handler(
             delegation_channel,
             worker_mcp_fetcher,
             delegation_shutdown.clone(),
         );
-        if let Err(error) = Arc::clone(&server).enable_reconciler().await {
-            delegation_shutdown.cancel();
-            let _ = delegation_handle.await;
-            return Err(error);
-        }
-        server.fast_forward_reconciler();
-        Ok(Box::new(RunningProjectLoopRuntime {
+        let runtime = RunningProjectLoopRuntime {
             system_id,
             server,
             delegation_handle: Some(delegation_handle),
             delegation_shutdown,
             worker_mcp_servers: Arc::clone(&self.worker_mcp_servers),
             shutdown_transferred_to_drain: false,
-        }))
+        };
+        if cancel.is_cancelled() {
+            let force_shutdown = CancellationToken::new();
+            force_shutdown.cancel();
+            let drain = Box::new(runtime).begin_shutdown(force_shutdown);
+            drain.completion.await;
+            anyhow::bail!("project L3 runtime start cancelled");
+        }
+        Ok(Box::new(runtime))
     }
 }
 
@@ -675,7 +699,10 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeInstance for ImmediateRuntime {
-        async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain {
+        fn begin_shutdown(
+            self: Box<Self>,
+            _force_shutdown: CancellationToken,
+        ) -> ProjectLoopRuntimeDrain {
             ProjectLoopRuntimeDrain::completed()
         }
     }
@@ -684,7 +711,10 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeInstance for ExitImmediatelyRuntime {
-        async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain {
+        fn begin_shutdown(
+            self: Box<Self>,
+            _force_shutdown: CancellationToken,
+        ) -> ProjectLoopRuntimeDrain {
             ProjectLoopRuntimeDrain::completed()
         }
 
@@ -698,10 +728,14 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeInstance for BlockingRuntime {
-        async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain {
-            self.shutdown_started.notify_waiters();
-            self.shutdown_release.notified().await;
-            ProjectLoopRuntimeDrain::completed()
+        fn begin_shutdown(
+            self: Box<Self>,
+            _force_shutdown: CancellationToken,
+        ) -> ProjectLoopRuntimeDrain {
+            ProjectLoopRuntimeDrain::new(async move {
+                self.shutdown_started.notify_waiters();
+                self.shutdown_release.notified().await;
+            })
         }
     }
 
@@ -712,14 +746,17 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeInstance for ModeSelectingRuntime {
-        async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain {
-            self.graceful_calls.fetch_add(1, Ordering::SeqCst);
-            std::future::pending().await
-        }
-
-        async fn shutdown_immediately(self: Box<Self>) -> ProjectLoopRuntimeDrain {
-            self.immediate_calls.fetch_add(1, Ordering::SeqCst);
-            ProjectLoopRuntimeDrain::completed()
+        fn begin_shutdown(
+            self: Box<Self>,
+            force_shutdown: CancellationToken,
+        ) -> ProjectLoopRuntimeDrain {
+            if force_shutdown.is_cancelled() {
+                self.immediate_calls.fetch_add(1, Ordering::SeqCst);
+                ProjectLoopRuntimeDrain::completed()
+            } else {
+                self.graceful_calls.fetch_add(1, Ordering::SeqCst);
+                ProjectLoopRuntimeDrain::new(std::future::pending())
+            }
         }
     }
 
@@ -798,7 +835,10 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeFactory for ModeSelectingFactory {
-        async fn start(&self) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+        async fn start(
+            &self,
+            _cancel: CancellationToken,
+        ) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
             Ok(Box::new(ModeSelectingRuntime {
                 graceful_calls: Arc::clone(&self.graceful_calls),
                 immediate_calls: Arc::clone(&self.immediate_calls),
@@ -813,11 +853,13 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeInstance for ControlledDrainRuntime {
-        async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain {
-            self.drain_started.notify_one();
-            let drain_release = Arc::clone(&self.drain_release);
+        fn begin_shutdown(
+            self: Box<Self>,
+            _force_shutdown: CancellationToken,
+        ) -> ProjectLoopRuntimeDrain {
             ProjectLoopRuntimeDrain::new(async move {
-                drain_release.notified().await;
+                self.drain_started.notify_one();
+                self.drain_release.notified().await;
             })
         }
     }
@@ -835,7 +877,10 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeFactory for SingleRuntimeFactory {
-        async fn start(&self) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+        async fn start(
+            &self,
+            _cancel: CancellationToken,
+        ) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
             self.starts.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(
                 self.runtime
@@ -874,7 +919,10 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeFactory for ControlledDrainFactory {
-        async fn start(&self) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+        async fn start(
+            &self,
+            _cancel: CancellationToken,
+        ) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
             self.starts.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(ControlledDrainRuntime {
                 drain_started: Arc::clone(&self.drain_started),
@@ -896,7 +944,10 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeFactory for RestartingFactory {
-        async fn start(&self) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+        async fn start(
+            &self,
+            _cancel: CancellationToken,
+        ) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
             let attempt = self.starts.fetch_add(1, Ordering::SeqCst);
             if attempt == 0 {
                 Ok(Box::new(ExitImmediatelyRuntime))
@@ -926,7 +977,10 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeFactory for CountingFactory {
-        async fn start(&self) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+        async fn start(
+            &self,
+            _cancel: CancellationToken,
+        ) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
             self.starts.fetch_add(1, Ordering::SeqCst);
             match (&self.shutdown_started, &self.shutdown_release) {
                 (Some(started), Some(release)) => Ok(Box::new(BlockingRuntime {
@@ -1177,7 +1231,7 @@ mod tests {
             .await
             .expect("first runtime worker MCP server");
 
-        Box::new(first_runtime).shutdown().await;
+        let _ = Box::new(first_runtime).begin_shutdown(CancellationToken::new());
         let first_cache_retired = !deps.worker_mcp_servers.contains_key(&system_id);
 
         let (second_runtime, second_system_id) = bare_runtime(&deps, None);
@@ -1186,7 +1240,7 @@ mod tests {
             .await
             .expect("second runtime worker MCP server");
         let fresh_server = !Arc::ptr_eq(&first_worker, &second_worker);
-        Box::new(second_runtime).shutdown().await;
+        let _ = Box::new(second_runtime).begin_shutdown(CancellationToken::new());
         let second_cache_retired = !deps.worker_mcp_servers.contains_key(&system_id);
 
         if let Some((_id, lingering)) = deps.worker_mcp_servers.remove(&system_id) {
@@ -1220,7 +1274,7 @@ mod tests {
             .expect("blocking child did not start");
         let (runtime, _system_id) = bare_runtime(&deps, Some(delegation));
         let shutdown = tokio::spawn(async move {
-            let drain = Box::new(runtime).shutdown().await;
+            let drain = Box::new(runtime).begin_shutdown(CancellationToken::new());
             drain.completion.await;
         });
 
@@ -1262,7 +1316,7 @@ mod tests {
         started_rx.await.expect("callback task started");
         *runtime.server.root_handle.lock().unwrap() = Some(callback);
 
-        let drain = Box::new(runtime).shutdown().await;
+        let drain = Box::new(runtime).begin_shutdown(CancellationToken::new());
         drain.completion.await;
 
         tokio::time::timeout(Duration::from_secs(1), ack_rx)

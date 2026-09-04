@@ -2707,13 +2707,11 @@ impl WorkerMcpServer {
     /// Fence new worker calls, force-abort in-flight handlers, and await all
     /// owned server tasks without entering a graceful drain window.
     pub async fn shutdown_immediately(self: Arc<Self>) {
-        self.deps.handler_aborts.begin_closing();
-        self.shutdown.cancel();
-
-        let background_server = Arc::clone(&self);
-        let background = background_server.shutdown(Duration::ZERO);
-        let handlers = self.force_abort_handlers_and_wait();
-        let _ = tokio::join!(background, handlers);
+        let force_shutdown = CancellationToken::new();
+        force_shutdown.cancel();
+        let _ = self
+            .shutdown_until_forced(Duration::ZERO, force_shutdown)
+            .await;
     }
 
     /// Cancel the accept loop, drain in-flight dispatchers up to `deadline`,
@@ -2741,55 +2739,119 @@ impl WorkerMcpServer {
     /// Idempotent: a second call after shutdown finds the accept and flusher
     /// handles already taken and returns immediately with `drained = true`.
     pub async fn shutdown(self: Arc<Self>, deadline: Duration) -> ShutdownOutcome {
+        self.shutdown_until_forced(deadline, CancellationToken::new())
+            .await
+    }
+
+    /// Gracefully drain until `force_shutdown` is signalled, then immediately
+    /// abort and await every handler/background task. The force transition is
+    /// observed inside each wait so escalation never drops a future that owns
+    /// a task handle.
+    pub(crate) async fn shutdown_until_forced(
+        self: Arc<Self>,
+        deadline: Duration,
+        force_shutdown: CancellationToken,
+    ) -> ShutdownOutcome {
         let drain_deadline = Instant::now() + deadline;
         self.deps.handler_aborts.begin_closing();
         self.shutdown.cancel();
-        self.close_all_sessions(deadline).await;
+        let mut forced = force_shutdown.is_cancelled();
+        if !forced && !deadline.is_zero() {
+            let close_sessions = self.close_all_sessions(deadline);
+            tokio::pin!(close_sessions);
+            tokio::select! {
+                biased;
+                _ = force_shutdown.cancelled() => forced = true,
+                _ = &mut close_sessions => {}
+            }
+        }
 
         // Listener cancellation + session close-all prevents new work and
         // terminates active SSE streams. Drain in-flight dispatchers, bounded
         // by `deadline`.
-        let outcome = loop {
-            let active = self.active_count();
-            if active == 0 {
-                break ShutdownOutcome {
-                    drained: true,
-                    active_at_deadline: 0,
-                };
+        let mut active_at_deadline = self.active_count();
+        while !forced && active_at_deadline != 0 {
+            if force_shutdown.is_cancelled() {
+                forced = true;
+                break;
             }
             if Instant::now() >= drain_deadline {
                 tracing::warn!(
                     brain_session_id = %self.brain_session_id,
-                    active = active,
+                    active = active_at_deadline,
                     deadline_ms = deadline.as_millis() as u64,
                     "WorkerMcpServer drain deadline elapsed with in-flight dispatchers"
                 );
-                break ShutdownOutcome {
-                    drained: false,
-                    active_at_deadline: active,
-                };
+                break;
             }
-            tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
-        };
-
-        let accept_handle = self.accept_loop_handle.lock().take();
-        if let Some(handle) = accept_handle {
-            let wait = drain_deadline.saturating_duration_since(Instant::now());
-            await_or_abort_background_task(handle, wait).await;
+            tokio::select! {
+                biased;
+                _ = force_shutdown.cancelled() => forced = true,
+                _ = tokio::time::sleep(DRAIN_POLL_INTERVAL) => {
+                    active_at_deadline = self.active_count();
+                }
+            }
         }
 
+        let accept_handle = self.accept_loop_handle.lock().take();
         let flusher_handle = self.flusher_handle.lock().take();
-        if let Some(handle) = flusher_handle {
-            let wait = std::cmp::min(
-                Duration::from_secs(1),
-                drain_deadline.saturating_duration_since(Instant::now()),
-            );
-            await_or_abort_background_task(handle, wait).await;
+        let background = async {
+            let accept = async {
+                if let Some(handle) = accept_handle {
+                    let wait = drain_deadline.saturating_duration_since(Instant::now());
+                    await_or_abort_background_task_until_forced(
+                        handle,
+                        wait,
+                        force_shutdown.clone(),
+                    )
+                    .await;
+                }
+            };
+            let flusher = async {
+                if let Some(handle) = flusher_handle {
+                    let wait = std::cmp::min(
+                        Duration::from_secs(1),
+                        drain_deadline.saturating_duration_since(Instant::now()),
+                    );
+                    await_or_abort_background_task_until_forced(
+                        handle,
+                        wait,
+                        force_shutdown.clone(),
+                    )
+                    .await;
+                }
+            };
+            tokio::join!(accept, flusher);
+        };
+        tokio::pin!(background);
+        if forced {
+            let handlers = self.force_abort_handlers_and_wait();
+            tokio::join!(&mut background, handlers);
+        } else {
+            tokio::select! {
+                biased;
+                _ = force_shutdown.cancelled() => {
+                    forced = true;
+                    let handlers = self.force_abort_handlers_and_wait();
+                    tokio::join!(&mut background, handlers);
+                }
+                _ = &mut background => {}
+            }
         }
         // Reference held only to keep the deps Arc alive until shutdown
         // completes; explicit drop documents intent.
         drop(self.deps.clone());
-        outcome
+        if forced {
+            ShutdownOutcome {
+                drained: true,
+                active_at_deadline: self.active_count(),
+            }
+        } else {
+            ShutdownOutcome {
+                drained: active_at_deadline == 0,
+                active_at_deadline,
+            }
+        }
     }
 }
 
@@ -2798,9 +2860,18 @@ impl WorkerMcpServer {
 /// a fast-completing dispatcher doesn't materially extend shutdown latency.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-async fn await_or_abort_background_task(mut handle: JoinHandle<()>, wait: Duration) {
-    if !wait.is_zero() && tokio::time::timeout(wait, &mut handle).await.is_ok() {
-        return;
+async fn await_or_abort_background_task_until_forced(
+    mut handle: JoinHandle<()>,
+    wait: Duration,
+    force_shutdown: CancellationToken,
+) {
+    if !wait.is_zero() {
+        tokio::select! {
+            biased;
+            _ = force_shutdown.cancelled() => {}
+            _ = &mut handle => return,
+            _ = tokio::time::sleep(wait) => {}
+        }
     }
     handle.abort();
     let _ = handle.await;
