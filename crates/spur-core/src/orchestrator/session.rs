@@ -909,6 +909,45 @@ mod session_attach_guard_transfer_tests {
         }
     }
 
+    #[tokio::test]
+    async fn pre_cancelled_reconnect_preserves_brain_for_final_cleanup() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let mut brain = Some(fixture_brain_session("reconnect-shutdown"));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        shutdown.cancel();
+        let mut failures = std::collections::VecDeque::new();
+
+        let disposition = orchestrator
+            .reconnect_with_events(
+                &mut brain,
+                &shutdown,
+                None,
+                Some("test-brain"),
+                "connection died".to_string(),
+                &mut failures,
+                3,
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+
+        assert_eq!(disposition, ReconnectDisposition::Shutdown);
+        assert_eq!(
+            brain
+                .as_ref()
+                .map(|session| session.spur_session_id.0.as_str()),
+            Some("reconnect-shutdown"),
+            "a pre-cancelled reconnect must leave the old brain owned by final cleanup"
+        );
+        brain
+            .take()
+            .expect("brain remains caller-owned")
+            .delegation_handle
+            .abort();
+    }
+
     fn fixture_select_option(
         id: &str,
         current: &str,

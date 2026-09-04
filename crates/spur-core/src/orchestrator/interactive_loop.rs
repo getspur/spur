@@ -4077,6 +4077,7 @@ mod cancel_stream_variant_tests {
 mod immediate_shutdown_ingress_tests {
     use super::{
         admit_interactive_operation, await_brain_startup_or_shutdown, await_interactive_operation,
+        drain_history_stream_or_shutdown,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -4152,6 +4153,27 @@ mod immediate_shutdown_ingress_tests {
             dropped.load(Ordering::SeqCst),
             "startup RAII must unwind before cancellation is acknowledged"
         );
+    }
+
+    #[tokio::test]
+    async fn history_drain_yields_to_shutdown() {
+        let shutdown = CancellationToken::new();
+        let task_shutdown = shutdown.clone();
+        let drain = tokio::spawn(async move {
+            let mut history: std::pin::Pin<
+                Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>,
+            > = Box::pin(futures::stream::pending());
+            drain_history_stream_or_shutdown(&task_shutdown, &mut history, |_| {}).await
+        });
+        tokio::task::yield_now().await;
+
+        shutdown.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), drain)
+            .await
+            .expect("history drain did not acknowledge shutdown")
+            .expect("history drain task panicked");
+
+        assert_eq!(result, None);
     }
 }
 
