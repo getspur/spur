@@ -257,12 +257,16 @@ pub fn route_with_caps(
                         SubmitDecision::Empty
                     } else if pinned_route.is_none()
                         && config_id == "model"
-                        && caps.is_some_and(|c| c.supports_set_model())
+                        && caps.is_some_and(|c| {
+                            c.capability_evidence.is_none() && c.supports_set_model()
+                        })
                     {
                         // Wave B.4 / spec §6.3: prefer the dedicated
-                        // `session/set_model` dispatch. Fallback when
-                        // `set_model` is unavailable stays via the
-                        // existing SetSessionConfigOption path —
+                        // semantic model dispatch for legacy snapshots that
+                        // predate capability evidence. Complete evidence uses
+                        // the pinned route above; incomplete evidence keeps the
+                        // standard SetSessionConfigOption entry fail-closed.
+                        // When direct `set_model` is unavailable,
                         // NativeAcpConnection::set_session_model also
                         // applies its own state-gated fallback for
                         // calls that flow through it directly.

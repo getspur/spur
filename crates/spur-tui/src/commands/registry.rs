@@ -40,6 +40,8 @@ struct CacheSnapshot {
 struct AdvertisedCommandSet {
     entries: Vec<CommandEntry>,
     routes: std::collections::BTreeMap<String, PinnedCapabilityRoute>,
+    protocol_authority: std::collections::BTreeSet<String>,
+    incomplete_evidence_names: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -125,8 +127,14 @@ impl CommandRegistry {
     /// handle. Entries are pre-built by the synthesizer in spur-acp from
     /// advertised session data such as `NewSessionResponse.config_options`.
     pub fn set_advertised_commands(&mut self, handle: &str, entries: impl Into<AdvertisedEntries>) {
-        let (entries, routes) = entries.into().into_parts();
-        let commands = AdvertisedCommandSet { entries, routes };
+        let (entries, routes, protocol_authority, incomplete_evidence_names) =
+            entries.into().into_parts();
+        let commands = AdvertisedCommandSet {
+            entries,
+            routes,
+            protocol_authority,
+            incomplete_evidence_names,
+        };
         if let Some(slot) = self
             .advertised_commands
             .iter_mut()
@@ -180,6 +188,26 @@ impl CommandRegistry {
                     .map(move |(name, pinned)| ((handle.clone(), name.clone()), *pinned))
             })
             .collect::<HashMap<_, _>>();
+        let protocol_authority = self
+            .advertised_commands
+            .iter()
+            .flat_map(|(handle, commands)| {
+                commands
+                    .protocol_authority
+                    .iter()
+                    .map(move |name| (handle.clone(), name.clone()))
+            })
+            .collect::<HashSet<_>>();
+        let incomplete_evidence_names = self
+            .advertised_commands
+            .iter()
+            .flat_map(|(handle, commands)| {
+                commands
+                    .incomplete_evidence_names
+                    .iter()
+                    .map(move |name| (handle.clone(), name.clone()))
+            })
+            .collect::<HashSet<_>>();
 
         let spur_local_entries = SpurLocalSource::entries();
 
@@ -200,6 +228,28 @@ impl CommandRegistry {
         let mut select_reduced = |handle: &str, entry: &CommandEntry, layer: RegistryLayer| {
             let name = normalize_command_name(&entry.name);
             let key = (handle.to_owned(), name);
+            if protocol_authority.contains(&key) {
+                if !matches!(layer, RegistryLayer::Advertised)
+                    || !matches!(
+                        entry.dispatch,
+                        Dispatch::SetSessionConfigOption { .. } | Dispatch::SetSessionMode
+                    )
+                {
+                    return true;
+                }
+                let mut normalized_entry = entry.clone();
+                normalized_entry.name = key.1.clone();
+                if let Some(index) = reduced_index.get(&key).copied() {
+                    reduced_entries[index] = (4, normalized_entry);
+                } else {
+                    reduced_index.insert(key, reduced_entries.len());
+                    reduced_entries.push((4, normalized_entry));
+                }
+                return true;
+            }
+            if incomplete_evidence_names.contains(&key) {
+                return true;
+            }
             let Some(pinned) = reduced_routes.get(&key) else {
                 return false;
             };
