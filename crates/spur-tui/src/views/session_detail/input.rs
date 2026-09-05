@@ -24,6 +24,21 @@ impl SessionDetailView {
         // out-of-the-box.
         let key = super::super::normalize_macos_option(key);
 
+        // Session paging aliases must be resolved before key ownership so
+        // they follow PageUp/PageDown through pickers and the composer too.
+        let key = match (key.code, key.modifiers) {
+            (KeyCode::Char('u' | 'd'), KeyModifiers::CONTROL) => KeyEvent {
+                code: if key.code == KeyCode::Char('u') {
+                    KeyCode::PageUp
+                } else {
+                    KeyCode::PageDown
+                },
+                modifiers: KeyModifiers::NONE,
+                ..key
+            },
+            _ => key,
+        };
+
         // Dismiss the auth banner on any keystroke (before any further routing).
         // The mode-toggle binding below still fires because the action is
         // dispatched regardless.

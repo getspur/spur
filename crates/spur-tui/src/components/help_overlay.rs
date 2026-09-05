@@ -124,6 +124,8 @@ impl HelpOverlay {
             Line::from(""),
             header(" Session Detail"),
             Line::from("  (type)             Input goes to chat bar"),
+            Line::from("  Ctrl-U / PgUp      Page up"),
+            Line::from("  Ctrl-D / PgDn      Page down"),
             Line::from("  Enter              Send message"),
             Line::from("  ! + Enter          Interrupt & send"),
             Line::from("  Esc                Back to Dashboard"),
@@ -134,7 +136,7 @@ impl HelpOverlay {
             header(" Editing Shortcuts"),
             Line::from("  Ctrl-P / Ctrl-N    Previous / next input history"),
             Line::from("  Ctrl-R / Alt-R     Fuzzy search input history"),
-            Line::from("  Ctrl-U             Delete to start of line"),
+            Line::from("  Ctrl-U             Delete to line start (outside sessions)"),
             Line::from("  Ctrl-K             Delete to end of line"),
             Line::from("  Ctrl-W             Delete previous word"),
         ]);

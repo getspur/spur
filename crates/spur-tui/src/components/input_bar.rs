@@ -408,7 +408,9 @@ impl InputBar {
         matches!(self.mode, EditMode::Vim(VimMode::Normal))
     }
 
-    /// Process a key event.
+    /// Process a key event after the containing view claims its shortcuts.
+    /// SessionDetail claims Ctrl+U/D for transcript paging; other consumers
+    /// retain this component's editing and Vim scrolling bindings.
     pub fn handle_key(&mut self, key: KeyEvent) -> HandleOutcome {
         let input = self.keyevent_to_input(key);
 
