@@ -173,8 +173,10 @@ The final review found three emergency-host gaps: `BrainSession` dropped a detac
 
 - RED: `1f0ad49ff` requires delegation-parent abort on `BrainSession` drop; `98af4e1e4` requires force shutdown to join an admitted partial HTTP connection.
 - GREEN: `20f95b9f5` makes delegation and root owners abort-on-drop, fences admitted interactive RPC/prompt/terminal/pump waits, joins notification pumps in active and reconnect teardown, and replaces generic Axum serving with SPUR-owned per-connection tasks plus a force token and transitive tracker barrier. The root stop callback also joins its server-specific signal watcher.
+- Review follow-up: `d1604e279` exposed the cooperative-root callback race; `79ba7c850` keeps the force token published while join ownership is held, uses signal-only force for real roots, constructs the outer guard before spawning, and disarms it only after acknowledged normal completion. `1e83466c0` removes the obsolete non-joining startup abort helper and records the intentional shutdown-coordination signatures for strict lint.
 - Verification: 28 session ownership tests passed with 1 ignored; the 26-test shutdown unit slice passed; both streamable-HTTP transport tests passed; all integration targets compiled in the broad filtered run and the pending-collector shutdown integration passed. The run later encountered a reproducible unrelated beads fixture failure before its shutdown assertion (`execute_epic` reported that the generated epic had no children).
-- Solver evidence: pre-solve `sol_99132f5d82cb4ea5`; post-solve `sol_a746d2d953c94993` found the unsafe early-exit/detached-child counterexample UNSAT in 27 ms.
+- Final verification: all 3 root-completion guard tests and the cooperative callback test passed; the 26-test shutdown slice, both streamable-HTTP transport tests, and all 9 `spur-interactive` tests passed. A strict affected-package no-deps Clippy run passed with only the two unrelated baseline lints explicitly exempted.
+- Solver evidence: pre-solve `sol_99132f5d82cb4ea5`; initial post-solve `sol_a746d2d953c94993`; final review-aware post-solve `sol_5d0f5175ab954e27` found the unsafe early-exit, hard-aborted cooperative root, missing pre-polled guard, and graceful-misclassification counterexample UNSAT in 32 ms.
 
 ## Final verification
 
