@@ -459,6 +459,65 @@ mod plan_browser_navigation_tests {
     }
 }
 
+#[cfg(test)]
+mod session_paging_tests {
+    use super::super::super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn ctrl_paging_routes_through_app_and_respects_help() {
+        let mut app = App::new_for_tests();
+        let session = SessionId("paging-session".into());
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: "test-brain".into(),
+            session: session.clone(),
+        }));
+        let detail = app.session_detail.as_mut().unwrap();
+        detail.push_user_message(&"history line\n".repeat(100));
+        detail
+            .input_bar_mut_for_test()
+            .set_text("keep draft".into(), 4);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        for chord in ['u', 'd'] {
+            let before = app
+                .session_detail
+                .as_ref()
+                .unwrap()
+                .react_trace()
+                .anchor_for_tests();
+            app.help_visible = true;
+            app.handle_crossterm_event_for_test(KeyEvent::new(
+                KeyCode::Char(chord),
+                KeyModifiers::CONTROL,
+            ));
+            assert_eq!(
+                app.session_detail
+                    .as_ref()
+                    .unwrap()
+                    .react_trace()
+                    .anchor_for_tests(),
+                before
+            );
+
+            app.help_visible = false;
+            app.handle_crossterm_event_for_test(KeyEvent::new(
+                KeyCode::Char(chord),
+                KeyModifiers::CONTROL,
+            ));
+            let detail = app.session_detail.as_ref().unwrap();
+            assert_ne!(
+                detail.react_trace().anchor_for_tests(),
+                before,
+                "Ctrl+{chord} must scroll"
+            );
+            assert_eq!(detail.input_bar_text(), "keep draft");
+            assert_eq!(app.current_view, ViewId::SessionDetail(session.clone()));
+        }
+    }
+}
+
 /// Inc 2 (bd-d587.2): unit tests for the view_history stack semantics.
 /// Drives `navigate_to` / `navigate_back` directly (not via Action arms)
 /// so the invariants are tested in isolation from action-routing logic.

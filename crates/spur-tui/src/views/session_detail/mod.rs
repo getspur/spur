@@ -2183,6 +2183,87 @@ mod tests {
             .join("\n")
     }
 
+    #[test]
+    fn ctrl_paging_matches_page_keys_without_editing_drafts() {
+        use crate::components::input_bar::{EditMode, VimMode};
+
+        for mode in [
+            EditMode::Emacs,
+            EditMode::Vim(VimMode::Normal),
+            EditMode::Vim(VimMode::Insert),
+        ] {
+            for draft in ["", "keep this draft"] {
+                for (chord, page) in [('u', KeyCode::PageUp), ('d', KeyCode::PageDown)] {
+                    let mut actual = make_view();
+                    let mut expected = make_view();
+                    for view in [&mut actual, &mut expected] {
+                        view.set_edit_mode(mode);
+                        view.input_bar.set_text(draft.into(), draft.len() / 2);
+                        view.push_user_message(&"history line\n".repeat(100));
+                        render_view_text(view, 80, 24);
+                        // Leave room to scroll in either direction.
+                        view.react_trace.page_up();
+                        view.react_trace.page_up();
+                    }
+                    let before = actual.react_trace.anchor_for_tests();
+                    let cursor = actual.input_bar.cursor();
+                    let expected_action =
+                        expected.handle_key(KeyEvent::new(page, KeyModifiers::NONE), &test_ctx());
+                    let action = actual.handle_key(
+                        KeyEvent::new(KeyCode::Char(chord), KeyModifiers::CONTROL),
+                        &test_ctx(),
+                    );
+
+                    assert!(
+                        matches!(
+                            (&action, &expected_action),
+                            (Some(Action::ScrollUp), Some(Action::ScrollUp))
+                                | (Some(Action::ScrollDown), Some(Action::ScrollDown))
+                        ),
+                        "Ctrl+{chord} in {mode:?} with draft {draft:?}: {action:?}"
+                    );
+                    assert_ne!(expected.react_trace.anchor_for_tests(), before);
+                    assert_eq!(
+                        actual.react_trace.anchor_for_tests(),
+                        expected.react_trace.anchor_for_tests()
+                    );
+                    assert_eq!(actual.input_bar.text(), draft);
+                    assert_eq!(actual.input_bar.cursor(), cursor);
+                    assert_eq!(actual.input_bar.mode(), mode);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_paging_respects_session_modal_and_history_picker() {
+        for chord in ['u', 'd'] {
+            for modal in [false, true] {
+                let mut view = make_view();
+                view.input_bar.set_text("keep draft".into(), 4);
+                if modal {
+                    view.cancel_confirm_open = true;
+                } else {
+                    view.completion.open_history(vec![
+                        crate::input_history::InputHistoryEntry::new(
+                            crate::input_history::InputStateSnapshot::from_text("old prompt"),
+                        ),
+                    ]);
+                }
+                let before = view.react_trace.anchor_for_tests();
+                let action = view.handle_key(
+                    KeyEvent::new(KeyCode::Char(chord), KeyModifiers::CONTROL),
+                    &test_ctx(),
+                );
+                assert!(action.is_none());
+                assert_eq!(view.react_trace.anchor_for_tests(), before);
+                assert_eq!(view.input_bar.text(), "keep draft");
+                assert_eq!(view.cancel_confirm_open, modal);
+                assert_eq!(view.completion.is_active(), !modal);
+            }
+        }
+    }
+
     fn prompt_dispatched_event(
         session: &spur_acp::SessionId,
         turn_kind: &str,
