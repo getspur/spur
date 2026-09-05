@@ -38,22 +38,28 @@ pub struct AdvertisedEntries {
     /// names suppress same-handle vendor candidates without asserting which
     /// dispatch route the unfinished epoch would have selected.
     incomplete_evidence_names: BTreeSet<String>,
+    /// Prompt command names decoded from complete command notifications
+    /// before the evidence epoch became incomplete. These may retain an
+    /// existing dynamic `PromptText` entry without pinning a route.
+    incomplete_prompt_names: BTreeSet<String>,
 }
 
+type AdvertisedEntryParts = (
+    Vec<CommandEntry>,
+    BTreeMap<String, PinnedCapabilityRoute>,
+    BTreeSet<String>,
+    BTreeSet<String>,
+    BTreeSet<String>,
+);
+
 impl AdvertisedEntries {
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Vec<CommandEntry>,
-        BTreeMap<String, PinnedCapabilityRoute>,
-        BTreeSet<String>,
-        BTreeSet<String>,
-    ) {
+    pub(crate) fn into_parts(self) -> AdvertisedEntryParts {
         (
             self.entries,
             self.routes,
             self.protocol_authority,
             self.incomplete_evidence_names,
+            self.incomplete_prompt_names,
         )
     }
 }
@@ -65,6 +71,7 @@ impl From<Vec<CommandEntry>> for AdvertisedEntries {
             routes: BTreeMap::new(),
             protocol_authority: BTreeSet::new(),
             incomplete_evidence_names: BTreeSet::new(),
+            incomplete_prompt_names: BTreeSet::new(),
         }
     }
 }
@@ -138,11 +145,18 @@ impl AdvertisedSource {
                 .iter()
                 .flat_map(|capability| reduced_command_names(capability, &config_names))
                 .collect();
+            let incomplete_prompt_names = snapshot
+                .reduced_capabilities()
+                .iter()
+                .filter(|capability| capability.key.kind == CapabilityKind::Command)
+                .flat_map(|capability| reduced_command_names(capability, &config_names))
+                .collect();
             return AdvertisedEntries {
                 entries,
                 routes: BTreeMap::new(),
                 protocol_authority,
                 incomplete_evidence_names,
+                incomplete_prompt_names,
             };
         }
 
@@ -197,6 +211,7 @@ impl AdvertisedSource {
             routes,
             protocol_authority: BTreeSet::new(),
             incomplete_evidence_names: BTreeSet::new(),
+            incomplete_prompt_names: BTreeSet::new(),
         }
     }
 

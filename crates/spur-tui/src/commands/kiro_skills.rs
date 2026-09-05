@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use spur_acp::{AgentKind, CommandsConfig};
+use spur_acp::{AgentKind, CommandsConfig, DispatchKind};
 
 use crate::agents::build_entry;
 use crate::commands::entry::CommandEntry;
@@ -54,12 +54,14 @@ pub fn skill_command_entries(
     cfg: &CommandsConfig,
     skills: &[DiscoveredKiroSkill],
 ) -> Vec<CommandEntry> {
+    let mut prompt_cfg = cfg.clone();
+    prompt_cfg.dispatch = DispatchKind::PromptText;
     skills
         .iter()
         .map(|skill| {
             let cmd =
                 spur_acp::AvailableCommand::new(skill.name.clone(), skill.description.clone());
-            build_entry(handle, cfg, &cmd)
+            build_entry(handle, &prompt_cfg, &cmd)
         })
         .collect()
 }

@@ -42,6 +42,7 @@ struct AdvertisedCommandSet {
     routes: std::collections::BTreeMap<String, PinnedCapabilityRoute>,
     protocol_authority: std::collections::BTreeSet<String>,
     incomplete_evidence_names: std::collections::BTreeSet<String>,
+    incomplete_prompt_names: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -127,13 +128,19 @@ impl CommandRegistry {
     /// handle. Entries are pre-built by the synthesizer in spur-acp from
     /// advertised session data such as `NewSessionResponse.config_options`.
     pub fn set_advertised_commands(&mut self, handle: &str, entries: impl Into<AdvertisedEntries>) {
-        let (entries, routes, protocol_authority, incomplete_evidence_names) =
-            entries.into().into_parts();
+        let (
+            entries,
+            routes,
+            protocol_authority,
+            incomplete_evidence_names,
+            incomplete_prompt_names,
+        ) = entries.into().into_parts();
         let commands = AdvertisedCommandSet {
             entries,
             routes,
             protocol_authority,
             incomplete_evidence_names,
+            incomplete_prompt_names,
         };
         if let Some(slot) = self
             .advertised_commands
@@ -208,6 +215,16 @@ impl CommandRegistry {
                     .map(move |name| (handle.clone(), name.clone()))
             })
             .collect::<HashSet<_>>();
+        let incomplete_prompt_names = self
+            .advertised_commands
+            .iter()
+            .flat_map(|(handle, commands)| {
+                commands
+                    .incomplete_prompt_names
+                    .iter()
+                    .map(move |name| (handle.clone(), name.clone()))
+            })
+            .collect::<HashSet<_>>();
 
         let spur_local_entries = SpurLocalSource::entries();
 
@@ -248,6 +265,12 @@ impl CommandRegistry {
                 return true;
             }
             if incomplete_evidence_names.contains(&key) {
+                if incomplete_prompt_names.contains(&key)
+                    && matches!(layer, RegistryLayer::Dynamic)
+                    && matches!(entry.dispatch, Dispatch::PromptText { .. })
+                {
+                    return false;
+                }
                 return true;
             }
             let Some(pinned) = reduced_routes.get(&key) else {
