@@ -365,6 +365,10 @@ impl Orchestrator {
 
     /// Scope A hot-swap: bare `/brain` opens picker; named switch retires the
     /// live brain and spawns the target type (warm restart, one live brain).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "brain switching coordinates the live ACP/MCP/pump owners plus the shared shutdown fence"
+    )]
     async fn handle_switch_brain(
         &mut self,
         name: Option<String>,

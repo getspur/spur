@@ -207,13 +207,6 @@ pub(crate) struct StartupRecoveryTaskHandle {
 }
 
 impl StartupRecoveryTaskHandle {
-    pub(crate) fn abort(mut self) {
-        if let Some(tx) = self.cancel_tx.take() {
-            let _ = tx.send(());
-        }
-        self.handle.abort();
-    }
-
     pub(crate) async fn abort_and_wait(mut self) {
         if let Some(tx) = self.cancel_tx.take() {
             let _ = tx.send(());

@@ -2781,6 +2781,10 @@ impl Orchestrator {
         RetireDisposition::Shutdown
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "retirement consumes each live brain resource and the force-shutdown fence as separate owners"
+    )]
     pub(super) async fn retire_active_brain(
         &mut self,
         brain: &mut Option<BrainSession>,
