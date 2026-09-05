@@ -794,6 +794,81 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_evidence_keeps_notified_skill_commands_visible() {
+        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
+
+        let identity = evidence_identity();
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
+        let caps = with_incomplete_evidence(with_complete_evidence(
+            SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp),
+            14,
+            vec![capability_evidence(
+                &identity,
+                CapabilityKind::Command,
+                "commands",
+                EvidenceClaim::CandidateObserved,
+                EvidenceProvenance::ObservedNotification,
+                &[
+                    ("$spurpower-solve", "Solve"),
+                    ("custom-skill", "Custom skill"),
+                ],
+            )],
+        ));
+        let mut cfg = spur_acp::AgentConfig::with_defaults("codex");
+        cfg.kind = AgentKind::CodexAcp;
+        let commands = vec![
+            spur_acp::AvailableCommand::new("$spurpower-solve", "Solve"),
+            spur_acp::AvailableCommand::new("custom-skill", "Custom skill"),
+        ];
+
+        // Both startup orderings must preserve a complete command notification.
+        for notification_first in [false, true] {
+            let mut view = crate::views::session_detail::SessionDetailView::new(
+                spur_acp::SessionId("sid".to_owned()),
+                "codex".to_owned(),
+                "brain".to_owned(),
+                std::path::PathBuf::from("/tmp"),
+                std::sync::Arc::new(cfg.clone()),
+                Vec::new(),
+            );
+            if notification_first {
+                view.apply_available_commands(&commands);
+            }
+            view.apply_advertised_commands(Some(&caps), &[]);
+            if !notification_first {
+                view.apply_available_commands(&commands);
+            }
+            let registry = view.command_registry();
+            for command in &commands {
+                let visible = registry.available_commands_for_session(Some(&caps));
+                let entries = visible
+                    .iter()
+                    .filter(|entry| entry.name == command.name)
+                    .collect::<Vec<_>>();
+                assert_eq!(entries.len(), 1, "missing skill {}", command.name);
+                assert!(matches!(entries[0].dispatch, Dispatch::PromptText { .. }));
+                assert_eq!(pinned_route_for_command(&caps, &command.name), None);
+                let input = format!("/{} inspect this", command.name);
+                let SubmitDecision::Send { blocks, .. } =
+                    route_with_caps(&input, &[], &[], registry, false, Some(&caps))
+                else {
+                    panic!("skill must dispatch as a prompt");
+                };
+                assert!(
+                    matches!(blocks.as_slice(), [spur_acp::ContentBlock::Text(text)]
+                    if text.text == input)
+                );
+            }
+            view.apply_available_commands(&[]);
+            assert!(view
+                .command_registry()
+                .resolve("/$spurpower-solve")
+                .is_none());
+        }
+    }
+
+    #[test]
     fn incomplete_evidence_keeps_standard_config_commands_on_protocol_dispatch() {
         use crate::commands::submit_router::{route_with_caps, SubmitDecision};
 

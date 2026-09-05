@@ -319,6 +319,26 @@ mod tests {
     }
 
     #[test]
+    fn filesystem_skill_commands_ignore_vendor_dispatch_config() {
+        let tmp = TempDir::new().expect("tmp");
+        write_skill(
+            &tmp.path().join(".kiro/skills"),
+            "custom-skill",
+            "---\nname: custom-skill\ndescription: Use this skill\n---\n",
+        );
+        let cfg = CommandsConfig {
+            dispatch: DispatchKind::VendorExec,
+            exec_method: Some("_kiro.dev/commands/execute".to_owned()),
+            ..Default::default()
+        };
+        let entries =
+            maybe_merge_kiro_skills(AgentKind::Kiro, "kiro", &cfg, tmp.path(), None, Vec::new());
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].dispatch,
+            Dispatch::PromptText { normalized } if normalized == "/custom-skill"));
+    }
+
+    #[test]
     fn skill_entries_are_prompt_text() {
         let cfg = CommandsConfig {
             dispatch: DispatchKind::PromptText,
