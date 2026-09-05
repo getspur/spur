@@ -627,6 +627,20 @@ mod tests {
         caps
     }
 
+    fn with_incomplete_evidence(mut caps: SpurAgentCaps) -> SpurAgentCaps {
+        let mut wire = serde_json::to_value(
+            caps.capability_evidence
+                .take()
+                .expect("test caps must include capability evidence"),
+        )
+        .expect("snapshot must serialize");
+        wire["completeness"] = serde_json::json!("incomplete");
+        caps.capability_evidence = Some(
+            serde_json::from_value(wire).expect("incomplete evidence snapshot must deserialize"),
+        );
+        caps
+    }
+
     fn caps_with_modes() -> SpurAgentCaps {
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
@@ -720,6 +734,100 @@ mod tests {
         let entries = AdvertisedSource::entries_from_caps("gemini", &caps);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "model");
+    }
+
+    #[test]
+    fn incomplete_evidence_keeps_standard_config_commands_on_protocol_dispatch() {
+        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
+        new.config_options = Some(vec![
+            SessionConfigOption::select(
+                SessionConfigId::new("model"),
+                "Model",
+                "test-model",
+                vec![SessionConfigSelectOption::new("test-model", "Test Model")],
+            ),
+            SessionConfigOption::select(
+                SessionConfigId::new("reasoning_effort"),
+                "Reasoning effort",
+                "high",
+                vec![SessionConfigSelectOption::new("high", "High")],
+            ),
+        ]);
+        let identity = evidence_identity();
+        let caps = with_incomplete_evidence(with_complete_evidence(
+            SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp),
+            14,
+            vec![
+                model_evidence(
+                    &identity,
+                    EvidenceClaim::NativeVerified,
+                    EvidenceProvenance::StandardAdvertisement,
+                ),
+                capability_evidence(
+                    &identity,
+                    CapabilityKind::Effort,
+                    "reasoning_effort",
+                    EvidenceClaim::NativeVerified,
+                    EvidenceProvenance::StandardAdvertisement,
+                    &[("high", "High")],
+                ),
+            ],
+        ));
+
+        let entries = AdvertisedSource::entries_from_caps("codex", &caps);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model", "effort"]
+        );
+        assert!(entries
+            .iter()
+            .all(|entry| matches!(entry.dispatch, Dispatch::SetSessionConfigOption { .. })));
+        assert_eq!(pinned_route_for_command(&caps, "model"), None);
+        assert_eq!(pinned_route_for_command(&caps, "effort"), None);
+
+        let mut registry = crate::commands::CommandRegistry::new();
+        registry.set_advertised_commands("codex", entries);
+        assert!(matches!(
+            route_with_caps(
+                "/model test-model",
+                &[],
+                &[],
+                &registry,
+                false,
+                Some(&caps),
+            ),
+            SubmitDecision::SetSessionConfigOption { ref config_id, ref value, .. }
+                if config_id == "model" && value == "test-model"
+        ));
+        assert!(matches!(
+            route_with_caps(
+                "/effort high",
+                &[],
+                &[],
+                &registry,
+                false,
+                Some(&caps),
+            ),
+            SubmitDecision::SetSessionConfigOption { ref config_id, ref value, .. }
+                if config_id == "reasoning_effort" && value == "high"
+        ));
+    }
+
+    #[test]
+    fn incomplete_evidence_does_not_enable_vendor_native_commands() {
+        let caps = with_incomplete_evidence(grok_caps());
+
+        let entries = AdvertisedSource::entries_from_caps("grok", &caps);
+
+        assert!(entries.is_empty());
+        assert_eq!(pinned_route_for_command(&caps, "model"), None);
+        assert_eq!(pinned_route_for_command(&caps, "effort"), None);
     }
 
     #[test]
