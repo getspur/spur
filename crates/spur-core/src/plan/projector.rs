@@ -1511,7 +1511,7 @@ pub async fn project_plan_from_beads(
         );
         dependency_issue_ids.sort();
         dependency_issue_ids.dedup();
-        let depends_on = dependency_issue_ids
+        let mut depends_on = dependency_issue_ids
             .iter()
             .map(|dependency| {
                 task_id_by_issue_id
@@ -1519,7 +1519,9 @@ pub async fn project_plan_from_beads(
                     .cloned()
                     .unwrap_or_else(|| dependency.clone())
             })
-            .collect();
+            .collect::<Vec<_>>();
+        depends_on.sort();
+        depends_on.dedup();
 
         let (agent, _agent_fallback) = agent_for_issue(&projected_task.issue);
 
