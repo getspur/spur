@@ -9595,6 +9595,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn derive_epic_plan_rejects_closed_external_dep_from_pm() {
+        let repo = tempfile::TempDir::new().expect("temp repo");
+        let beads_dir = repo.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create .beads");
+        let mut workspace = spur_pm::test_workspace::TestBeadsWorkspace::init();
+        let epic_id = workspace.create_epic("Epic");
+        workspace.add_label(&epic_id, "spur:agent:codex");
+        let child_id = workspace.create_issue("Child task");
+        let external_id = workspace.create_issue("External closed dep");
+        workspace
+            .storage
+            .add_dependency(&child_id, &epic_id, "parent-child", "test")
+            .expect("add structural child");
+        workspace.add_dep(&child_id, &external_id);
+        workspace.close_issue(&external_id);
+        workspace.copy_db_to(&beads_dir);
+
+        let pm = spur_pm::PmService::try_new(None, true, false, repo.path(), None)
+            .await
+            .expect("PmService::try_new")
+            .expect("beads pm");
+        let child = pm.get_issue(&child_id).await.expect("get child issue");
+        assert!(
+            child.blocked_by.is_empty(),
+            "closed external prerequisites must be absent from the active blocker view"
+        );
+
+        let err = derive_epic_plan(&pm, pro_feature_gate().as_ref(), &epic_id, None, &["codex"])
+            .await
+            .expect_err("closed external deps should not satisfy derive_epic_plan");
+
+        assert!(
+            err.contains(&external_id) && err.contains("status=closed"),
+            "unexpected error: {err}"
+        );
+    }
+
     // ─── emit_epic_completion_audit durable-state contract ───────────────
 
     struct FailingAddCommentAdvanced;

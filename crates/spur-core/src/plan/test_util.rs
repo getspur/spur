@@ -470,3 +470,194 @@ pub fn mock_worker_completion(
         .map_err(|error| anyhow::anyhow!("send delegation result: {error:?}"))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MockPm;
+    use crate::plan::PmLike;
+
+    #[tokio::test]
+    async fn mock_pm_keeps_parent_and_external_dependency_edges_distinct() {
+        let pm = MockPm::new();
+        let epic = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Epic".to_string(),
+                issue_type: Some("epic".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("create epic");
+        let external = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "External prerequisite".to_string(),
+                issue_type: Some("task".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("create external prerequisite");
+        let child = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Child".to_string(),
+                issue_type: Some("task".to_string()),
+                parent: Some(epic.clone()),
+                depends_on: vec![external.clone()],
+                ..Default::default()
+            })
+            .await
+            .expect("create child");
+
+        assert_eq!(
+            pm.issue(&child).await.blocked_by,
+            vec![external.clone()],
+            "parent ownership must not leak into the active blocker view"
+        );
+
+        let graph = pm
+            .issue_subgraph_json(&epic)
+            .await
+            .expect("mock structural graph");
+        let edges = graph
+            .adjacency
+            .expect("mock graph adjacency")
+            .edges
+            .expect("mock graph edges");
+        assert!(edges.iter().any(|edge| {
+            edge.from == epic
+                && edge.to == child
+                && edge.edge_type.as_deref() == Some("parent-child")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.from == external && edge.to == child && edge.edge_type.as_deref() == Some("blocks")
+        }));
+
+        pm.update_issue(
+            &external,
+            spur_pm::IssueUpdate {
+                status: Some("closed".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close external prerequisite");
+        assert!(
+            pm.issue(&child).await.blocked_by.is_empty(),
+            "closed prerequisites must leave the active blocker view"
+        );
+
+        let closed_graph = pm
+            .issue_subgraph_json(&epic)
+            .await
+            .expect("mock structural graph after close");
+        assert!(
+            closed_graph
+                .adjacency
+                .expect("mock graph adjacency")
+                .edges
+                .expect("mock graph edges")
+                .iter()
+                .any(|edge| {
+                    edge.from == external
+                        && edge.to == child
+                        && edge.edge_type.as_deref() == Some("blocks")
+                }),
+            "closed prerequisite history must remain structural"
+        );
+
+        spur_pm::BeadsAdvanced::remove_dependency(&pm, &child, &external)
+            .await
+            .expect("remove external prerequisite");
+        let removed_graph = pm
+            .issue_subgraph_json(&epic)
+            .await
+            .expect("mock structural graph after remove");
+        assert!(!removed_graph
+            .adjacency
+            .expect("mock graph adjacency")
+            .edges
+            .expect("mock graph edges")
+            .iter()
+            .any(|edge| {
+                edge.from == external
+                    && edge.to == child
+                    && edge.edge_type.as_deref() == Some("blocks")
+            }));
+
+        pm.add_dependency(&child, &external)
+            .await
+            .expect("re-add closed prerequisite");
+        assert!(
+            pm.issue(&child).await.blocked_by.is_empty(),
+            "re-adding a closed prerequisite must not reactivate it"
+        );
+        let readded_graph = pm
+            .issue_subgraph_json(&epic)
+            .await
+            .expect("mock structural graph after re-add");
+        assert!(readded_graph
+            .adjacency
+            .expect("mock graph adjacency")
+            .edges
+            .expect("mock graph edges")
+            .iter()
+            .any(|edge| {
+                edge.from == external
+                    && edge.to == child
+                    && edge.edge_type.as_deref() == Some("blocks")
+            }));
+    }
+
+    #[tokio::test]
+    async fn mock_pm_external_dependency_graph_tracks_add_and_remove() {
+        let pm = MockPm::new();
+        let prerequisite = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Prerequisite".to_string(),
+                issue_type: Some("task".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("create prerequisite");
+        let dependent = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Dependent".to_string(),
+                issue_type: Some("task".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("create dependent");
+
+        pm.add_dependency(&dependent, &prerequisite)
+            .await
+            .expect("add dependency");
+        let added_graph = pm
+            .issue_subgraph_json(&dependent)
+            .await
+            .expect("mock graph after add");
+        assert!(added_graph
+            .adjacency
+            .expect("mock graph adjacency")
+            .edges
+            .expect("mock graph edges")
+            .iter()
+            .any(|edge| {
+                edge.from == prerequisite
+                    && edge.to == dependent
+                    && edge.edge_type.as_deref() == Some("blocks")
+            }));
+
+        spur_pm::BeadsAdvanced::remove_dependency(&pm, &dependent, &prerequisite)
+            .await
+            .expect("remove dependency");
+        let removed_graph = pm
+            .issue_subgraph_json(&dependent)
+            .await
+            .expect("mock graph after remove");
+        assert!(!removed_graph
+            .adjacency
+            .expect("mock graph adjacency")
+            .edges
+            .expect("mock graph edges")
+            .iter()
+            .any(|edge| edge.from == prerequisite && edge.to == dependent));
+    }
+}

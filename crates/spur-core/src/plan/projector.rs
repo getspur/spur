@@ -3024,6 +3024,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_plan_from_beads_extended_spec_keeps_active_external_gate() {
+        let plan_id = "extended-external-gate-plan";
+        let epic = spur_pm::Issue {
+            issue_type: Some("epic".to_string()),
+            ..issue(
+                "bd-extended-external-epic",
+                "open",
+                vec![crate::plan::labels::plan_id(plan_id)],
+                Vec::new(),
+            )
+        };
+        let external = issue("bd-extended-external", "open", Vec::new(), Vec::new());
+        let task = spur_pm::Issue {
+            issue_type: Some("task".to_string()),
+            ..issue(
+                "bd-extended-external-task",
+                "open",
+                vec![
+                    crate::plan::labels::plan_id(plan_id),
+                    crate::plan::labels::plan_task_id("T1"),
+                    crate::plan::labels::agent("codex"),
+                ],
+                vec![external.id.clone()],
+            )
+        };
+        let comments = HashMap::from([(
+            task.id.clone(),
+            vec![comment(
+                "extended-external-spec",
+                crate::plan::audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
+                    task_id: "T1".to_string(),
+                    context_files: Vec::new(),
+                    planned_write_files: None,
+                    profile: None,
+                    skills: None,
+                    model: None,
+                    effort: None,
+                    config_overrides: None,
+                    task_text: None,
+                    agent: Some("codex".to_string()),
+                    depends_on: Some(Vec::new()),
+                }),
+                0,
+            )],
+        )]);
+        let pm = TestPm::new(vec![epic, external.clone(), task], comments, "closed");
+
+        let projected = super::project_plan_from_beads(&pm, plan_id, &pro_feature_gate())
+            .await
+            .expect("project extended persisted plan");
+
+        assert_eq!(projected.tasks.len(), 1);
+        assert_eq!(
+            projected.tasks[0].spec.depends_on,
+            vec![external.id],
+            "durable task history must not discard a newly active external gate"
+        );
+        assert!(matches!(projected.tasks[0].status, PlanTaskStatus::Pending));
+    }
+
+    #[tokio::test]
     async fn project_plan_from_beads_fails_when_legacy_dependency_graph_is_unavailable() {
         let plan_id = "missing-graph-plan";
         let epic = spur_pm::Issue {
