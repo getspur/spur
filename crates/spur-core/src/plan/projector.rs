@@ -1310,6 +1310,38 @@ pub fn plan_submit_brain_session_id(audits: &[AuditSentinelKind]) -> Option<Brai
     })
 }
 
+fn structural_task_dependencies(
+    graph: spur_pm::graph::DependencyGraph,
+    task_issue_ids: &HashSet<String>,
+) -> anyhow::Result<HashMap<String, Vec<String>>> {
+    let adjacency = graph
+        .adjacency
+        .ok_or_else(|| anyhow::anyhow!("plan dependency graph did not return JSON adjacency"))?;
+    let mut dependencies_by_issue_id: HashMap<String, Vec<String>> = HashMap::new();
+
+    for edge in adjacency.edges.unwrap_or_default() {
+        if !task_issue_ids.contains(&edge.from) || !task_issue_ids.contains(&edge.to) {
+            continue;
+        }
+        if !matches!(
+            edge.edge_type.as_deref(),
+            Some("blocks" | "conditional-blocks" | "waits-for")
+        ) {
+            continue;
+        }
+        dependencies_by_issue_id
+            .entry(edge.to)
+            .or_default()
+            .push(edge.from);
+    }
+
+    for dependencies in dependencies_by_issue_id.values_mut() {
+        dependencies.sort();
+        dependencies.dedup();
+    }
+    Ok(dependencies_by_issue_id)
+}
+
 pub async fn project_plan_from_beads(
     pm: &dyn crate::plan::PmLike,
     plan_id: &str,
@@ -1377,6 +1409,7 @@ pub async fn project_plan_from_beads(
         model: Option<String>,
         effort: Option<String>,
         config_overrides: Option<HashMap<String, String>>,
+        durable_depends_on: Option<Vec<String>>,
     }
 
     let mut projected_tasks = Vec::with_capacity(tasks.len());
@@ -1386,6 +1419,7 @@ pub async fn project_plan_from_beads(
             adv.list_comments(&task_issue.id).await?,
         )?;
         let task_spec = latest_task_spec(&audits);
+        let durable_depends_on = latest_extended_task_spec(&audits).2;
         let (
             task_id,
             context_files,
@@ -1418,6 +1452,7 @@ pub async fn project_plan_from_beads(
             model,
             effort,
             config_overrides,
+            durable_depends_on,
         });
     }
 
@@ -1425,6 +1460,20 @@ pub async fn project_plan_from_beads(
         .iter()
         .map(|task| (task.issue.id.clone(), task.task_id.clone()))
         .collect();
+    let task_issue_ids = task_id_by_issue_id.keys().cloned().collect::<HashSet<_>>();
+    let structural_dependencies_by_issue_id = if projected_tasks
+        .iter()
+        .any(|task| task.durable_depends_on.is_none())
+    {
+        let graph = pm.issue_subgraph_json(&epic.id).await.map_err(|error| {
+            anyhow::anyhow!(
+                "failed to fetch structural dependency graph for persisted plan {plan_id}: {error}"
+            )
+        })?;
+        structural_task_dependencies(graph, &task_issue_ids)?
+    } else {
+        HashMap::new()
+    };
     let mut entries = Vec::with_capacity(projected_tasks.len());
 
     for projected_task in &projected_tasks {
@@ -1446,11 +1495,13 @@ pub async fn project_plan_from_beads(
         let issue_is_closed = projected_task.issue.status == closed_status;
         let terminal_audit = latest_terminal_audit_kind(&projected_task.audits);
         let attempt = project_entry_attempt(&projected_task.audits, &status);
-        let depends_on = projected_task
-            .issue
-            .blocked_by
-            .iter()
-            .filter(|dependency| *dependency != &epic.id)
+        let dependency_issue_ids = projected_task
+            .durable_depends_on
+            .as_ref()
+            .or_else(|| structural_dependencies_by_issue_id.get(&projected_task.issue.id));
+        let depends_on = dependency_issue_ids
+            .into_iter()
+            .flatten()
             .map(|dependency| {
                 task_id_by_issue_id
                     .get(dependency)

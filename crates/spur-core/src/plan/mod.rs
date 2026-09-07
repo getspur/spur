@@ -1225,15 +1225,10 @@ pub fn derive_epic_plan_from_issues(
         // etc. Task text belongs in the issue body, not a label.
         let task_text = child.body.clone();
 
-        // 4e. Map blocked_by: keep intra-subgraph deps; validate/warn external.
-        //
-        // The epic's own id appears in every child's blocked_by because beads
-        // flattens the `parent-child` edge into blocked_by (see
-        // BLOCKING_TYPES in spur-pm/src/beads.rs). That edge is structural
-        // containment, NOT an execution dependency — skip it so the pure
-        // function doesn't mistakenly treat the epic as a missing external
-        // dep. (The async wrapper applies the same skip when collecting
-        // external_dep_statuses; both must agree.)
+        // 4e. Map the active blocked_by view: keep intra-subgraph deps and
+        // validate/warn external blockers. Parent-child is not part of this
+        // scheduling view, but retain the epic-id guard for legacy/synthetic
+        // callers that still provide the former flattened representation.
         let mut depends_on: Vec<String> = Vec::new();
         for b in &child.blocked_by {
             if b == &epic.id {
@@ -1303,9 +1298,9 @@ pub fn derive_epic_plan_from_issues(
 
 /// Async PmService-fetching wrapper around `derive_epic_plan_from_issues`.
 ///
-/// Fetches the epic issue, lists all issues and fetches each one, keeps only
-/// direct children (issues whose `blocked_by` contains `epic_id`), fetches
-/// external-dep statuses, then delegates to the pure derivation function.
+/// Fetches the epic issue, obtains its direct children from typed structural
+/// graph edges, fetches those issues and active external blockers, then
+/// delegates to the pure derivation function.
 ///
 /// `known_agents` is a slice of agent names sourced from the configured
 /// `WorkerInfo` list on `McpCallbackServer`.
@@ -1322,40 +1317,33 @@ pub async fn derive_epic_plan(
         .await
         .map_err(|e| format!("failed to fetch epic '{epic_id}': {e}"))?;
 
-    // 2. List all issues and fetch full details for each to find children.
-    //    A child is an issue whose blocked_by list contains epic_id
-    //    (the beads parent-child dependency type is included in blocked_by).
-    // TODO(phase3): N+1 fetch — one get_issue per summary to detect children.
-    //   Mitigate by adding IssueFilter.issue_type = Some("task") scoping, or
-    //   by exposing a `parent` field on IssueSummary so children can be found
-    //   without individual fetches.
-    let summaries = pm
-        .list_issues(spur_pm::IssueFilter {
-            limit: Some(500),
-            ..Default::default()
-        })
+    // 2. Parent-child ownership is structural, while Issue::blocked_by is the
+    //    active scheduling view. Read the fresh typed graph once and keep only
+    //    direct, correctly-directed ownership edges from this epic.
+    let graph = pm
+        .issue_subgraph_json(epic_id)
         .await
-        .map_err(|e| format!("failed to list issues: {e}"))?;
+        .map_err(|e| format!("failed to fetch structural graph for epic '{epic_id}': {e}"))?;
+    let adjacency = graph.adjacency.ok_or_else(|| {
+        format!("structural graph for epic '{epic_id}' did not return JSON adjacency")
+    })?;
+    let mut child_ids = adjacency
+        .edges
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|edge| edge.from == epic_id && edge.edge_type.as_deref() == Some("parent-child"))
+        .map(|edge| edge.to)
+        .collect::<Vec<_>>();
+    child_ids.sort();
+    child_ids.dedup();
 
-    let mut children: Vec<spur_pm::Issue> = Vec::new();
-    for summary in &summaries {
-        if summary.id == epic_id {
-            continue;
-        }
-        let full = pm
-            .get_issue(&summary.id)
-            .await
-            .map_err(|e| format!("failed to fetch issue '{}': {e}", summary.id))?;
-        // Child detection uses blocked_by rather than a `parent` field because
-        // `spur_pm::Issue` has no `parent`: the beads adapter flattens the
-        // `parent-child` edge (see beads.rs BLOCKING_TYPES) into `blocked_by`.
-        // Contract: `br create-issue --parent=<epic>` unconditionally inserts
-        // the epic's id into the child's blocked_by. If that changes, this
-        // filter silently returns zero children and execute_epic errors with
-        // "epic has no children".
-        if full.blocked_by.iter().any(|b| b == epic_id) {
-            children.push(full);
-        }
+    let mut children: Vec<spur_pm::Issue> = Vec::with_capacity(child_ids.len());
+    for child_id in child_ids {
+        children.push(
+            pm.get_issue(&child_id)
+                .await
+                .map_err(|e| format!("failed to fetch child issue '{child_id}': {e}"))?,
+        );
     }
 
     // 3. Collect external dep statuses: for each blocked_by reference in any
