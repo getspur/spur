@@ -155,6 +155,45 @@ fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
         .collect()
 }
 
+fn add_plan_submit_comment(repo: &Path, epic_id: &str, plan_id: &str, task_ids: Vec<String>) {
+    let comment = audit_sentinel::encode_comment(&AuditSentinelKind::PlanSubmit {
+        plan_id: plan_id.to_string(),
+        epic_issue_id: epic_id.to_string(),
+        task_ids,
+        base_snapshot_branch: None,
+        base_snapshot_oid: None,
+        execution_mode: None,
+        brain_session_id: None,
+        explicit_base: None,
+    });
+    run_br(repo, &["comments", "add", epic_id, &comment]);
+}
+
+fn add_task_spec_comment(repo: &Path, issue_id: &str, task_id: &str) {
+    let comment = audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
+        task_id: task_id.to_string(),
+        context_files: Vec::new(),
+        planned_write_files: None,
+        profile: None,
+        skills: None,
+        model: None,
+        effort: None,
+        config_overrides: None,
+        task_text: None,
+        agent: Some("codex".to_string()),
+        depends_on: None,
+    });
+    run_br(repo, &["comments", "add", issue_id, &comment]);
+}
+
+fn issue_plan_ids(issue: &spur_pm::Issue) -> Vec<String> {
+    issue
+        .labels
+        .iter()
+        .filter_map(|label| labels::parse_plan_id(label).map(str::to_string))
+        .collect()
+}
+
 fn extract_submit_plan_task_issue_id(response: &serde_json::Value, task_id: &str) -> String {
     assert!(
         response.get("error").is_none(),
@@ -2543,6 +2582,158 @@ async fn tick_once_index_hygiene_is_idempotent_and_preserves_type_b_labels() {
         .labels
         .iter()
         .any(|label| label == &labels::delegation_id("del-current")));
+}
+
+#[tokio::test]
+async fn tick_once_index_hygiene_recovers_plan_membership_from_structural_parent() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    );
+
+    let parent_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan A Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    let blocker_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Unrelated Plan B Blocker",
+            "--priority",
+            "2",
+        ],
+    ));
+    let restored_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Restore Membership",
+            "--priority",
+            "2",
+        ],
+    ));
+    let retained_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Retain Membership Against Blocker",
+            "--priority",
+            "2",
+        ],
+    ));
+    let direct_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Direct Audit Wins",
+            "--priority",
+            "2",
+        ],
+    ));
+    let no_parent_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "No Parent Control",
+            "--priority",
+            "2",
+        ],
+    ));
+
+    for issue_id in [&restored_id, &retained_id, &direct_id] {
+        run_br(dir.path(), &["dep", "add", issue_id, &parent_id]);
+    }
+    for issue_id in [&retained_id, &direct_id] {
+        run_br(dir.path(), &["dep", "add", issue_id, &blocker_id]);
+    }
+
+    add_plan_submit_comment(
+        dir.path(),
+        &parent_id,
+        "PLAN-A",
+        vec!["restore".into(), "retain".into(), "direct".into()],
+    );
+    add_plan_submit_comment(dir.path(), &blocker_id, "PLAN-B", Vec::new());
+    add_task_spec_comment(dir.path(), &restored_id, "restore");
+    add_task_spec_comment(dir.path(), &retained_id, "retain");
+    add_task_spec_comment(dir.path(), &direct_id, "direct");
+    add_task_spec_comment(dir.path(), &no_parent_id, "no-parent");
+
+    label_issue(dir.path(), &retained_id, &labels::plan_id("PLAN-A"));
+    label_issue(dir.path(), &direct_id, &labels::plan_id("PLAN-A"));
+    label_issue(dir.path(), &no_parent_id, &labels::plan_id("PLAN-A"));
+    let direct_transition = audit_sentinel::encode_comment(&AuditSentinelKind::TaskTransition {
+        plan_id: "PLAN-DIRECT".to_string(),
+        task_id: "direct".to_string(),
+        from_status: "pending".to_string(),
+        to_status: "pending".to_string(),
+    });
+    run_br(
+        dir.path(),
+        &["comments", "add", &direct_id, &direct_transition],
+    );
+
+    let restored_before = pm.get_issue(&restored_id).await.expect("restored issue");
+    assert!(restored_before.blocked_by.is_empty());
+    let retained_before = pm.get_issue(&retained_id).await.expect("retained issue");
+    assert_eq!(retained_before.blocked_by, vec![blocker_id.clone()]);
+    assert!(!retained_before.blocked_by.contains(&parent_id));
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        None,
+        common::server_builder::pro_feature_gate(),
+    );
+    reconciler.tick_once().await.expect("first hygiene sweep");
+    reconciler.tick_once().await.expect("second hygiene sweep");
+
+    assert_eq!(
+        issue_plan_ids(&pm.get_issue(&restored_id).await.expect("restored issue")),
+        vec!["PLAN-A"]
+    );
+    assert_eq!(
+        issue_plan_ids(&pm.get_issue(&retained_id).await.expect("retained issue")),
+        vec!["PLAN-A"]
+    );
+    assert_eq!(
+        issue_plan_ids(&pm.get_issue(&direct_id).await.expect("direct issue")),
+        vec!["PLAN-DIRECT"]
+    );
+    assert!(
+        issue_plan_ids(&pm.get_issue(&no_parent_id).await.expect("no-parent issue")).is_empty()
+    );
 }
 
 #[tokio::test]

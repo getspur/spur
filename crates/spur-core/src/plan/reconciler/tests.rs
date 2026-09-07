@@ -4321,6 +4321,7 @@ impl spur_pm::BeadsAdvanced for ParentFallbackAdvanced {
 
 struct ParentFallbackPm {
     issue: spur_pm::Issue,
+    graph: spur_pm::graph::DependencyGraph,
     advanced: ParentFallbackAdvanced,
 }
 
@@ -4337,12 +4338,41 @@ impl crate::plan::PmLike for ParentFallbackPm {
         Ok(())
     }
 
+    async fn issue_subgraph_json(
+        &self,
+        _id: &str,
+    ) -> anyhow::Result<spur_pm::graph::DependencyGraph> {
+        Ok(self.graph.clone())
+    }
+
     fn closed_status(&self) -> &str {
         "closed"
     }
 
     fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
         Some(&self.advanced)
+    }
+}
+
+fn parent_fallback_graph(parents: &[&str]) -> spur_pm::graph::DependencyGraph {
+    spur_pm::graph::DependencyGraph {
+        format: Some("json".to_string()),
+        nodes: parents.len() + 1,
+        edges: parents.len(),
+        adjacency: Some(spur_pm::graph::AdjacencyData {
+            nodes: Vec::new(),
+            edges: Some(
+                parents
+                    .iter()
+                    .map(|parent| spur_pm::graph::GraphEdge {
+                        from: (*parent).to_string(),
+                        to: "bd-child".to_string(),
+                        edge_type: Some("parent-child".to_string()),
+                    })
+                    .collect(),
+            ),
+        }),
+        ..Default::default()
     }
 }
 
@@ -4389,7 +4419,7 @@ fn plan_submit_comment(plan_id: &str, epic_id: &str) -> spur_pm::Comment {
 }
 
 #[tokio::test]
-async fn expected_plan_id_from_parent_epic_is_deterministic_when_blocked_by_reversed() {
+async fn expected_plan_id_from_parent_epic_uses_structural_parent_not_effective_blocker() {
     let issue_summary = spur_pm::IssueSummary {
         id: "bd-child".to_string(),
         source: spur_pm::PmSource::Beads,
@@ -4413,50 +4443,68 @@ async fn expected_plan_id_from_parent_epic_is_deterministic_when_blocked_by_reve
     );
     let feature_gate = pro_feature_gate();
 
-    let pm_forward = Arc::new(ParentFallbackPm {
-        issue: parent_fallback_issue(vec!["bd-parent-b".to_string(), "bd-parent-a".to_string()]),
-        advanced: ParentFallbackAdvanced {
-            comments_by_issue: comments_by_issue.clone(),
-        },
-    });
-    let reconciler_forward = Reconciler::new_with_pm_like(
-        ReconcilerConfig::default(),
-        pm_forward.clone() as Arc<dyn crate::plan::PmLike>,
-        Arc::new(Notify::new()),
-        None,
-        None,
-        Arc::clone(&feature_gate),
-    );
-    let forward = reconciler_forward
-        .expected_plan_id_from_parent_epic(
-            crate::plan::PmLike::advanced(pm_forward.as_ref()).expect("advanced"),
-            &issue_summary,
-        )
-        .await
-        .expect("forward parent fallback");
-
-    let pm_reverse = Arc::new(ParentFallbackPm {
-        issue: parent_fallback_issue(vec!["bd-parent-a".to_string(), "bd-parent-b".to_string()]),
+    let pm = Arc::new(ParentFallbackPm {
+        issue: parent_fallback_issue(vec!["bd-parent-b".to_string()]),
+        graph: parent_fallback_graph(&["bd-parent-a"]),
         advanced: ParentFallbackAdvanced { comments_by_issue },
     });
-    let reconciler_reverse = Reconciler::new_with_pm_like(
+    let reconciler = Reconciler::new_with_pm_like(
         ReconcilerConfig::default(),
-        pm_reverse.clone() as Arc<dyn crate::plan::PmLike>,
+        pm.clone() as Arc<dyn crate::plan::PmLike>,
         Arc::new(Notify::new()),
         None,
         None,
         feature_gate,
     );
-    let reverse = reconciler_reverse
+    let resolved = reconciler
         .expected_plan_id_from_parent_epic(
-            crate::plan::PmLike::advanced(pm_reverse.as_ref()).expect("advanced"),
+            crate::plan::PmLike::advanced(pm.as_ref()).expect("advanced"),
             &issue_summary,
         )
         .await
-        .expect("reversed parent fallback");
+        .expect("structural parent fallback");
 
-    assert_eq!(forward, reverse);
-    assert_eq!(forward.as_deref(), Some("PLAN-A"));
+    assert_eq!(resolved.as_deref(), Some("PLAN-A"));
+}
+
+#[tokio::test]
+async fn expected_plan_id_from_parent_epic_rejects_ambiguous_structural_parents() {
+    let issue_summary = spur_pm::IssueSummary {
+        id: "bd-child".to_string(),
+        source: spur_pm::PmSource::Beads,
+        title: "Child".to_string(),
+        status: "open".to_string(),
+        labels: vec![],
+        url: "https://example.invalid/bd-child".to_string(),
+        priority: None,
+        issue_type: Some("task".to_string()),
+        assignee: None,
+        description: None,
+    };
+    let pm = Arc::new(ParentFallbackPm {
+        issue: parent_fallback_issue(Vec::new()),
+        graph: parent_fallback_graph(&["bd-parent-a", "bd-parent-b"]),
+        advanced: ParentFallbackAdvanced {
+            comments_by_issue: std::collections::HashMap::new(),
+        },
+    });
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm.clone() as Arc<dyn crate::plan::PmLike>,
+        Arc::new(Notify::new()),
+        None,
+        None,
+        pro_feature_gate(),
+    );
+    let error = reconciler
+        .expected_plan_id_from_parent_epic(
+            crate::plan::PmLike::advanced(pm.as_ref()).expect("advanced"),
+            &issue_summary,
+        )
+        .await
+        .expect_err("multiple structural parents must fail safely");
+
+    assert!(error.to_string().contains("multiple structural parents"));
 }
 
 #[tokio::test]
