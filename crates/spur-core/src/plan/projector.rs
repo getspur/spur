@@ -2337,6 +2337,7 @@ mod tests {
         issues_by_id: HashMap<String, spur_pm::Issue>,
         comments_by_issue_id: HashMap<String, Vec<spur_pm::Comment>>,
         closed_status: String,
+        dependency_graph: spur_pm::graph::DependencyGraph,
     }
 
     impl TestPm {
@@ -2345,6 +2346,45 @@ mod tests {
             comments_by_issue_id: HashMap<String, Vec<spur_pm::Comment>>,
             closed_status: &str,
         ) -> Self {
+            let graph_nodes = issues
+                .iter()
+                .map(|issue| spur_pm::graph::GraphNode {
+                    id: issue.id.clone(),
+                    ..Default::default()
+                })
+                .collect();
+            let graph_edges = issues
+                .iter()
+                .flat_map(|issue| {
+                    issue.blocked_by.iter().map(|dependency| {
+                        let edge_type = issues
+                            .iter()
+                            .find(|candidate| candidate.id == *dependency)
+                            .and_then(|candidate| candidate.issue_type.as_deref())
+                            .map(|issue_type| {
+                                if issue_type == "epic" {
+                                    "parent-child"
+                                } else {
+                                    "blocks"
+                                }
+                            })
+                            .unwrap_or("blocks");
+                        spur_pm::graph::GraphEdge {
+                            from: dependency.clone(),
+                            to: issue.id.clone(),
+                            edge_type: Some(edge_type.to_string()),
+                        }
+                    })
+                })
+                .collect();
+            let dependency_graph = spur_pm::graph::DependencyGraph {
+                format: Some("json".to_string()),
+                adjacency: Some(spur_pm::graph::AdjacencyData {
+                    nodes: graph_nodes,
+                    edges: Some(graph_edges),
+                }),
+                ..Default::default()
+            };
             let issues_by_id = issues
                 .into_iter()
                 .map(|issue| (issue.id.clone(), issue))
@@ -2353,7 +2393,22 @@ mod tests {
                 issues_by_id,
                 comments_by_issue_id,
                 closed_status: closed_status.to_string(),
+                dependency_graph,
             }
+        }
+
+        fn with_graph_edges(mut self, edges: Vec<spur_pm::graph::GraphEdge>) -> Self {
+            self.dependency_graph
+                .adjacency
+                .as_mut()
+                .expect("test graph adjacency")
+                .edges = Some(edges);
+            self
+        }
+
+        fn without_graph_adjacency(mut self) -> Self {
+            self.dependency_graph.adjacency = None;
+            self
         }
     }
 
@@ -2410,6 +2465,13 @@ mod tests {
 
         fn closed_status(&self) -> &str {
             &self.closed_status
+        }
+
+        async fn issue_subgraph_json(
+            &self,
+            _id: &str,
+        ) -> anyhow::Result<spur_pm::graph::DependencyGraph> {
+            Ok(self.dependency_graph.clone())
         }
 
         fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
@@ -2696,6 +2758,253 @@ mod tests {
         assert_eq!(
             serialized_by_id["files"].get("planned_write_files"),
             Some(&serde_json::json!(["src/runtime.rs", "src/outbox.rs"]))
+        );
+    }
+
+    #[tokio::test]
+    async fn project_plan_from_beads_recovers_closed_dependency_from_structural_graph() {
+        let plan_id = "structural-dependency-plan";
+        let epic = spur_pm::Issue {
+            issue_type: Some("epic".to_string()),
+            ..issue(
+                "bd-structural-epic",
+                "open",
+                vec![crate::plan::labels::plan_id(plan_id)],
+                Vec::new(),
+            )
+        };
+        let task = |issue_id: &str, task_id: &str, status: &str| spur_pm::Issue {
+            issue_type: Some("task".to_string()),
+            ..issue(
+                issue_id,
+                status,
+                vec![
+                    crate::plan::labels::plan_id(plan_id),
+                    crate::plan::labels::plan_task_id(task_id),
+                    crate::plan::labels::agent("codex"),
+                ],
+                Vec::new(),
+            )
+        };
+        let approved = task("bd-approved", "T1", "closed");
+        let downstream = task("bd-downstream", "T2", "open");
+        let related = task("bd-related", "T3", "open");
+
+        let task_spec = |comment_id: &str, task_id: &str| {
+            comment(
+                comment_id,
+                crate::plan::audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
+                    task_id: task_id.to_string(),
+                    context_files: Vec::new(),
+                    planned_write_files: None,
+                    profile: None,
+                    skills: None,
+                    model: None,
+                    effort: None,
+                    config_overrides: None,
+                    task_text: None,
+                    agent: Some("codex".to_string()),
+                    depends_on: None,
+                }),
+                0,
+            )
+        };
+        let mut comments = HashMap::from([
+            (
+                approved.id.clone(),
+                vec![
+                    task_spec("spec-t1", "T1"),
+                    comment(
+                        "completion-t1",
+                        crate::plan::audit_sentinel::encode_comment(
+                            &AuditSentinelKind::Completion {
+                                delegation_id: "del-t1".to_string(),
+                                completion_state: CompletionState::AwaitingReview,
+                                superseded: false,
+                                worker_branch: Some("spur/worker-t1".to_string()),
+                                result_summary: Some("done".to_string()),
+                                artifact_uri: None,
+                                dispatched_base_oid: Some("base-oid".to_string()),
+                                estimated_cost_micros: None,
+                            },
+                        ),
+                        1,
+                    ),
+                    comment(
+                        "approval-t1",
+                        crate::plan::audit_sentinel::encode_comment(&AuditSentinelKind::Approval {
+                            delegation_id: "del-t1".to_string(),
+                        }),
+                        2,
+                    ),
+                ],
+            ),
+            (downstream.id.clone(), vec![task_spec("spec-t2", "T2")]),
+            (related.id.clone(), vec![task_spec("spec-t3", "T3")]),
+        ]);
+        comments.insert(epic.id.clone(), Vec::new());
+
+        let edge = |from: &str, to: &str, edge_type: &str| spur_pm::graph::GraphEdge {
+            from: from.to_string(),
+            to: to.to_string(),
+            edge_type: Some(edge_type.to_string()),
+        };
+        let pm = TestPm::new(
+            vec![
+                epic.clone(),
+                approved.clone(),
+                downstream.clone(),
+                related.clone(),
+            ],
+            comments,
+            "closed",
+        )
+        .with_graph_edges(vec![
+            edge(&epic.id, &approved.id, "parent-child"),
+            edge(&epic.id, &downstream.id, "parent-child"),
+            edge(&epic.id, &related.id, "parent-child"),
+            edge(&epic.id, &downstream.id, "blocks"),
+            edge(&approved.id, &downstream.id, "blocks"),
+            edge(&related.id, &downstream.id, "related-to"),
+            edge(&downstream.id, &related.id, "blocks"),
+        ]);
+
+        let projected = super::project_plan_from_beads(&pm, plan_id, &pro_feature_gate())
+            .await
+            .expect("project persisted plan");
+        let by_task_id = projected
+            .tasks
+            .iter()
+            .map(|entry| (entry.spec.task_id.as_str(), entry))
+            .collect::<HashMap<_, _>>();
+
+        assert!(matches!(
+            by_task_id["T1"].status,
+            PlanTaskStatus::Approved { .. }
+        ));
+        assert_eq!(by_task_id["T2"].spec.depends_on, vec!["T1"]);
+        assert!(matches!(by_task_id["T2"].status, PlanTaskStatus::Ready));
+        assert_eq!(
+            by_task_id["T3"].spec.depends_on,
+            vec!["T2"],
+            "raw graph direction is prerequisite -> dependent"
+        );
+        assert!(matches!(by_task_id["T3"].status, PlanTaskStatus::Pending));
+    }
+
+    #[tokio::test]
+    async fn project_plan_from_beads_prefers_extended_dependencies_over_graph_fallback() {
+        let plan_id = "extended-dependency-plan";
+        let epic = spur_pm::Issue {
+            issue_type: Some("epic".to_string()),
+            ..issue(
+                "bd-extended-epic",
+                "open",
+                vec![crate::plan::labels::plan_id(plan_id)],
+                Vec::new(),
+            )
+        };
+        let make_task = |issue_id: &str, task_id: &str| spur_pm::Issue {
+            issue_type: Some("task".to_string()),
+            ..issue(
+                issue_id,
+                "open",
+                vec![
+                    crate::plan::labels::plan_id(plan_id),
+                    crate::plan::labels::plan_task_id(task_id),
+                    crate::plan::labels::agent("codex"),
+                ],
+                Vec::new(),
+            )
+        };
+        let first = make_task("bd-extended-first", "T1");
+        let second = make_task("bd-extended-second", "T2");
+        let spec_comment = |comment_id: &str, task_id: &str, depends_on| {
+            comment(
+                comment_id,
+                crate::plan::audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
+                    task_id: task_id.to_string(),
+                    context_files: Vec::new(),
+                    planned_write_files: None,
+                    profile: None,
+                    skills: None,
+                    model: None,
+                    effort: None,
+                    config_overrides: None,
+                    task_text: None,
+                    agent: Some("codex".to_string()),
+                    depends_on,
+                }),
+                0,
+            )
+        };
+        let comments = HashMap::from([
+            (
+                first.id.clone(),
+                vec![spec_comment("spec-t1", "T1", Some(Vec::new()))],
+            ),
+            (
+                second.id.clone(),
+                vec![spec_comment("spec-t2", "T2", Some(Vec::new()))],
+            ),
+        ]);
+        let pm = TestPm::new(
+            vec![epic, first.clone(), second.clone()],
+            comments,
+            "closed",
+        )
+        .with_graph_edges(vec![spur_pm::graph::GraphEdge {
+            from: first.id,
+            to: second.id,
+            edge_type: Some("blocks".to_string()),
+        }]);
+
+        let projected = super::project_plan_from_beads(&pm, plan_id, &pro_feature_gate())
+            .await
+            .expect("project persisted plan");
+        assert!(projected
+            .tasks
+            .iter()
+            .all(|entry| entry.spec.depends_on.is_empty()));
+        assert!(projected
+            .tasks
+            .iter()
+            .all(|entry| matches!(entry.status, PlanTaskStatus::Ready)));
+    }
+
+    #[tokio::test]
+    async fn project_plan_from_beads_fails_when_legacy_dependency_graph_is_unavailable() {
+        let plan_id = "missing-graph-plan";
+        let epic = spur_pm::Issue {
+            issue_type: Some("epic".to_string()),
+            ..issue(
+                "bd-missing-graph-epic",
+                "open",
+                vec![crate::plan::labels::plan_id(plan_id)],
+                Vec::new(),
+            )
+        };
+        let task = spur_pm::Issue {
+            issue_type: Some("task".to_string()),
+            ..issue(
+                "bd-missing-graph-task",
+                "open",
+                vec![
+                    crate::plan::labels::plan_id(plan_id),
+                    crate::plan::labels::plan_task_id("T1"),
+                    crate::plan::labels::agent("codex"),
+                ],
+                Vec::new(),
+            )
+        };
+        let pm = TestPm::new(vec![epic, task], HashMap::new(), "closed").without_graph_adjacency();
+
+        let error = super::project_plan_from_beads(&pm, plan_id, &pro_feature_gate())
+            .await
+            .expect_err("legacy TaskSpec projection requires structural graph fallback");
+        assert!(
+            error.to_string().contains("JSON adjacency"),
+            "unexpected error: {error:#}"
         );
     }
 

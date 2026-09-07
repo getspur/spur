@@ -40,7 +40,7 @@ use spur_core::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_core::plan::reconciler::{
     PlanDispatchState, Reconciler, ReconcilerConfig, ReconcilerDispatchCtx,
 };
-use spur_core::plan::{labels, PlanTask};
+use spur_core::plan::{labels, PlanTask, PlanTaskStatus};
 use spur_core::BaseSpec;
 use spur_core::{server::DetachedContinuationCtx, McpCallbackServer};
 use spur_mcp::McpEventSink;
@@ -644,6 +644,33 @@ async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() 
     )
     .await
     .expect("close approved T1");
+
+    let task_2_active_view = pm.get_issue(&task_2_issue).await.expect("get open T2");
+    assert!(
+        !task_2_active_view.blocked_by.contains(&task_1_issue),
+        "approved T1 must leave the active blocker view"
+    );
+    let projected = spur_core::plan::projector::project_plan_from_beads(
+        pm.as_ref(),
+        "overlay-plan",
+        feature_gate.as_ref(),
+    )
+    .await
+    .expect("project approved dependency plan");
+    let projected_t2 = projected
+        .tasks
+        .iter()
+        .find(|entry| entry.spec.task_id == "T2")
+        .expect("projected T2");
+    assert_eq!(
+        projected_t2.spec.depends_on,
+        vec!["T1"],
+        "closed approved prerequisites must remain in structural lineage"
+    );
+    assert!(
+        matches!(projected_t2.status, PlanTaskStatus::Ready),
+        "approved structural prerequisites must leave the downstream task Ready"
+    );
 
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
     let task_tracker = spur_core::server::AbortableTaskTracker::new();

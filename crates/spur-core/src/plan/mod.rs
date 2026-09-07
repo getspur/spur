@@ -9521,7 +9521,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn derive_epic_plan_fetches_direct_children_from_pm() {
+    async fn derive_epic_plan_uses_direct_parent_child_edges_from_pm() {
         let repo = tempfile::TempDir::new().expect("temp repo");
         let beads_dir = repo.path().join(".beads");
         std::fs::create_dir_all(&beads_dir).expect("create .beads");
@@ -9529,13 +9529,33 @@ mod tests {
         let epic_id = workspace.create_epic("Epic");
         workspace.add_label(&epic_id, "spur:agent:codex");
         let child_id = workspace.create_issue("Child task");
-        workspace.add_dep(&child_id, &epic_id);
+        workspace
+            .storage
+            .add_dependency(&child_id, &epic_id, "parent-child", "test")
+            .expect("add structural child");
+        let grandchild_id = workspace.create_issue("Grandchild task");
+        workspace
+            .storage
+            .add_dependency(&grandchild_id, &child_id, "parent-child", "test")
+            .expect("add structural grandchild");
+        let blocker_id = workspace.create_issue("Ordinary blocker relation");
+        workspace.add_dep(&blocker_id, &epic_id);
         workspace.copy_db_to(&beads_dir);
 
         let pm = spur_pm::PmService::try_new(None, true, false, repo.path(), None)
             .await
             .expect("PmService::try_new")
             .expect("beads pm");
+        let child = pm.get_issue(&child_id).await.expect("get structural child");
+        assert!(
+            !child.blocked_by.contains(&epic_id),
+            "active blocker view must not flatten an unblocked parent-child edge"
+        );
+        let blocker = pm.get_issue(&blocker_id).await.expect("get blocker issue");
+        assert!(
+            blocker.blocked_by.contains(&epic_id),
+            "ordinary active blocks edge should remain in the scheduling view"
+        );
         let derived =
             derive_epic_plan(&pm, pro_feature_gate().as_ref(), &epic_id, None, &["codex"])
                 .await
@@ -9551,11 +9571,13 @@ mod tests {
             task.depends_on.is_empty(),
             "the structural epic parent edge should not become an execution edge"
         );
+        assert_ne!(task.task_id, blocker_id);
+        assert_ne!(task.task_id, grandchild_id);
         assert!(derived.warnings.is_empty());
     }
 
     #[tokio::test]
-    async fn derive_epic_plan_rejects_closed_external_dep_from_pm() {
+    async fn derive_epic_plan_rejects_active_external_dep_from_pm() {
         let repo = tempfile::TempDir::new().expect("temp repo");
         let beads_dir = repo.path().join(".beads");
         std::fs::create_dir_all(&beads_dir).expect("create .beads");
@@ -9563,9 +9585,11 @@ mod tests {
         let epic_id = workspace.create_epic("Epic");
         workspace.add_label(&epic_id, "spur:agent:codex");
         let child_id = workspace.create_issue("Child task");
-        let external_id = workspace.create_issue("External closed dep");
-        workspace.close_issue(&external_id);
-        workspace.add_dep(&child_id, &epic_id);
+        let external_id = workspace.create_issue("External active dep");
+        workspace
+            .storage
+            .add_dependency(&child_id, &epic_id, "parent-child", "test")
+            .expect("add structural child");
         workspace.add_dep(&child_id, &external_id);
         workspace.copy_db_to(&beads_dir);
 
@@ -9575,10 +9599,10 @@ mod tests {
             .expect("beads pm");
         let err = derive_epic_plan(&pm, pro_feature_gate().as_ref(), &epic_id, None, &["codex"])
             .await
-            .expect_err("closed external deps should not satisfy derive_epic_plan");
+            .expect_err("active external deps should not satisfy derive_epic_plan");
 
         assert!(
-            err.contains(&external_id) && err.contains("status=closed"),
+            err.contains(&external_id) && err.contains("status=open"),
             "unexpected error: {err}"
         );
     }
