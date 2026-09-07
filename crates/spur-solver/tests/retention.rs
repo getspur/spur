@@ -25,6 +25,10 @@ fn artifact_path(root: &Path, id: &str) -> std::path::PathBuf {
     root.join(".spur/solver").join(format!("{id}.json"))
 }
 
+fn retention_path(root: &Path) -> std::path::PathBuf {
+    root.join(".spur/solver/.retention/state.json")
+}
+
 fn set_time(path: &Path, seconds: u64) -> std::io::Result<()> {
     File::options()
         .write(true)
@@ -161,7 +165,8 @@ fn corrupt_retention_metadata_fails_closed_without_deleting_receipts() -> Result
 {
     let repo = tempdir()?;
     legacy_cache(repo.path(), MAX_ARTIFACTS)?;
-    fs::write(repo.path().join(".spur/solver/.retention"), b"{broken")?;
+    fs::create_dir(repo.path().join(".spur/solver/.retention"))?;
+    fs::write(retention_path(repo.path()), b"{broken")?;
     let service = SolverService::new().with_repo_root(repo.path());
     assert!(
         service.persist(&json!({}), &response()).is_err(),
@@ -179,7 +184,7 @@ fn eviction_intent_is_durable_and_bounded() -> Result<(), Box<dyn Error>> {
     legacy_cache(repo.path(), MAX_ARTIFACTS)?;
     let service = SolverService::new().with_repo_root(repo.path());
     service.persist(&json!({}), &response())?;
-    let path = repo.path().join(".spur/solver/.retention");
+    let path = retention_path(repo.path());
     assert!(path.is_file(), "eviction must leave durable metadata");
     let value: Value = serde_json::from_slice(&fs::read(path)?)?;
     assert_eq!(value["evictions"][0]["solve_id"], "sol_0000000000000000");
@@ -204,7 +209,7 @@ async fn byte_quota_refusal_does_not_partially_evict_unpinned_receipts(
         .write(true)
         .open(artifact_path(repo.path(), &protected.solve_id))?
         .set_len(MAX_ARTIFACT_BYTES - 10_000)?;
-    let before = fs::read(repo.path().join(".spur/solver/.retention"))?;
+    let before = fs::read(retention_path(repo.path()))?;
     let error = service
         .persist(&json!("x".repeat(20_000)), &response())
         .expect_err("pins leave insufficient capacity");
@@ -214,10 +219,7 @@ async fn byte_quota_refusal_does_not_partially_evict_unpinned_receipts(
         service.get_solve_result(&unpinned.solve_id).is_ok(),
         "preflight must reject before deleting even eligible victims"
     );
-    assert_eq!(
-        fs::read(repo.path().join(".spur/solver/.retention"))?,
-        before
-    );
+    assert_eq!(fs::read(retention_path(repo.path()))?, before);
     Ok(())
 }
 
@@ -231,7 +233,7 @@ async fn ordinary_lookup_does_not_change_retention_and_pin_validates_ids(
     pin(&module, &receipt.solve_id, true)
         .await
         .expect("pin must be supported");
-    let path = repo.path().join(".spur/solver/.retention");
+    let path = retention_path(repo.path());
     let before = fs::read(&path)?;
     module
         .call(
@@ -259,5 +261,41 @@ fn symlinked_retention_metadata_is_rejected_without_following_it() -> Result<(),
     assert!(service.persist(&json!({}), &response()).is_err());
     assert_eq!(fs::read(&outside)?, b"do not touch");
     assert!(artifact_path(repo.path(), "sol_0000000000000000").exists());
+    Ok(())
+}
+
+#[test]
+fn retention_directory_makes_legacy_writers_fail_closed() -> Result<(), Box<dyn Error>> {
+    let repo = tempdir()?;
+    let service = SolverService::new().with_repo_root(repo.path());
+    service.persist(&json!({}), &response())?;
+    // The old writer rejects any non-regular entry during its complete scan,
+    // BEFORE eviction. A regular metadata file would itself be evictable.
+    let metadata = fs::symlink_metadata(repo.path().join(".spur/solver/.retention"))?;
+    assert!(
+        metadata.is_dir(),
+        "retention state must block older ring writers"
+    );
+    assert!(retention_path(repo.path()).is_file());
+    Ok(())
+}
+
+#[test]
+fn missing_receipt_reports_recorded_eviction_intent_after_reopen() -> Result<(), Box<dyn Error>> {
+    let repo = tempdir()?;
+    let service = SolverService::new().with_repo_root(repo.path());
+    let receipt = service.persist(&json!({}), &response())?;
+    legacy_cache(repo.path(), MAX_ARTIFACTS - 1)?;
+    service.persist(&json!({}), &response())?;
+    let reopened = SolverService::new().with_repo_root(repo.path());
+    let message = reopened
+        .get_solve_result(&receipt.solve_id)
+        .expect_err("receipt evicted")
+        .to_string();
+    assert!(
+        message.contains("selected for eviction"),
+        "lookup must explain recorded retention decisions: {message}"
+    );
+    assert!(message.contains("count"));
     Ok(())
 }
