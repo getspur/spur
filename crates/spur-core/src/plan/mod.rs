@@ -1156,6 +1156,28 @@ pub fn derive_epic_plan_from_issues(
     default_agent: Option<&str>,
     known_agents: &[&str],
 ) -> Result<DerivedEpicPlan, String> {
+    let dependencies_by_child_id = children
+        .iter()
+        .map(|child| (child.id.clone(), child.blocked_by.clone()))
+        .collect();
+    derive_epic_plan_from_issues_with_dependencies(
+        epic,
+        children,
+        &dependencies_by_child_id,
+        external_dep_statuses,
+        default_agent,
+        known_agents,
+    )
+}
+
+fn derive_epic_plan_from_issues_with_dependencies(
+    epic: &spur_pm::Issue,
+    children: &[spur_pm::Issue],
+    dependencies_by_child_id: &std::collections::HashMap<String, Vec<String>>,
+    external_dep_statuses: &std::collections::HashMap<String, String>,
+    default_agent: Option<&str>,
+    known_agents: &[&str],
+) -> Result<DerivedEpicPlan, String> {
     // 1. Verify the root issue is actually an epic.
     if epic.issue_type.as_deref() != Some("epic") {
         let t = epic.issue_type.as_deref().unwrap_or("none");
@@ -1230,7 +1252,11 @@ pub fn derive_epic_plan_from_issues(
         // scheduling view, but retain the epic-id guard for legacy/synthetic
         // callers that still provide the former flattened representation.
         let mut depends_on: Vec<String> = Vec::new();
-        for b in &child.blocked_by {
+        for b in dependencies_by_child_id
+            .get(&child.id)
+            .into_iter()
+            .flatten()
+        {
             if b == &epic.id {
                 continue;
             }
@@ -1327,23 +1353,48 @@ pub async fn derive_epic_plan(
     let adjacency = graph.adjacency.ok_or_else(|| {
         format!("structural graph for epic '{epic_id}' did not return JSON adjacency")
     })?;
-    let mut child_ids = adjacency
-        .edges
-        .unwrap_or_default()
-        .into_iter()
+    let membership_edges = adjacency.edges.unwrap_or_default();
+    let mut child_ids = membership_edges
+        .iter()
         .filter(|edge| edge.from == epic_id && edge.edge_type.as_deref() == Some("parent-child"))
-        .map(|edge| edge.to)
+        .map(|edge| edge.to.clone())
         .collect::<Vec<_>>();
     child_ids.sort();
     child_ids.dedup();
 
     let mut children: Vec<spur_pm::Issue> = Vec::with_capacity(child_ids.len());
+    let mut dependencies_by_child_id: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     for child_id in child_ids {
-        children.push(
-            pm.get_issue(&child_id)
-                .await
-                .map_err(|e| format!("failed to fetch child issue '{child_id}': {e}"))?,
+        let child = pm
+            .get_issue(&child_id)
+            .await
+            .map_err(|e| format!("failed to fetch child issue '{child_id}': {e}"))?;
+        let child_graph = pm.issue_subgraph_json(&child_id).await.map_err(|e| {
+            format!("failed to fetch structural dependency graph for child '{child_id}': {e}")
+        })?;
+        let child_adjacency = child_graph.adjacency.ok_or_else(|| {
+            format!("structural graph for child '{child_id}' did not return JSON adjacency")
+        })?;
+        let mut dependencies = child.blocked_by.clone();
+        dependencies.extend(
+            child_adjacency
+                .edges
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|edge| {
+                    edge.to == child_id
+                        && matches!(
+                            edge.edge_type.as_deref(),
+                            Some("blocks" | "conditional-blocks" | "waits-for")
+                        )
+                })
+                .map(|edge| edge.from),
         );
+        dependencies.sort();
+        dependencies.dedup();
+        dependencies_by_child_id.insert(child_id, dependencies);
+        children.push(child);
     }
 
     // 3. Collect external dep statuses: for each blocked_by reference in any
@@ -1353,7 +1404,11 @@ pub async fn derive_epic_plan(
     let mut external_dep_statuses: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for child in &children {
-        for dep in &child.blocked_by {
+        for dep in dependencies_by_child_id
+            .get(&child.id)
+            .into_iter()
+            .flatten()
+        {
             if dep == epic_id || subgraph_ids.contains(dep.as_str()) {
                 continue;
             }
@@ -1369,9 +1424,10 @@ pub async fn derive_epic_plan(
     }
 
     // 4. Delegate to the pure derivation function.
-    let mut derived = derive_epic_plan_from_issues(
+    let mut derived = derive_epic_plan_from_issues_with_dependencies(
         &epic,
         &children,
+        &dependencies_by_child_id,
         &external_dep_statuses,
         default_agent,
         known_agents,

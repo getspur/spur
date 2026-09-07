@@ -1113,6 +1113,17 @@ impl crate::plan::PmLike for ScriptedReadyPm {
         self.inner.source_str()
     }
 
+    fn issue_graph_available(&self) -> bool {
+        self.inner.issue_graph_available()
+    }
+
+    async fn issue_subgraph_json(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<spur_pm::graph::DependencyGraph> {
+        self.inner.issue_subgraph_json(id).await
+    }
+
     fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
         Some(self)
     }
@@ -1561,11 +1572,23 @@ async fn system_l3_runtime_arms_generation_without_brain() {
         );
     }
 
+    let generation_graph = pm
+        .issue_subgraph_json(&epic.id)
+        .await
+        .expect("generation structural graph");
+    let child_ids = generation_graph
+        .adjacency
+        .expect("generation graph adjacency")
+        .edges
+        .expect("generation graph edges")
+        .into_iter()
+        .filter(|edge| edge.from == epic.id && edge.edge_type.as_deref() == Some("parent-child"))
+        .map(|edge| edge.to)
+        .collect::<HashSet<_>>();
     let child_bodies = issues
         .iter()
         .filter(|issue| {
-            issue.issue_type.as_deref() == Some("task")
-                && issue.blocked_by.iter().any(|blocker| blocker == &epic.id)
+            issue.issue_type.as_deref() == Some("task") && child_ids.contains(&issue.id)
         })
         .filter_map(|issue| {
             let task_id = issue
@@ -1760,6 +1783,17 @@ impl crate::plan::PmLike for FailFirstCompanionClosePm {
 
     fn closed_status(&self) -> &str {
         self.inner.closed_status()
+    }
+
+    fn issue_graph_available(&self) -> bool {
+        self.inner.issue_graph_available()
+    }
+
+    async fn issue_subgraph_json(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<spur_pm::graph::DependencyGraph> {
+        self.inner.issue_subgraph_json(id).await
     }
 
     fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {

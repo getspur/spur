@@ -1495,13 +1495,24 @@ pub async fn project_plan_from_beads(
         let issue_is_closed = projected_task.issue.status == closed_status;
         let terminal_audit = latest_terminal_audit_kind(&projected_task.audits);
         let attempt = project_entry_attempt(&projected_task.audits, &status);
-        let dependency_issue_ids = projected_task
+        let mut dependency_issue_ids = projected_task
             .durable_depends_on
             .as_ref()
-            .or_else(|| structural_dependencies_by_issue_id.get(&projected_task.issue.id));
+            .or_else(|| structural_dependencies_by_issue_id.get(&projected_task.issue.id))
+            .cloned()
+            .unwrap_or_default();
+        dependency_issue_ids.extend(
+            projected_task
+                .issue
+                .blocked_by
+                .iter()
+                .filter(|dependency| *dependency != &epic.id)
+                .cloned(),
+        );
+        dependency_issue_ids.sort();
+        dependency_issue_ids.dedup();
         let depends_on = dependency_issue_ids
-            .into_iter()
-            .flatten()
+            .iter()
             .map(|dependency| {
                 task_id_by_issue_id
                     .get(dependency)

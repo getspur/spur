@@ -32,9 +32,68 @@ struct MockPmState {
     next_issue: u64,
     next_comment: u64,
     issues: HashMap<String, spur_pm::Issue>,
+    dependency_edges: Vec<spur_pm::graph::GraphEdge>,
     comments: HashMap<String, Vec<spur_pm::Comment>>,
     atomic_payloads: HashMap<String, String>,
     fail_create_issues_remaining: usize,
+}
+
+fn is_blocking_edge(edge_type: Option<&str>) -> bool {
+    matches!(
+        edge_type,
+        Some("blocks" | "conditional-blocks" | "waits-for")
+    )
+}
+
+fn active_blockers(state: &MockPmState, issue_id: &str) -> Vec<String> {
+    let mut blockers = state
+        .dependency_edges
+        .iter()
+        .filter(|edge| edge.to == issue_id && is_blocking_edge(edge.edge_type.as_deref()))
+        .filter(|edge| {
+            state
+                .issues
+                .get(&edge.from)
+                .is_none_or(|issue| issue.status != "closed")
+        })
+        .map(|edge| edge.from.clone())
+        .collect::<Vec<_>>();
+    blockers.sort();
+    blockers.dedup();
+    blockers
+}
+
+fn issue_snapshot(state: &MockPmState, id: &str) -> Option<spur_pm::Issue> {
+    let mut issue = state.issues.get(id)?.clone();
+    issue.blocked_by = active_blockers(state, id);
+    Some(issue)
+}
+
+fn dependency_graph(state: &MockPmState) -> spur_pm::graph::DependencyGraph {
+    let mut nodes = state
+        .issues
+        .keys()
+        .map(|id| spur_pm::graph::GraphNode {
+            id: id.clone(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut edges = state.dependency_edges.clone();
+    edges.sort_by(|left, right| {
+        left.from
+            .cmp(&right.from)
+            .then_with(|| left.to.cmp(&right.to))
+            .then_with(|| left.edge_type.cmp(&right.edge_type))
+    });
+    spur_pm::graph::DependencyGraph {
+        format: Some("json".to_string()),
+        adjacency: Some(spur_pm::graph::AdjacencyData {
+            nodes,
+            edges: Some(edges),
+        }),
+        ..Default::default()
+    }
 }
 
 fn apply_issue_update_locked(
@@ -100,23 +159,16 @@ impl MockPm {
     }
 
     pub async fn issue(&self, id: &str) -> spur_pm::Issue {
-        self.inner
-            .lock()
-            .await
-            .issues
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| panic!("missing mock issue {id}"))
+        let state = self.inner.lock().await;
+        issue_snapshot(&state, id).unwrap_or_else(|| panic!("missing mock issue {id}"))
     }
 
     pub async fn issues(&self) -> Vec<spur_pm::Issue> {
-        let mut issues = self
-            .inner
-            .lock()
-            .await
+        let state = self.inner.lock().await;
+        let mut issues = state
             .issues
-            .values()
-            .cloned()
+            .keys()
+            .filter_map(|id| issue_snapshot(&state, id))
             .collect::<Vec<_>>();
         issues.sort_by(|left, right| left.id.cmp(&right.id));
         issues
@@ -154,13 +206,8 @@ impl MockPm {
 #[async_trait]
 impl crate::plan::PmLike for MockPm {
     async fn get_issue(&self, id: &str) -> anyhow::Result<spur_pm::Issue> {
-        self.inner
-            .lock()
-            .await
-            .issues
-            .get(id)
-            .cloned()
-            .with_context(|| format!("mock issue not found: {id}"))
+        let state = self.inner.lock().await;
+        issue_snapshot(&state, id).with_context(|| format!("mock issue not found: {id}"))
     }
 
     async fn list_issues(
@@ -220,10 +267,8 @@ impl crate::plan::PmLike for MockPm {
         state.next_issue += 1;
         let id = format!("bd-mock-{}", state.next_issue);
         let now = Utc::now();
-        let mut blocked_by = params.depends_on;
-        if let Some(parent) = params.parent {
-            blocked_by.push(parent);
-        }
+        let dependencies = params.depends_on.clone();
+        let parent = params.parent.clone();
         let mut labels = dedupe(params.labels);
         labels.sort();
         let issue = spur_pm::Issue {
@@ -237,7 +282,7 @@ impl crate::plan::PmLike for MockPm {
             url: format!("mock://{id}"),
             priority: params.priority,
             issue_type: params.issue_type,
-            blocked_by,
+            blocked_by: Vec::new(),
             due_at: None,
             created_at: now,
             updated_at: now,
@@ -246,6 +291,26 @@ impl crate::plan::PmLike for MockPm {
             source_repo: None,
         };
         state.issues.insert(id.clone(), issue);
+        if let Some(parent) = parent {
+            state.dependency_edges.push(spur_pm::graph::GraphEdge {
+                from: parent,
+                to: id.clone(),
+                edge_type: Some("parent-child".to_string()),
+            });
+        }
+        for dependency in dependencies {
+            if !state.dependency_edges.iter().any(|edge| {
+                edge.from == dependency
+                    && edge.to == id
+                    && edge.edge_type.as_deref() == Some("blocks")
+            }) {
+                state.dependency_edges.push(spur_pm::graph::GraphEdge {
+                    from: dependency,
+                    to: id.clone(),
+                    edge_type: Some("blocks".to_string()),
+                });
+            }
+        }
         Ok(id)
     }
 
@@ -297,14 +362,26 @@ impl crate::plan::PmLike for MockPm {
 
     async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         let mut state = self.inner.lock().await;
-        let issue = state
+        anyhow::ensure!(
+            state.issues.contains_key(issue_id),
+            "mock issue not found: {issue_id}"
+        );
+        if !state.dependency_edges.iter().any(|edge| {
+            edge.from == depends_on_id
+                && edge.to == issue_id
+                && edge.edge_type.as_deref() == Some("blocks")
+        }) {
+            state.dependency_edges.push(spur_pm::graph::GraphEdge {
+                from: depends_on_id.to_string(),
+                to: issue_id.to_string(),
+                edge_type: Some("blocks".to_string()),
+            });
+        }
+        state
             .issues
             .get_mut(issue_id)
-            .with_context(|| format!("mock issue not found: {issue_id}"))?;
-        if !issue.blocked_by.iter().any(|id| id == depends_on_id) {
-            issue.blocked_by.push(depends_on_id.to_string());
-        }
-        issue.updated_at = Utc::now();
+            .expect("mock issue existence checked")
+            .updated_at = Utc::now();
         Ok(())
     }
 
@@ -318,6 +395,21 @@ impl crate::plan::PmLike for MockPm {
 
     fn source_str(&self) -> &'static str {
         "beads"
+    }
+
+    fn issue_graph_available(&self) -> bool {
+        true
+    }
+
+    async fn issue_subgraph_json(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<spur_pm::graph::DependencyGraph> {
+        let state = self.inner.lock().await;
+        anyhow::ensure!(state.issues.contains_key(id), "mock issue not found: {id}");
+        // Return the complete finite fixture. Consumers still apply their own
+        // root, membership, direction, and edge-type filters.
+        Ok(dependency_graph(&state))
     }
 
     fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
@@ -369,12 +461,7 @@ impl spur_pm::BeadsAdvanced for MockPm {
             })
             .filter(|issue| {
                 issue.issue_type.as_deref() == Some("epic")
-                    || issue.blocked_by.iter().all(|blocker| {
-                        state.issues.get(blocker).is_none_or(|blocked_by| {
-                            blocked_by.issue_type.as_deref() == Some("epic")
-                                || blocked_by.status != "open"
-                        })
-                    })
+                    || active_blockers(&state, &issue.id).is_empty()
             })
             .map(issue_summary)
             .collect::<Vec<_>>();
@@ -399,12 +486,20 @@ impl spur_pm::BeadsAdvanced for MockPm {
 
     async fn remove_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         let mut state = self.inner.lock().await;
-        let issue = state
+        anyhow::ensure!(
+            state.issues.contains_key(issue_id),
+            "mock issue not found: {issue_id}"
+        );
+        state.dependency_edges.retain(|edge| {
+            !(edge.from == depends_on_id
+                && edge.to == issue_id
+                && is_blocking_edge(edge.edge_type.as_deref()))
+        });
+        state
             .issues
             .get_mut(issue_id)
-            .with_context(|| format!("mock issue not found: {issue_id}"))?;
-        issue.blocked_by.retain(|id| id != depends_on_id);
-        issue.updated_at = Utc::now();
+            .expect("mock issue existence checked")
+            .updated_at = Utc::now();
         Ok(())
     }
 

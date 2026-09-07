@@ -422,8 +422,24 @@ mod plan_truncate_and_restart_tests {
                     .contains(&crate::plan::labels::plan_task_id("B"))
             })
             .expect("task B issue");
-        assert!(child_a.blocked_by.contains(&epic_id));
-        assert!(child_b.blocked_by.contains(&epic_id));
+        let graph = crate::plan::PmLike::issue_subgraph_json(mock_pm.as_ref(), &epic_id)
+            .await
+            .expect("persisted plan structural graph");
+        let edges = graph
+            .adjacency
+            .expect("persisted plan graph adjacency")
+            .edges
+            .expect("persisted plan graph edges");
+        assert!(edges.iter().any(|edge| {
+            edge.from == epic_id
+                && edge.to == child_a.id
+                && edge.edge_type.as_deref() == Some("parent-child")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.from == epic_id
+                && edge.to == child_b.id
+                && edge.edge_type.as_deref() == Some("parent-child")
+        }));
         assert!(child_b.blocked_by.contains(&child_a.id));
         assert!(child_b
             .labels
@@ -603,8 +619,20 @@ mod plan_truncate_and_restart_tests {
             child_epic.title,
             "Parent Recovery Epic (spur/plan-staging/recover-plan)"
         );
+        let graph = crate::plan::PmLike::issue_subgraph_json(mock_pm.as_ref(), &parent_epic_id)
+            .await
+            .expect("recovery plan structural graph");
+        let edges = graph
+            .adjacency
+            .expect("recovery plan graph adjacency")
+            .edges
+            .expect("recovery plan graph edges");
         assert!(
-            child_epic.blocked_by.contains(&parent_epic_id),
+            edges.iter().any(|edge| {
+                edge.from == parent_epic_id
+                    && edge.to == child_epic.id
+                    && edge.edge_type.as_deref() == Some("parent-child")
+            }),
             "child epic should be linked to parent epic: {child_epic:?}"
         );
         assert!(
@@ -634,8 +662,16 @@ mod plan_truncate_and_restart_tests {
             .iter()
             .find(|issue| issue.title.contains("C"))
             .expect("C child");
-        assert!(b_issue.blocked_by.contains(&restarted_epic_id));
-        assert!(c_issue.blocked_by.contains(&restarted_epic_id));
+        assert!(edges.iter().any(|edge| {
+            edge.from == restarted_epic_id
+                && edge.to == b_issue.id
+                && edge.edge_type.as_deref() == Some("parent-child")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.from == restarted_epic_id
+                && edge.to == c_issue.id
+                && edge.edge_type.as_deref() == Some("parent-child")
+        }));
         assert!(
             c_issue.blocked_by.contains(&b_issue.id),
             "C should depend on B via beads edge: {c_issue:?}"
