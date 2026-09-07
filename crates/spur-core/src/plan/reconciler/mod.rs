@@ -2097,20 +2097,39 @@ impl Reconciler {
         adv: &dyn spur_pm::BeadsAdvanced,
         issue: &spur_pm::IssueSummary,
     ) -> anyhow::Result<Option<String>> {
-        let detail = self.pm.get_issue(&issue.id).await?;
-        // Deterministic parent selection: never depend on backend `blocked_by`
-        // iteration order.
-        let mut parents: Vec<String> = detail.blocked_by.to_vec();
+        // `Issue::blocked_by` is the active scheduling view and intentionally
+        // excludes parent-child edges. Recover ownership from the structural
+        // graph instead so an unrelated blocker cannot donate its plan ID.
+        let graph = self.pm.issue_subgraph_json(&issue.id).await?;
+        let adjacency = graph.adjacency.ok_or_else(|| {
+            anyhow::anyhow!(
+                "issue graph for '{}' did not return JSON adjacency",
+                issue.id
+            )
+        })?;
+        let mut parents = adjacency
+            .edges
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|edge| edge.to == issue.id && edge.edge_type.as_deref() == Some("parent-child"))
+            .map(|edge| edge.from)
+            .collect::<Vec<_>>();
         parents.sort();
-        for parent_id in &parents {
-            let comments = adv.list_comments(parent_id).await?;
-            let audits =
-                crate::plan::projector::collect_sorted_audits_for_issue(parent_id, comments)?;
-            if let Some(plan_id) = expected_plan_id_from_audits(&audits) {
-                return Ok(Some(plan_id));
-            }
+        parents.dedup();
+        if parents.len() > 1 {
+            anyhow::bail!(
+                "issue '{}' has multiple structural parents: {}",
+                issue.id,
+                parents.join(", ")
+            );
         }
-        Ok(None)
+        let Some(parent_id) = parents.first() else {
+            return Ok(None);
+        };
+
+        let comments = adv.list_comments(parent_id).await?;
+        let audits = crate::plan::projector::collect_sorted_audits_for_issue(parent_id, comments)?;
+        Ok(expected_plan_id_from_audits(&audits))
     }
 }
 
