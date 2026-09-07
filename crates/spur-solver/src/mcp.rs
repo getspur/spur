@@ -125,10 +125,12 @@ impl ToolModule for SolverMcpModule {
             }
             "get_solve_result" => {
                 let request = parse_request::<GetSolveResultRequest>(name, args)?;
-                let response = self
-                    .live_service(name)?
-                    .get_solve_result(&request.solve_id)
-                    .map_err(service_error)?;
+                let service = self.live_service(name)?;
+                let response = match request.pin {
+                    Some(pinned) => service.set_solve_result_pin(&request.solve_id, pinned),
+                    None => service.get_solve_result(&request.solve_id),
+                }
+                .map_err(service_error)?;
                 serialize_response(name, response)?
             }
             other => {
@@ -148,6 +150,8 @@ impl ToolModule for SolverMcpModule {
 #[serde(deny_unknown_fields)]
 struct GetSolveResultRequest {
     solve_id: String,
+    #[serde(default)]
+    pin: Option<bool>,
 }
 
 fn parse_request<T: DeserializeOwned>(tool_name: &str, args: Value) -> Result<T, McpError> {
@@ -192,9 +196,9 @@ fn service_error(error: SolverServiceError) -> McpError {
         | SolverServiceError::Persistence(PersistError::InvalidSolveId { .. })) => {
             McpError::new(ErrorCode(INVALID_PARAMS_CODE), error.to_string(), None)
         }
-        error @ SolverServiceError::Persistence(PersistError::SolveIdNotFound { .. }) => {
-            McpError::new(ErrorCode(RESOURCE_NOT_FOUND_CODE), error.to_string(), None)
-        }
+        error @ SolverServiceError::Persistence(
+            PersistError::SolveIdNotFound { .. } | PersistError::SolveIdEvicted { .. },
+        ) => McpError::new(ErrorCode(RESOURCE_NOT_FOUND_CODE), error.to_string(), None),
         error => McpError::internal_error(error.to_string(), None),
     }
 }
@@ -259,7 +263,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "get_solve_result".to_owned(),
-            description: "Reload a repository-local persisted solver result, including its complete optimization envelope, by traversal-safe solve_id. Workers use this tool instead of reading .spur/solver files directly.".to_owned(),
+            description: "Reload a repository-local persisted solver result, including its complete optimization envelope, by traversal-safe solve_id. Optional pin=true protects an existing receipt from eviction until pin=false; omit pin for read-only lookup. Pin promptly for review; this cannot recover an evicted receipt. Workers use this tool instead of reading .spur/solver files directly.".to_owned(),
             input_schema: get_solve_result_schema(),
         },
     ]
@@ -558,6 +562,10 @@ fn get_solve_result_schema() -> Value {
                 "type": "string",
                 "pattern": "^sol_[0-9a-f]{16}$",
                 "description": "Identifier returned by a solve request with persist=true."
+            },
+            "pin": {
+                "type": "boolean",
+                "description": "Explicit retention mutation: true protects this existing receipt from cache eviction; false releases protection. Omit to leave retention unchanged. Pins consume the same count/byte quota and can make later persistence fail."
             }
         },
         "required": ["solve_id"],

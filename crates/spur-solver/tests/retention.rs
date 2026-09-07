@@ -7,7 +7,7 @@ use std::{
 };
 
 use serde_json::{json, Value};
-use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext, ToolModule};
+use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext, ToolModule as _};
 use spur_solver::{
     mcp::SolverMcpModule,
     persist::{MAX_ARTIFACTS, MAX_ARTIFACT_BYTES},

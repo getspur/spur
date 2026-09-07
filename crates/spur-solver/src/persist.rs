@@ -4,15 +4,18 @@
 //! Beads as SPUR's collaboration source of truth.
 //!
 //! The cache is a fixed-capacity ring: when a new `persist` would exceed the
-//! artifact count or total-byte budget, oldest entries are evicted first until
-//! the write fits (or the single new artifact is larger than the whole budget).
+//! artifact count or total-byte budget, oldest unpinned entries are evicted
+//! first. A private sidecar records insertion order, explicit pins, and bounded
+//! eviction intents. Insufficient eligible capacity fails before any deletion.
 
 use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::SystemTime,
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -42,13 +45,13 @@ const SOLVE_ID_PREFIX: &str = "sol_";
 const SOLVE_ID_HEX_LEN: usize = 16;
 const ID_GENERATION_ATTEMPTS: usize = 16;
 const LOCK_FILE_NAME: &str = ".lock";
+const RETENTION_FILE_NAME: &str = ".retention";
 
 /// Quota dimension that rejected a new artifact.
 ///
 /// Count and byte pressure normally cycle the ring (oldest first). These kinds
-/// are returned only when a single new artifact cannot fit even after every
-/// existing cache entry is removed (or the new payload alone exceeds the
-/// repository byte budget).
+/// are returned when the new artifact cannot fit after all eligible unpinned
+/// entries are removed. Quota refusal does not delete any existing entries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtifactQuotaKind {
     /// The next write cannot fit under [`MAX_ARTIFACTS`] even after eviction.
@@ -71,6 +74,18 @@ pub enum PersistError {
     SolveIdNotFound {
         /// Requested identifier.
         solve_id: String,
+    },
+    /// The receipt is absent and bounded retention history explains its selection.
+    #[error(
+        "solve_id `{solve_id}` is absent; selected for eviction at {selected_at_wall} ({reason})"
+    )]
+    SolveIdEvicted {
+        /// Requested identifier.
+        solve_id: String,
+        /// Recorded intent time, not a claim that the whole persist succeeded.
+        selected_at_wall: String,
+        /// Quota pressure at selection.
+        reason: String,
     },
     /// A stored artifact exceeded the repository cache's maximum byte size.
     #[error(
@@ -150,6 +165,12 @@ pub enum PersistError {
     /// Repeated UUID collisions prevented allocation of a new identifier.
     #[error("could not allocate a unique solve_id after {ID_GENERATION_ATTEMPTS} attempts")]
     IdGenerationExhausted,
+    /// Ordering or protection metadata is invalid; never silently reset pins.
+    #[error("invalid solver retention metadata: {reason}")]
+    InvalidRetention {
+        /// Failed metadata invariant.
+        reason: &'static str,
+    },
 }
 
 /// Stable result body embedded in a schema-v1 artifact.
@@ -324,10 +345,38 @@ impl ArtifactStore {
             })?;
         bytes.push(b'\n');
 
-        self.make_room_for(bytes.len())?;
+        self.make_room_for(&artifact.solve_id, bytes.len())?;
         let path = self.artifact_path(&artifact.solve_id)?;
         write_atomic(&path, &bytes)?;
         Ok(artifact)
+    }
+
+    /// Validate and pin/unpin one receipt under the same lock as eviction.
+    pub(crate) fn set_pin(
+        &self,
+        solve_id: &str,
+        pinned: bool,
+    ) -> Result<GetSolveResultResponse, PersistError> {
+        validate_solve_id(solve_id)?;
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_poisoned| PersistError::LockPoisoned)?;
+        ensure_private_directory(&self.directory)?;
+        let _repository_guard = RepositoryLock::acquire(&self.directory)?;
+        let response = self.get(solve_id)?;
+        let entries = self.list_cache_entries()?;
+        let mut retention = self.read_retention()?;
+        retention.reconcile(&entries)?;
+        let entry = retention
+            .entries
+            .get_mut(solve_id)
+            .ok_or(PersistError::InvalidRetention {
+                reason: "receipt disappeared while holding repository lock",
+            })?;
+        entry.pinned = pinned;
+        self.write_retention(&retention)?;
+        Ok(response)
     }
 
     pub(crate) fn get(&self, solve_id: &str) -> Result<GetSolveResultResponse, PersistError> {
@@ -335,6 +384,19 @@ impl ArtifactStore {
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                if let Some(intent) = self
+                    .read_retention()?
+                    .evictions
+                    .iter()
+                    .rev()
+                    .find(|intent| intent.solve_id == solve_id)
+                {
+                    return Err(PersistError::SolveIdEvicted {
+                        solve_id: solve_id.to_owned(),
+                        selected_at_wall: intent.selected_at_wall.clone(),
+                        reason: intent.reason.clone(),
+                    });
+                }
                 return Err(PersistError::SolveIdNotFound {
                     solve_id: solve_id.to_owned(),
                 });
@@ -416,12 +478,12 @@ impl ArtifactStore {
         Err(PersistError::IdGenerationExhausted)
     }
 
-    /// Evict oldest artifacts until `new_artifact_bytes` fits under both
+    /// Evict oldest unpinned artifacts until `new_artifact_bytes` fits under both
     /// [`MAX_ARTIFACTS`] and [`MAX_ARTIFACT_BYTES`].
     ///
     /// Callers must hold the repository write lock. A payload larger than the
     /// total byte budget is rejected without deleting existing entries.
-    fn make_room_for(&self, new_artifact_bytes: usize) -> Result<(), PersistError> {
+    fn make_room_for(&self, solve_id: &str, new_artifact_bytes: usize) -> Result<(), PersistError> {
         let new_artifact_bytes = u64::try_from(new_artifact_bytes).unwrap_or(u64::MAX);
         let count_limit = u64::try_from(MAX_ARTIFACTS).unwrap_or(u64::MAX);
 
@@ -433,44 +495,161 @@ impl ArtifactStore {
             });
         }
 
-        loop {
-            let mut entries = self.list_cache_entries()?;
-            let artifact_count = u64::try_from(entries.len()).unwrap_or(u64::MAX);
-            let total_bytes = entries
-                .iter()
-                .fold(0_u64, |acc, entry| acc.saturating_add(entry.size));
+        let mut entries = self.list_cache_entries()?;
+        let mut retention = self.read_retention()?;
+        retention.reconcile(&entries)?;
+        entries.sort_by_key(|entry| retention.entries[&entry.solve_id].sequence);
 
-            let count_fits = artifact_count < count_limit;
-            let bytes_fit = total_bytes.saturating_add(new_artifact_bytes) <= MAX_ARTIFACT_BYTES;
-            if count_fits && bytes_fit {
-                return Ok(());
+        let mut count = entries.len();
+        // u128 avoids saturating away bytes when inspecting large sparse files.
+        let mut total: u128 = entries.iter().map(|entry| u128::from(entry.size)).sum();
+        let incoming = u128::from(new_artifact_bytes);
+        let limit = u128::from(MAX_ARTIFACT_BYTES);
+        let mut victims = Vec::new();
+        for entry in &entries {
+            if count < MAX_ARTIFACTS && total + incoming <= limit {
+                break;
             }
-
-            if entries.is_empty() {
-                // Nothing left to evict; new payload still does not fit.
-                if !count_fits {
-                    return Err(PersistError::QuotaExceeded {
-                        kind: ArtifactQuotaKind::ArtifactCount,
-                        limit: count_limit,
-                        attempted: artifact_count.saturating_add(1),
-                    });
-                }
-                return Err(PersistError::QuotaExceeded {
-                    kind: ArtifactQuotaKind::TotalBytes,
-                    limit: MAX_ARTIFACT_BYTES,
-                    attempted: total_bytes.saturating_add(new_artifact_bytes),
-                });
+            if retention.entries[&entry.solve_id].pinned {
+                continue;
             }
-
-            // Oldest first (ring): RFC 3339 wall clock when present, else mtime.
-            entries.sort_by(|left, right| {
-                left.order_key
-                    .cmp(&right.order_key)
-                    .then_with(|| left.path.cmp(&right.path))
+            let reason = match (count >= MAX_ARTIFACTS, total + incoming > limit) {
+                (true, true) => "count_and_bytes",
+                (true, false) => "count",
+                _ => "bytes",
+            };
+            victims.push((entry, reason));
+            count -= 1;
+            total -= u128::from(entry.size);
+        }
+        // Preflight the entire selection. In particular, do not partially
+        // delete eligible entries and then discover that pinned bytes won't fit.
+        if count >= MAX_ARTIFACTS {
+            return Err(PersistError::QuotaExceeded {
+                kind: ArtifactQuotaKind::ArtifactCount,
+                limit: count_limit,
+                attempted: u64::try_from(count).unwrap_or(u64::MAX).saturating_add(1),
             });
-            let victim = &entries[0];
-            fs::remove_file(&victim.path)
-                .map_err(|source| io_error("evict", &victim.path, source))?;
+        }
+        if total + incoming > limit {
+            return Err(PersistError::QuotaExceeded {
+                kind: ArtifactQuotaKind::TotalBytes,
+                limit: MAX_ARTIFACT_BYTES,
+                attempted: u64::try_from(total + incoming).unwrap_or(u64::MAX),
+            });
+        }
+
+        retention.insert(solve_id)?;
+        for (entry, reason) in &victims {
+            retention.evictions.push_back(EvictionIntent {
+                solve_id: entry.solve_id.clone(),
+                sequence: retention.entries[&entry.solve_id].sequence,
+                selected_at_wall: Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
+                reason: (*reason).to_owned(),
+                incoming_solve_id: solve_id.to_owned(),
+            });
+            while retention.evictions.len() > MAX_ARTIFACTS {
+                retention.evictions.pop_front();
+            }
+        }
+        // Reserve the sequence and journal intents BEFORE deleting anything.
+        // Keep victim entries until reconciliation observes their absence: a
+        // crash before deletion must not reassign surviving victims a newer age.
+        // A crash before the artifact write leaves only an unused reservation;
+        // its sequence is never reused. This is not a multi-file transaction.
+        self.write_retention(&retention)?;
+        for (entry, _) in victims {
+            fs::remove_file(&entry.path)
+                .map_err(|source| io_error("evict", &entry.path, source))?;
+        }
+        Ok(())
+    }
+
+    fn read_retention(&self) -> Result<Retention, PersistError> {
+        let directory = self.directory.join(RETENTION_FILE_NAME);
+        match fs::symlink_metadata(&directory) {
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(Retention::default())
+            }
+            Err(source) => return Err(io_error("inspect retention directory", &directory, source)),
+            Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+                return Err(PersistError::NonRegularEntry { path: directory });
+            }
+            Ok(_) => {}
+        }
+        let path = directory.join("state.json");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(source) => return Err(io_error("inspect retention", &path, source)),
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(PersistError::NonRegularEntry { path });
+        }
+        if metadata.len() > MAX_ARTIFACT_BYTES {
+            return Err(PersistError::InvalidRetention {
+                reason: "sidecar exceeds read limit",
+            });
+        }
+        let file = open_artifact_for_read(&path)?;
+        let retention: Retention = serde_json::from_reader(file.take(MAX_ARTIFACT_BYTES + 1))
+            .map_err(|source| PersistError::Json {
+                operation: "parse retention",
+                source,
+            })?;
+        retention.validate()?;
+        Ok(retention)
+    }
+
+    fn write_retention(&self, retention: &Retention) -> Result<(), PersistError> {
+        let bytes = serde_json::to_vec(retention).map_err(|source| PersistError::Json {
+            operation: "serialize retention",
+            source,
+        })?;
+        if bytes.len() as u128 > u128::from(MAX_ARTIFACT_BYTES) {
+            return Err(PersistError::InvalidRetention {
+                reason: "sidecar exceeds write limit",
+            });
+        }
+        let directory = self.directory.join(RETENTION_FILE_NAME);
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(PersistError::NonRegularEntry { path: directory });
+                }
+                write_atomic(&directory.join("state.json"), &bytes)
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                // Publish the first complete directory atomically. An old
+                // binary refuses directories during inventory, so it cannot
+                // evict the sidecar or pinned receipts during a rolling upgrade.
+                // A crash before rename leaves only an ignored atomic temp,
+                // never a published empty marker that loses protection state.
+                let staged = self
+                    .directory
+                    .join(format!(".{}.tmp", Uuid::new_v4().simple()));
+                fs::create_dir(&staged)
+                    .map_err(|source| io_error("stage retention directory", &staged, source))?;
+                let result = (|| {
+                    ensure_private_directory(&staged)?;
+                    write_atomic(&staged.join("state.json"), &bytes)?;
+                    fs::rename(&staged, &directory).map_err(|source| {
+                        io_error("publish retention directory", &directory, source)
+                    })?;
+                    #[cfg(unix)]
+                    File::open(&*self.directory)
+                        .and_then(|directory| directory.sync_all())
+                        .map_err(|source| {
+                            io_error("sync retention parent", &self.directory, source)
+                        })?;
+                    Ok(())
+                })();
+                if result.is_err() {
+                    let _ignored = fs::remove_file(staged.join("state.json"));
+                    let _ignored = fs::remove_dir(&staged);
+                }
+                result
+            }
+            Err(source) => Err(io_error("inspect retention directory", &directory, source)),
         }
     }
 
@@ -482,7 +661,9 @@ impl ArtifactStore {
         for entry in dir_entries {
             let entry = entry.map_err(|source| io_error("list", &self.directory, source))?;
             let file_name = entry.file_name();
-            if file_name == OsStr::new(LOCK_FILE_NAME) {
+            if file_name == OsStr::new(LOCK_FILE_NAME)
+                || file_name == OsStr::new(RETENTION_FILE_NAME)
+            {
                 continue;
             }
             // Skip in-progress atomic write temps (`.{uuid}.tmp`).
@@ -498,11 +679,19 @@ impl ArtifactStore {
                 return Err(PersistError::NonRegularEntry { path });
             }
 
-            let order_key = cache_entry_order_key(&path, &metadata);
+            let solve_id = file_name_lossy
+                .strip_suffix(".json")
+                .unwrap_or_default()
+                .to_owned();
+            validate_solve_id(&solve_id)?;
+            let modified = metadata
+                .modified()
+                .map_err(|source| io_error("read mtime", &path, source))?;
             entries.push(CacheEntry {
                 path,
                 size: metadata.len(),
-                order_key,
+                solve_id,
+                modified,
             });
         }
         Ok(entries)
@@ -513,35 +702,122 @@ impl ArtifactStore {
 struct CacheEntry {
     path: PathBuf,
     size: u64,
-    /// Lexicographic key: prefer `created_at_wall` (RFC 3339), else mtime nanos.
-    order_key: String,
+    solve_id: String,
+    modified: SystemTime,
 }
 
-fn cache_entry_order_key(path: &Path, metadata: &fs::Metadata) -> String {
-    if let Some(created_at) = peek_created_at_wall(path) {
-        return format!("t:{created_at}");
-    }
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("m:{modified:032}")
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedEntry {
+    sequence: u64,
+    pinned: bool,
 }
 
-/// Best-effort read of `created_at_wall` without full artifact validation.
-fn peek_created_at_wall(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    // Cap parse work for oversized/corrupt stubs used in tests.
-    if bytes.len() > 64 * 1024 {
-        return None;
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EvictionIntent {
+    solve_id: String,
+    sequence: u64,
+    selected_at_wall: String,
+    reason: String,
+    incoming_solve_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Retention {
+    schema_version: u32,
+    next_sequence: u64,
+    entries: BTreeMap<String, RetainedEntry>,
+    // An intent proves selection, not successful deletion if a later I/O fails.
+    evictions: VecDeque<EvictionIntent>,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            next_sequence: 0,
+            entries: BTreeMap::new(),
+            evictions: VecDeque::new(),
+        }
     }
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
-    value
-        .get("created_at_wall")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+}
+
+impl Retention {
+    fn validate(&self) -> Result<(), PersistError> {
+        if self.schema_version != 1 || self.evictions.len() > MAX_ARTIFACTS {
+            return Err(PersistError::InvalidRetention {
+                reason: "unsupported schema or oversized history",
+            });
+        }
+        let mut sequences = BTreeSet::new();
+        for (id, entry) in &self.entries {
+            validate_solve_id(id)?;
+            if entry.sequence >= self.next_sequence || !sequences.insert(entry.sequence) {
+                return Err(PersistError::InvalidRetention {
+                    reason: "invalid or duplicate insertion sequence",
+                });
+            }
+        }
+        for intent in &self.evictions {
+            validate_solve_id(&intent.solve_id)?;
+            validate_solve_id(&intent.incoming_solve_id)?;
+            if intent.sequence >= self.next_sequence
+                || !matches!(
+                    intent.reason.as_str(),
+                    "count" | "bytes" | "count_and_bytes"
+                )
+                || chrono::DateTime::parse_from_rfc3339(&intent.selected_at_wall).is_err()
+            {
+                return Err(PersistError::InvalidRetention {
+                    reason: "invalid eviction intent",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn insert(&mut self, solve_id: &str) -> Result<(), PersistError> {
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence
+            .checked_add(1)
+            .ok_or(PersistError::InvalidRetention {
+                reason: "insertion sequence exhausted",
+            })?;
+        self.entries.insert(
+            solve_id.to_owned(),
+            RetainedEntry {
+                sequence,
+                pinned: false,
+            },
+        );
+        Ok(())
+    }
+
+    fn reconcile(&mut self, entries: &[CacheEntry]) -> Result<(), PersistError> {
+        let present: BTreeSet<_> = entries
+            .iter()
+            .map(|entry| entry.solve_id.as_str())
+            .collect();
+        self.entries.retain(|id, _| present.contains(id.as_str()));
+        let mut legacy: Vec<_> = entries
+            .iter()
+            .filter(|entry| !self.entries.contains_key(&entry.solve_id))
+            .collect();
+        // Only unindexed legacy entries need an approximate chronology. Use
+        // one comparable time domain for every size; never parse receipt JSON.
+        // Equal mtimes use path order deterministically, not as a FIFO claim.
+        legacy.sort_by(|a, b| {
+            a.modified
+                .cmp(&b.modified)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        for entry in legacy {
+            self.insert(&entry.solve_id)?;
+        }
+        Ok(())
+    }
 }
 
 /// Validates the pinned `sol_` plus 16-lowercase-hex identifier format.

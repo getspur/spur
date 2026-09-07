@@ -214,6 +214,29 @@ impl SolverService {
             .map_err(SolverServiceError::from)
     }
 
+    /// Pins or unpins an existing receipt and returns its validated contents.
+    ///
+    /// Pins survive service restarts and quota pressure until explicitly
+    /// released. This does not recover an already evicted receipt or make a
+    /// separate persist-then-pin pair atomic. Omit this call for read-only lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid/missing receipts, corrupt retention state,
+    /// an unconfigured repository, or filesystem failures.
+    pub fn set_solve_result_pin(
+        &self,
+        solve_id: &str,
+        pinned: bool,
+    ) -> Result<GetSolveResultResponse, SolverServiceError> {
+        validate_solve_id(solve_id)?;
+        self.artifacts
+            .as_ref()
+            .ok_or(SolverServiceError::RepoRootNotConfigured)?
+            .set_pin(solve_id, pinned)
+            .map_err(SolverServiceError::from)
+    }
+
     /// Encodes and solves one typed B′ constraint request.
     ///
     /// The request's single wall-clock budget starts before encoding and also
