@@ -2694,6 +2694,93 @@ mod tests {
         assert_eq!(status["ready_to_merge"], false);
     }
 
+    #[tokio::test]
+    async fn held_members_survive_projection_and_reopen_without_dispatch() {
+        let plan_id = "held-plan";
+        let mut epic = issue(
+            "bd-epic",
+            "open",
+            vec![crate::plan::labels::plan_id(plan_id)],
+            vec![],
+        );
+        epic.issue_type = Some("epic".into());
+        let mut task = issue(
+            "bd-held",
+            "blocked",
+            vec![
+                crate::plan::labels::plan_id(plan_id),
+                crate::plan::labels::plan_task_id("held"),
+                crate::plan::labels::agent("codex"),
+            ],
+            vec![epic.id.clone()],
+        );
+        let gate = pro_feature_gate();
+        for lifecycle in ["blocked", "deferred", "draft", "custom-hold"] {
+            task.status = lifecycle.into();
+            let pm = TestPm::new(vec![epic.clone(), task.clone()], HashMap::new(), "closed");
+            // Fresh reconstruction, not an in-memory cache update.
+            let mut state = super::project_plan_from_beads(&pm, plan_id, &gate)
+                .await
+                .unwrap();
+            assert_eq!(state.tasks.len(), 1, "lost {lifecycle} plan member");
+            super::recompute_open_statuses(&mut state.tasks);
+            assert!(
+                matches!(&state.tasks[0].status, PlanTaskStatus::EscalatedToBrain { last_error } if last_error.contains(lifecycle))
+            );
+            assert!(!state.tasks[0].status.is_terminal());
+            assert_eq!(
+                crate::plan::build_plan_status(plan_id, &state)["ready_to_merge"],
+                false
+            );
+        }
+        task.status = "open".into();
+        let pm = TestPm::new(vec![epic, task], HashMap::new(), "closed");
+        let state = super::project_plan_from_beads(&pm, plan_id, &gate)
+            .await
+            .unwrap();
+        assert!(matches!(state.tasks[0].status, PlanTaskStatus::Ready));
+    }
+
+    #[tokio::test]
+    async fn empty_projected_plan_is_not_merge_ready() {
+        let plan_id = "empty-plan";
+        let mut epic = issue(
+            "bd-epic",
+            "open",
+            vec![crate::plan::labels::plan_id(plan_id)],
+            vec![],
+        );
+        epic.issue_type = Some("epic".into());
+        let pm = TestPm::new(vec![epic], HashMap::new(), "closed");
+        let state = super::project_plan_from_beads(&pm, plan_id, &pro_feature_gate())
+            .await
+            .unwrap();
+        assert!(state.tasks.is_empty());
+        assert_eq!(
+            crate::plan::build_plan_status(plan_id, &state)["ready_to_merge"],
+            false
+        );
+    }
+
+    #[test]
+    fn held_status_overrides_stale_review_and_dispatch_labels() {
+        for lifecycle in ["blocked", "deferred"] {
+            let task = issue(
+                "bd-held",
+                lifecycle,
+                vec![
+                    "spur:ready-for-review".into(),
+                    "spur:delegation-id:old".into(),
+                ],
+                vec![],
+            );
+            assert!(matches!(
+                super::project_status_for_issue(&task, &[], true, "closed"),
+                PlanTaskStatus::EscalatedToBrain { .. }
+            ));
+        }
+    }
+
     #[test]
     fn system_review_verdict_is_not_an_applied_terminal_transition() {
         let issue = issue("bd-42v", "closed", Vec::new(), Vec::new());
