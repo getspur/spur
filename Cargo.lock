@@ -9418,6 +9418,8 @@ dependencies = [
  "base64ct",
  "fs2",
  "hmac 0.12.1",
+ "hyper 1.9.0",
+ "hyper-util",
  "libc",
  "rmcp",
  "schemars 0.8.22",
@@ -9428,7 +9430,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util 0.7.18",
  "toml 0.8.2",
+ "tower",
  "tracing",
 ]
 
