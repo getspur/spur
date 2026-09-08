@@ -428,6 +428,15 @@ mod worker_mcp_context_service_tests {
     use crate::event_funnel::spawn_funnel;
     use crate::server::{DetachedContinuationCtx, McpCallbackServer};
     use dashmap::DashMap;
+    use rmcp::{
+        model::CallToolRequestParams,
+        transport::{
+            streamable_http_client::StreamableHttpClientTransportConfig,
+            StreamableHttpClientTransport,
+        },
+        ServiceExt,
+    };
+    use serde_json::json;
     use spur_acp::config::ContextServiceConfig;
     use spur_acp::{BrainSessionId, SessionId};
     use spur_blob_store::{MemoryOutcomeStore, OutcomeStore};
@@ -473,7 +482,6 @@ mod worker_mcp_context_service_tests {
                 .expect("PmService::try_new failed")
                 .expect("expected beads PM service"),
         );
-
         let feature_gate = crate::server::community_feature_gate();
         let outcome_store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
         let continuation_ctx = DetachedContinuationCtx {
@@ -515,6 +523,120 @@ mod worker_mcp_context_service_tests {
             .count();
 
         assert_eq!(external_tool_count, 8);
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn fetched_worker_token_can_use_lifecycle_gated_tools_until_flush() {
+        let repo = TempDir::new().expect("temp repo");
+        let beads = TestBeadsWorkspace::init();
+        let beads_dir = repo.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create .beads directory");
+        beads.copy_db_to(&beads_dir);
+        let pm_service = Arc::new(
+            PmService::try_new(None, true, false, repo.path(), None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected beads PM service"),
+        );
+        let task = pm_service
+            .create_issue(spur_pm::IssueCreate {
+                title: "worker evidence transport".into(),
+                issue_type: Some("task".into()),
+                labels: vec![crate::plan::labels::delegation_id("plan-worker-evidence")],
+                ..Default::default()
+            })
+            .await
+            .expect("create worker task");
+        pm_service
+            .advanced()
+            .expect("Beads advanced service")
+            .add_comment(
+                &task,
+                &crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                        delegation_id: "plan-worker-evidence".into(),
+                        worker: "codex".into(),
+                        attempt: 1,
+                    },
+                ),
+            )
+            .await
+            .expect("record worker dispatch");
+
+        let feature_gate = crate::server::pro_feature_gate();
+        let outcome_store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
+        let continuation_ctx = DetachedContinuationCtx {
+            on_complete: Arc::new(|_continuation, _worker| Box::pin(async {})),
+        };
+        let (funnel_tx, _funnel_rx) = broadcast::channel(8);
+        let funnel = spawn_funnel(funnel_tx, Arc::new(AtomicU64::new(0)));
+        let event_sink: Arc<dyn spur_mcp::McpEventSink> = Arc::new(funnel.clone());
+        let (mcp_server, _channel) = McpCallbackServer::new(
+            None,
+            Some(Arc::clone(&pm_service)),
+            Some(event_sink),
+            continuation_ctx,
+            Arc::clone(&outcome_store),
+            Arc::clone(&feature_gate),
+        );
+        let cache = Arc::new(DashMap::new());
+        let fetcher = WorkerMcpFetcher {
+            cache: Arc::clone(&cache),
+            pm_service: Some(pm_service),
+            feature_gate: Some(feature_gate),
+            funnel,
+            mcp_server: Arc::new(mcp_server),
+            outcome_store,
+            repo_root: Some(repo.path().to_path_buf()),
+            context_service_config: ContextServiceConfig::default(),
+        };
+
+        let brain = BrainSessionId::new(SessionId::new());
+        let delegation_id = "plan-worker-evidence";
+        let (url, token) = fetcher
+            .fetch_url_token(&brain, delegation_id)
+            .await
+            .expect("worker MCP token should be issued");
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(url).auth_header(token),
+        );
+        let client = ().serve(transport).await.expect("rmcp client initialize");
+        let response = client
+            .call_tool(
+                CallToolRequestParams::new("report_audit").with_arguments(
+                    json!({
+                        "task_id": task,
+                        "audit_id": uuid::Uuid::new_v4(),
+                        "message": "PRE positive control",
+                        "evidence": {"solve_id": "sol_fixture", "status": "sat"}
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("freshly issued worker token must remain lifecycle-active");
+
+        assert_eq!(
+            response.is_error,
+            Some(false),
+            "freshly issued worker token must be authorized: {:?}",
+            response.content
+        );
+        assert_eq!(
+            response.structured_content.as_ref().unwrap()["recorded"],
+            true,
+            "fresh worker token must append evidence before terminal flush"
+        );
+
+        client.cancel().await.expect("cancel rmcp client");
+        let server = Arc::clone(cache.get(&brain).expect("cached server").value());
+        server
+            .flush_delegation(delegation_id, "success")
+            .await
+            .expect("terminal flush should revoke delegation context");
         server.shutdown(Duration::from_secs(5)).await;
     }
 }
