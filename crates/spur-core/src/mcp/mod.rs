@@ -237,6 +237,7 @@ fn worker_tool_registry_with_families_inner(
         builder = builder.with(worker::WorkerReadMcpModule::plan(
             worker::WorkerReadMcpDeps::catalog_only(),
         ))?;
+        builder = builder.with(crate::worker_notebook::NotebookReadCatalog)?;
     }
     match (
         families.contains(&McpFamily::Graph),

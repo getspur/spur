@@ -216,6 +216,7 @@ pub mod tool_schemas;
 #[cfg(test)]
 pub(crate) mod tracing_test_lock;
 pub mod upgrade;
+pub(crate) mod worker_notebook;
 pub mod worker_server;
 pub mod worktree_authority;
 

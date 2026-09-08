@@ -217,6 +217,41 @@ pub(crate) async fn execute_delegation(
         .as_deref()
         .map(WorkerMcpServer::claude_tool_names);
 
+    // Resolve notebook authority against the brain repository before creating
+    // any worker worktree. Opted-out workers receive no notebook capability.
+    let original_task = match worker_mcp_server
+        .as_ref()
+        .map(|server| {
+            server.register_notebook_context(
+                &request_id,
+                &repo_root,
+                &context_files,
+                &original_task,
+            )
+        })
+        .transpose()
+    {
+        Ok(Some(task)) => task,
+        Ok(None) => original_task,
+        Err(error) => {
+            return (
+                DelegationResult {
+                    resolved_config: None,
+                    status: DelegationStatus::Failed {
+                        error: format!("worker notebook context unavailable: {error}"),
+                    },
+                    diff: None,
+                    diff_summary: None,
+                    summary: None,
+                    estimated_cost_usd: 0.0,
+                    worker_branch: None,
+                    artifact: None,
+                },
+                None,
+            );
+        }
+    };
+
     let mut current_task = original_task.clone();
     // Retry-history accumulator. Each retry attempt pushes its
     // prior attempt's (summary, diff_summary, reviewer feedback)

@@ -722,6 +722,10 @@ struct DispatcherDeps {
     /// worker MCP server is per brain session and runs in the brain process,
     /// so code_* handlers cannot derive the worker worktree from process cwd.
     delegation_worktree_roots: Arc<parking_lot::Mutex<std::collections::HashMap<String, PathBuf>>>,
+    /// Server-owned notebook capability, never supplied by tool arguments.
+    notebook_readers: parking_lot::Mutex<
+        std::collections::HashMap<String, Arc<crate::worker_notebook::NotebookReader>>,
+    >,
     /// Persistent graph MCP module so refresh/rebuild singleflight state is
     /// shared across worker code graph calls for this server.
     graph_mcp_module: spur_graph::mcp::GraphMcpModule,
@@ -2098,11 +2102,16 @@ fn unconfigured_context_service() -> ContextServiceConfig {
 }
 
 fn worker_rmcp_tool(definition: spur_mcp::tools::ToolDefinition) -> Tool {
-    Tool::new(
+    let notebook_read = crate::worker_notebook::READ_TOOLS.contains(&definition.name.as_str());
+    let mut tool = Tool::new(
         definition.name,
         definition.description,
         rmcp_object(definition.input_schema),
-    )
+    );
+    if notebook_read {
+        tool.annotations = Some(rmcp::model::ToolAnnotations::new().read_only(true));
+    }
+    tool
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -2125,6 +2134,29 @@ impl ServerHandler for WorkerToolHandler {
             .canonical_name_for_call(&request.name)?
             .to_owned();
         request.name = Cow::Owned(canonical_name.clone());
+        if let Some(tool_name) = crate::worker_notebook::READ_TOOLS
+            .into_iter()
+            .find(|name| *name == canonical_name)
+        {
+            let deps = Arc::clone(&self.deps);
+            let arguments = Value::Object(request.arguments.take().unwrap_or_default());
+            return self
+                .invoke_with_lifecycle(
+                    tool_name,
+                    context,
+                    Some(None),
+                    move |worker_ctx| async move {
+                        let reader = deps
+                            .notebook_readers
+                            .lock()
+                            .get(&worker_ctx.delegation_id)
+                            .cloned()
+                            .ok_or_else(crate::worker_notebook::not_authorized)?;
+                        reader.call(tool_name, arguments).await
+                    },
+                )
+                .await;
+        }
         if !canonical_name.starts_with("external_")
             && request
                 .arguments
@@ -2487,6 +2519,7 @@ impl WorkerMcpServer {
             repo_root: deps.repo_root,
             delegations: Arc::clone(&delegations),
             delegation_worktree_roots: Arc::clone(&delegation_worktree_roots),
+            notebook_readers: parking_lot::Mutex::new(std::collections::HashMap::new()),
             graph_mcp_module,
             read_audit_buffers: Arc::clone(&read_audit_buffers),
             flush_tx,
@@ -2659,12 +2692,58 @@ impl WorkerMcpServer {
         });
     }
 
+    /// Bind notebook context before worker startup. Only this server owns the
+    /// daemon socket; worker MCP configuration still contains just its HTTP URL.
+    pub(crate) fn register_notebook_context(
+        &self,
+        delegation_id: &str,
+        repo_root: &std::path::Path,
+        context_files: &[String],
+        task: &str,
+    ) -> std::io::Result<String> {
+        // Failed or empty rebinds must never retain an earlier capability.
+        self.revoke_notebook_reader(delegation_id);
+        let grants = crate::worker_notebook::context_grants(repo_root, context_files)?;
+        let task = crate::worker_notebook::with_notebook_context(task, &grants);
+        if !grants.is_empty() {
+            let nonce = crate::notebook::stable_notebook_nonce(repo_root);
+            let reader = Arc::new(crate::worker_notebook::NotebookReader::new(
+                crate::notebook::control_socket_path(&nonce),
+                grants,
+            ));
+            self.register_notebook_reader(delegation_id.to_owned(), reader);
+        }
+        Ok(task)
+    }
+
+    fn register_notebook_reader(
+        &self,
+        delegation_id: String,
+        reader: Arc<crate::worker_notebook::NotebookReader>,
+    ) {
+        if let Some(previous) = self
+            .deps
+            .notebook_readers
+            .lock()
+            .insert(delegation_id, reader)
+        {
+            previous.revoke();
+        }
+    }
+
+    fn revoke_notebook_reader(&self, delegation_id: &str) {
+        if let Some(reader) = self.deps.notebook_readers.lock().remove(delegation_id) {
+            reader.revoke();
+        }
+    }
+
     /// Signal that a delegation has reached a terminal state. Removes the
     /// cached context and drops the per-delegation summary guard, which emits
     /// one `WorkerMcpDelegationSummary` event. The `_outcome` parameter is
     /// retained for API stability; per-call error counts in the summary now
     /// come from the dispatcher's `record_call` telemetry.
     pub fn complete_delegation(&self, delegation_id: &str, _outcome: &str) {
+        self.revoke_notebook_reader(delegation_id);
         self.deps.delegations.lock().remove(delegation_id);
         self.deps
             .delegation_worktree_roots
@@ -2706,6 +2785,7 @@ impl WorkerMcpServer {
         delegation_id: &str,
         outcome: &str,
     ) -> Result<(), FlushDelegationError> {
+        self.revoke_notebook_reader(delegation_id);
         self.deps.delegations.lock().remove(delegation_id);
         self.deps
             .delegation_worktree_roots
@@ -3649,6 +3729,289 @@ mod tests {
         Arc::new(gate)
     }
 
+    #[tokio::test]
+    async fn worker_notebook_catalog_is_read_only_and_unbound_calls_are_denied() {
+        let dir = TempDir::new().unwrap();
+        let pm = pm_service_fixture(dir.path()).await;
+        let deps = worker_mcp_deps_fixture(
+            pm,
+            pro_feature_gate(),
+            Arc::new(RecordingWorkerSignalSink::default()),
+        );
+        let server = WorkerMcpServer::start("brain-notebook".into(), deps)
+            .await
+            .unwrap();
+        let token = server.issue_token("no-notebook-grant", Duration::from_secs(60));
+        let config = StreamableHttpClientTransportConfig::with_uri(server.url()).auth_header(token);
+        let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+        let notebook_tools: Vec<_> = client
+            .list_all_tools()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|tool| tool.name.starts_with("notebook_"))
+            .inspect(|tool| {
+                assert_eq!(
+                    tool.annotations.as_ref().and_then(|a| a.read_only_hint),
+                    Some(true)
+                )
+            })
+            .map(|t| t.name.into_owned())
+            .collect();
+        assert_eq!(
+            notebook_tools,
+            ["notebook_list_cells", "notebook_read_cell"]
+        );
+        for name in ["notebook_list_cells", "notebook_read_cell"] {
+            let mut request = CallToolRequestParams::new(name);
+            request.arguments = Some(
+                json!({"notebook_path": "/ungranted.ipynb", "id": "cell"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            );
+            let error = client.call_tool(request).await.unwrap_err();
+            assert!(error.to_string().contains("not authorized"), "{error}");
+        }
+        for name in [
+            "notebook_write_cell",
+            "notebook_run_cell",
+            "notebook_open",
+            "notebook.unknown",
+        ] {
+            assert!(client
+                .call_tool(CallToolRequestParams::new(name))
+                .await
+                .is_err());
+        }
+        client.cancel().await.unwrap();
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn worker_notebook_delegations_are_isolated_and_terminal_calls_revoke() {
+        use crate::worker_notebook::{
+            tests::{cell_response, daemon_fixture, grant_fixture},
+            NotebookReader,
+        };
+        let dir = TempDir::new().unwrap();
+        let pm = pm_service_fixture(dir.path()).await;
+        let server = WorkerMcpServer::start(
+            "brain-notebook".into(),
+            worker_mcp_deps_fixture(
+                pm,
+                pro_feature_gate(),
+                Arc::new(RecordingWorkerSignalSink::default()),
+            ),
+        )
+        .await
+        .unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let grant_a = grant_fixture(&a);
+        let grant_b = grant_fixture(&b);
+        let path_a = grant_a.path.clone();
+        let path_b = grant_b.path.clone();
+        let socket = dir.path().join("daemon.sock");
+        let daemon = daemon_fixture(
+            &socket,
+            vec![
+                cell_response(&path_a, "allowed"),
+                cell_response(&path_b, "allowed"),
+            ],
+        )
+        .await;
+        let reader_a = Arc::new(NotebookReader::new(socket.clone(), vec![grant_a]));
+        let reader_b = Arc::new(NotebookReader::new(socket, vec![grant_b]));
+        server.register_notebook_reader("a".into(), Arc::clone(&reader_a));
+        server.register_notebook_reader("b".into(), Arc::clone(&reader_b));
+        let connect = |id: &str| {
+            StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(server.url())
+                    .auth_header(server.issue_token(id, Duration::from_secs(60))),
+            )
+        };
+        let client_a = ().serve(connect("a")).await.unwrap();
+        let client_b = ().serve(connect("b")).await.unwrap();
+        let request = |path: &Path| {
+            CallToolRequestParams::new("notebook_read_cell").with_arguments(
+                json!({"notebook_path":path,"id":"allowed"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+        };
+        for (client, wrong_path) in [(&client_a, &path_b), (&client_b, &path_a)] {
+            assert!(client
+                .call_tool(request(wrong_path))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("not authorized"));
+        }
+        assert_eq!(
+            client_a
+                .call_tool(request(&path_a))
+                .await
+                .unwrap()
+                .structured_content
+                .unwrap()["source"],
+            "unsaved source"
+        );
+        server.flush_delegation("a", "success").await.unwrap();
+        assert!(
+            !server.deps.notebook_readers.lock().contains_key("a"),
+            "flush must remove the grant"
+        );
+        assert!(reader_a
+            .call(
+                "notebook_read_cell",
+                json!({"notebook_path":path_a,"id":"allowed"})
+            )
+            .await
+            .unwrap_err()
+            .message
+            .contains("not authorized"));
+        assert!(client_a
+            .call_tool(request(&path_a))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not authorized"));
+        assert_eq!(
+            client_b
+                .call_tool(request(&path_b))
+                .await
+                .unwrap()
+                .structured_content
+                .unwrap()["path"],
+            json!(path_b)
+        );
+        server.complete_delegation("b", "success");
+        assert!(
+            !server.deps.notebook_readers.lock().contains_key("b"),
+            "legacy completion must remove the grant"
+        );
+        assert!(reader_b
+            .call(
+                "notebook_read_cell",
+                json!({"notebook_path":path_b,"id":"allowed"})
+            )
+            .await
+            .unwrap_err()
+            .message
+            .contains("not authorized"));
+        assert_eq!(
+            daemon.await.unwrap().len(),
+            2,
+            "denied calls never reach daemon"
+        );
+        client_a.cancel().await.unwrap();
+        client_b.cancel().await.unwrap();
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn worker_notebook_dispatch_context_binds_paths_and_fails_closed() {
+        use crate::worker_notebook::tests::grant_fixture;
+        let dir = TempDir::new().unwrap();
+        let path = grant_fixture(dir.path()).path;
+        let pm = pm_service_fixture(dir.path()).await;
+        let server = WorkerMcpServer::start(
+            "brain-context".into(),
+            worker_mcp_deps_fixture(
+                pm,
+                pro_feature_gate(),
+                Arc::new(RecordingWorkerSignalSink::default()),
+            ),
+        )
+        .await
+        .unwrap();
+        let task = "Inspect this notebook.";
+        let prompt = server
+            .register_notebook_context("d", dir.path(), &["book.ipynb".into()], task)
+            .unwrap();
+        assert!(prompt.contains(&path.display().to_string()));
+        assert!(prompt.contains("notebook_list_cells"));
+        assert!(prompt.contains("notebook_read_cell"));
+        assert!(prompt.contains("Do not edit, execute, open, or save"));
+        assert!(!prompt.contains(".sock"));
+        assert!(prompt.ends_with(task));
+        let old = server
+            .deps
+            .notebook_readers
+            .lock()
+            .get("d")
+            .cloned()
+            .unwrap();
+        assert!(server
+            .register_notebook_context("d", dir.path(), &["missing.ipynb".into()], task)
+            .is_err());
+        assert!(!server.deps.notebook_readers.lock().contains_key("d"));
+        assert!(old
+            .call("notebook_list_cells", json!({"notebook_path":path}))
+            .await
+            .unwrap_err()
+            .message
+            .contains("not authorized"));
+        assert_eq!(
+            server
+                .register_notebook_context("empty", dir.path(), &["source.rs".into()], task)
+                .unwrap(),
+            task
+        );
+        assert!(!server.deps.notebook_readers.lock().contains_key("empty"));
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn worker_notebook_flush_cancels_in_flight_daemon_read() {
+        use crate::worker_notebook::{tests::grant_fixture, NotebookReader};
+        let dir = TempDir::new().unwrap();
+        let grant = grant_fixture(dir.path());
+        let path = grant.path.clone();
+        let socket = dir.path().join("stall.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let reader = Arc::new(NotebookReader::new(socket, vec![grant]));
+        let pm = pm_service_fixture(dir.path()).await;
+        let server = WorkerMcpServer::start(
+            "brain-stall".into(),
+            worker_mcp_deps_fixture(
+                pm,
+                pro_feature_gate(),
+                Arc::new(RecordingWorkerSignalSink::default()),
+            ),
+        )
+        .await
+        .unwrap();
+        server.register_notebook_reader("d".into(), Arc::clone(&reader));
+        let pending = tokio::spawn(async move {
+            reader
+                .call(
+                    "notebook_read_cell",
+                    json!({"notebook_path":path,"id":"allowed"}),
+                )
+                .await
+        });
+        let (mut connection, _) = listener.accept().await.unwrap();
+        crate::orchestrator::read_notebook_daemon_frame(&mut connection)
+            .await
+            .unwrap();
+        // Keep the real socket open without answering initialize. Completion
+        // must cancel the pending read, not wait for the production deadline.
+        server.flush_delegation("d", "cancelled").await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .expect("revocation wakes the read")
+            .unwrap();
+        assert!(result.unwrap_err().message.contains("not authorized"));
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+
     fn dispatcher_deps_fixture(
         pm_service: Arc<spur_pm::PmService>,
         feature_gate: Arc<spur_license::FeatureGate>,
@@ -3669,6 +4032,7 @@ mod tests {
             delegation_worktree_roots: Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            notebook_readers: parking_lot::Mutex::new(std::collections::HashMap::new()),
             graph_mcp_module: spur_graph::mcp::GraphMcpModule::new(
                 spur_graph::mcp::GraphMcpDeps::default(),
             ),

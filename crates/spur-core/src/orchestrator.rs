@@ -345,7 +345,10 @@ fn emit_notebook_datasources_changed(
 }
 
 #[cfg(unix)]
-async fn write_notebook_daemon_frame(stream: &mut UnixStream, bytes: &[u8]) -> io::Result<()> {
+pub(crate) async fn write_notebook_daemon_frame(
+    stream: &mut UnixStream,
+    bytes: &[u8],
+) -> io::Result<()> {
     if bytes.len() > NOTEBOOK_DAEMON_FRAME_LIMIT {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -360,7 +363,7 @@ async fn write_notebook_daemon_frame(stream: &mut UnixStream, bytes: &[u8]) -> i
 }
 
 #[cfg(unix)]
-async fn read_notebook_daemon_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+pub(crate) async fn read_notebook_daemon_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     let mut len = [0_u8; 4];
     stream.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len) as usize;
