@@ -3729,6 +3729,262 @@ mod tests {
         Arc::new(gate)
     }
 
+    #[test]
+    fn worker_evidence_catalog_and_signal_schema_are_usable() {
+        let tools = crate::mcp::worker_tool_registry().unwrap().list_tools();
+        assert!(
+            tools.iter().any(|tool| tool.name == "report_audit"),
+            "workers need a durable evidence channel"
+        );
+        assert!(!tools.iter().any(|tool| tool.name == "update_issue"));
+        let signal = tools
+            .iter()
+            .find(|tool| tool.name == "report_signal")
+            .unwrap();
+        let kinds = signal.input_schema["properties"]["signal"]["properties"]["kind"]["enum"]
+            .as_array()
+            .unwrap();
+        for kind in ["blocked", "risk", "escalate", "mark_noop"] {
+            assert!(kinds.contains(&json!(kind)), "catalog omits {kind}");
+            let parsed = serde_json::from_value::<crate::plan::signals::WorkerSignal>(json!({
+                "kind": kind, "signal_id": uuid::Uuid::new_v4(), "reason": "evidence transport unavailable", "severity": 1.0
+            }));
+            assert!(
+                parsed.is_ok(),
+                "typed dispatcher rejects {kind}: {parsed:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_evidence_transport_persists_idempotently_and_refuses_unowned_targets() {
+        use crate::plan::audit_sentinel::{encode_comment, AuditSentinelKind};
+        let dir = TempDir::new().unwrap();
+        let pm = pm_service_fixture(dir.path()).await;
+        let task = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "evidence owner".into(),
+                issue_type: Some("task".into()),
+                labels: vec![crate::plan::labels::delegation_id("evidence-maker")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let other = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "unrelated".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let adv = beads_advanced_for_test(&pm);
+        adv.add_comment(
+            &task,
+            &encode_comment(&AuditSentinelKind::Dispatch {
+                delegation_id: "evidence-maker".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        let server = WorkerMcpServer::start(
+            "evidence-brain".into(),
+            worker_mcp_deps_fixture(
+                Arc::clone(&pm),
+                pro_feature_gate(),
+                Arc::new(RecordingWorkerSignalSink::default()),
+            ),
+        )
+        .await
+        .unwrap();
+        server.register_delegation("evidence-maker".into(), DelegationContext::default());
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(server.url())
+                .auth_header(server.issue_token("evidence-maker", Duration::from_secs(60))),
+        );
+        let client = ().serve(transport).await.unwrap();
+        let args = json!({"task_id": task, "audit_id": uuid::Uuid::new_v4(), "message": "PRE positive control",
+            "evidence": {"solve_id": "sol_fixture", "status": "sat", "complete_receipt": {"model": {"x": true}}}});
+        let request = |value: Value| {
+            CallToolRequestParams::new("report_audit")
+                .with_arguments(value.as_object().unwrap().clone())
+        };
+        let before = adv.list_comments(&task).await.unwrap().len();
+        let first = client
+            .call_tool(request(args.clone()))
+            .await
+            .expect("durable audit tool must exist");
+        assert_eq!(first.structured_content.as_ref().unwrap()["recorded"], true);
+        let replay = client.call_tool(request(args.clone())).await.unwrap();
+        assert_eq!(
+            replay.structured_content.as_ref().unwrap()["idempotent"],
+            true
+        );
+        let comments = adv.list_comments(&task).await.unwrap();
+        assert_eq!(comments.len(), before + 1);
+        let body = &comments.last().unwrap().body;
+        let durable: Value = serde_json::from_str(
+            body.strip_prefix(crate::plan::audit_sentinel::SENTINEL_PREFIX)
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert_eq!(durable["kind"], "worker-evidence");
+        assert_eq!(durable["evidence"], args["evidence"]);
+        assert_eq!(durable["delegation_id"], "evidence-maker");
+        assert_eq!(durable["brain_session_id"], "evidence-brain");
+        let status_before = pm.get_issue(&task).await.unwrap().status;
+        let mut conflicting = args.clone();
+        conflicting["message"] = json!("rewritten receipt");
+        assert!(client.call_tool(request(conflicting)).await.is_err());
+        let mut cross_task = args.clone();
+        cross_task["task_id"] = json!(other);
+        assert!(client.call_tool(request(cross_task)).await.is_err());
+        assert!(adv.list_comments(&other).await.unwrap().is_empty());
+        assert_eq!(pm.get_issue(&task).await.unwrap().status, status_before);
+        for update in [
+            spur_pm::IssueUpdate {
+                status: Some("closed".into()),
+                ..Default::default()
+            },
+            spur_pm::IssueUpdate {
+                status: Some("open".into()),
+                add_labels: crate::plan::labels::superseded_by_labels(&["replacement".into()]),
+                ..Default::default()
+            },
+        ] {
+            pm.update_issue(&task, update).await.unwrap();
+            let mut denied = args.clone();
+            denied["audit_id"] = json!(uuid::Uuid::new_v4());
+            assert!(client.call_tool(request(denied)).await.is_err());
+            assert_eq!(adv.list_comments(&task).await.unwrap().len(), before + 1);
+        }
+        pm.update_issue(
+            &task,
+            spur_pm::IssueUpdate {
+                remove_labels: crate::plan::labels::superseded_by_labels(&["replacement".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // Replaced dispatch invalidates even an otherwise still-valid bearer token.
+        adv.add_comment(
+            &task,
+            &encode_comment(&AuditSentinelKind::Dispatch {
+                delegation_id: "new-maker".into(),
+                worker: "codex".into(),
+                attempt: 2,
+            }),
+        )
+        .await
+        .unwrap();
+        let mut stale = args.clone();
+        stale["audit_id"] = json!(uuid::Uuid::new_v4());
+        assert!(client.call_tool(request(stale)).await.is_err());
+        server.complete_delegation("evidence-maker", "success");
+        assert!(client.call_tool(request(args)).await.is_err());
+        client.cancel().await.unwrap();
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn worker_evidence_signals_persist_blocked_and_risk_without_status_mutation() {
+        use crate::plan::audit_sentinel::{encode_comment, AuditSentinelKind};
+        let dir = TempDir::new().unwrap();
+        let pm = pm_service_fixture(dir.path()).await;
+        let task = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "blocked signal owner".into(),
+                issue_type: Some("task".into()),
+                labels: vec![crate::plan::labels::delegation_id("signal-maker")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let adv = beads_advanced_for_test(&pm);
+        adv.add_comment(
+            &task,
+            &encode_comment(&AuditSentinelKind::Dispatch {
+                delegation_id: "signal-maker".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        let gate = pro_feature_gate();
+        let sink = Arc::new(crate::mcp::signals::WorkerSignalMcpToolModule::new(
+            crate::mcp::signals::SignalMcpDeps {
+                pm_service: Some(Arc::clone(&pm)),
+                event_sink: None,
+                feature_gate: Arc::clone(&gate),
+            },
+        ));
+        let server = WorkerMcpServer::start(
+            "signal-brain".into(),
+            worker_mcp_deps_fixture(Arc::clone(&pm), gate, sink),
+        )
+        .await
+        .unwrap();
+        server.register_delegation("signal-maker".into(), DelegationContext::default());
+        let client = ()
+            .serve(StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(server.url())
+                    .auth_header(server.issue_token("signal-maker", Duration::from_secs(60))),
+            ))
+            .await
+            .unwrap();
+        let status_before = pm.get_issue(&task).await.unwrap().status;
+        for kind in ["blocked", "risk"] {
+            let args = json!({"task_id": task, "signal": {"kind": kind, "signal_id": uuid::Uuid::new_v4(),
+                "severity": 0.9, "reason": "required evidence unavailable", "estimated_subtasks": 0}});
+            let request = |value: Value| {
+                CallToolRequestParams::new("report_signal")
+                    .with_arguments(value.as_object().unwrap().clone())
+            };
+            client
+                .call_tool(request(args.clone()))
+                .await
+                .expect("supported signal must persist");
+            let count = adv.list_comments(&task).await.unwrap().len();
+            client.call_tool(request(args.clone())).await.unwrap();
+            assert_eq!(
+                adv.list_comments(&task).await.unwrap().len(),
+                count,
+                "transport retry must not duplicate a signal"
+            );
+            assert!(pm
+                .get_issue(&task)
+                .await
+                .unwrap()
+                .labels
+                .contains(&crate::plan::labels::signal_kind(kind)));
+            let signals: Vec<_> = adv
+                .list_comments(&task)
+                .await
+                .unwrap()
+                .iter()
+                .filter_map(|c| crate::plan::signals::parse_comment(&c.body))
+                .collect();
+            assert!(signals
+                .iter()
+                .any(|s| s.as_ref().is_ok_and(|s| s.kind_label() == kind)));
+            let mut bad = args.clone();
+            bad["signal"]["reason"] = json!("rewritten reason");
+            assert!(client.call_tool(request(bad)).await.is_err());
+            let mut invalid = args.clone();
+            invalid["signal"]["signal_id"] = json!(uuid::Uuid::new_v4());
+            invalid["signal"]["severity"] = json!(1.1);
+            assert!(client.call_tool(request(invalid)).await.is_err());
+            assert_eq!(adv.list_comments(&task).await.unwrap().len(), count);
+        }
+        assert_eq!(pm.get_issue(&task).await.unwrap().status, status_before);
+        client.cancel().await.unwrap();
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+
     #[tokio::test]
     async fn worker_notebook_catalog_is_read_only_and_unbound_calls_are_denied() {
         let dir = TempDir::new().unwrap();

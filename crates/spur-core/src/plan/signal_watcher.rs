@@ -280,6 +280,20 @@ mod tests {
 
     #[tokio::test]
     async fn escalate_signal_stays_awaiting_brain_review_without_proposer() {
+        assert_brain_attention_signal_is_not_auto_mutated("escalate").await;
+    }
+
+    #[tokio::test]
+    async fn worker_evidence_blocked_signal_stays_awaiting_brain_review() {
+        assert_brain_attention_signal_is_not_auto_mutated("blocked").await;
+    }
+
+    #[tokio::test]
+    async fn worker_evidence_risk_signal_stays_awaiting_brain_review() {
+        assert_brain_attention_signal_is_not_auto_mutated("risk").await;
+    }
+
+    async fn assert_brain_attention_signal_is_not_auto_mutated(kind: &str) {
         let dir = tempfile::TempDir::new().expect("tempdir");
         std::fs::create_dir(dir.path().join(".beads")).expect("create .beads");
         let pm = Arc::new(
@@ -297,7 +311,7 @@ mod tests {
                     crate::plan::labels::plan_id("plan-watch"),
                     crate::plan::labels::plan_task_id("task-escalate"),
                     crate::plan::labels::READY_FOR_REVIEW.to_string(),
-                    crate::plan::labels::signal_kind("escalate"),
+                    crate::plan::labels::signal_kind(kind),
                 ],
                 ..Default::default()
             })
@@ -349,10 +363,9 @@ mod tests {
         let reason = "architecture needs brain confirmation".to_string();
         adv.add_comment(
             &task_id,
-            &encode_signal(&WorkerSignal::Escalate {
-                signal_id,
-                reason: reason.clone(),
-            }),
+            &format!("{}\n{}", crate::plan::signals::SENTINEL_PREFIX, serde_json::json!({
+                "kind": kind, "signal_id": signal_id, "reason": reason, "severity": 0.9, "estimated_subtasks": 0
+            })),
         )
         .await
         .expect("signal comment");
@@ -381,17 +394,18 @@ mod tests {
             "worker escalation is not retry exhaustion; labels={:?}",
             issue.labels
         );
-        assert!(
+        assert_eq!(
             issue
                 .labels
                 .contains(&crate::plan::labels::signal_processed_label(&signal_id)),
-            "escalation must mark signal processed; labels={:?}",
+            kind == "escalate",
+            "blocked/risk must remain unresolved until the brain acts; labels={:?}",
             issue.labels
         );
         assert!(
             issue
                 .labels
-                .contains(&crate::plan::labels::signal_kind("escalate")),
+                .contains(&crate::plan::labels::signal_kind(kind)),
             "brain review must retain the original escalation signal; labels={:?}",
             issue.labels
         );
