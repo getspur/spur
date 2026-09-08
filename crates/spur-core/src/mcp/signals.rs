@@ -93,7 +93,16 @@ fn report_signal_def() -> ToolDefinition {
     ToolDefinition {
         name: "report_signal".into(),
         description: "Worker-facing. Record a typed WorkerSignal on a task. Brain-side watcher will inspect and may mutate the plan.".into(),
-        input_schema: json!({
+        input_schema: Value::Object(report_signal_input_schema()),
+    }
+}
+
+/// Shared by the catalog and RMCP router. The discriminated requirements
+/// mirror worker-emittable `WorkerSignal` variants without requiring fields
+/// belonging to another kind. Use `anyOf`: worker providers reject `oneOf`
+/// and `allOf`, and the common object schema keeps scalar fields discoverable.
+pub(crate) fn report_signal_input_schema() -> serde_json::Map<String, Value> {
+    json!({
             "type": "object",
             "required": ["task_id", "signal"],
             "properties": {
@@ -101,6 +110,20 @@ fn report_signal_def() -> ToolDefinition {
                 "signal": {
                     "type": "object",
                     "required": ["kind", "signal_id"],
+                    "anyOf": [
+                        {
+                            "properties": { "kind": { "enum": ["scope_drift", "blocked", "risk"] } },
+                            "required": ["severity", "reason"]
+                        },
+                        {
+                            "properties": { "kind": { "enum": ["escalate", "mark_noop"] } },
+                            "required": ["reason"]
+                        },
+                        {
+                            "properties": { "kind": { "enum": ["retry_exhausted"] } },
+                            "required": ["task_id", "attempt", "last_error"]
+                        }
+                    ],
                     "properties": {
                         "kind": { "type": "string", "enum": ["scope_drift", "retry_exhausted", "blocked", "risk", "escalate", "mark_noop"] },
                         "signal_id": { "type": "string", "format": "uuid" },
@@ -113,8 +136,10 @@ fn report_signal_def() -> ToolDefinition {
                     }
                 }
             }
-        }),
-    }
+        })
+        .as_object()
+        .expect("report_signal input schema is an object")
+        .clone()
 }
 
 fn report_progress_def() -> ToolDefinition {

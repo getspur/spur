@@ -1265,40 +1265,6 @@ struct KnowledgeGraphReasoningParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
-struct ReportSignalParams {
-    task_id: String,
-    #[schemars(with = "ReportSignalSchema")]
-    signal: Value,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ReportSignalKindSchema {
-    ScopeDrift,
-    RetryExhausted,
-    Blocked,
-    Risk,
-    Escalate,
-    MarkNoop,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, JsonSchema)]
-struct ReportSignalSchema {
-    kind: ReportSignalKindSchema,
-    signal_id: String,
-    #[schemars(range(min = 0.0, max = 1.0))]
-    severity: Option<f64>,
-    reason: Option<String>,
-    #[schemars(range(min = 0, max = 255))]
-    estimated_subtasks: Option<u64>,
-    task_id: Option<String>,
-    attempt: Option<u32>,
-    last_error: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct ReportProgressParams {
     message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2051,7 +2017,7 @@ impl WorkerToolHandler {
     #[tool(
         name = "report_signal",
         description = "Worker-facing. Record a typed WorkerSignal on a task. Brain-side watcher will inspect and may mutate the plan.",
-        input_schema = crate::tool_schemas::schema_object::<ReportSignalParams>()
+        input_schema = crate::mcp::signals::report_signal_input_schema()
     )]
     async fn report_signal_tool(
         &self,
