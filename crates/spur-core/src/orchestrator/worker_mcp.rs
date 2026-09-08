@@ -103,16 +103,20 @@ impl WorkerMcpFetcher {
         .await
     }
 
-    /// Convenience: ensure the per-`BrainSession` server is up and mint
-    /// a 1-hour HMAC token bound to `(brain, delegation_id)`. Returns
-    /// the server's URL and the freshly minted token; the caller
-    /// assembles the final `?token=` URL.
+    /// Convenience: ensure the per-`BrainSession` server is up, register
+    /// the delegation as lifecycle-active, and mint a 1-hour HMAC token
+    /// bound to `(brain, delegation_id)`. Returns the server's URL and the
+    /// freshly minted token; the caller assembles the final `?token=` URL.
     pub(crate) async fn fetch_url_token(
         &self,
         brain: &spur_acp::BrainSessionId,
         delegation_id: &str,
     ) -> Result<(String, String), DelegationDispatchError> {
         let server = self.ensure(brain).await?;
+        server.register_delegation(
+            delegation_id.to_owned(),
+            crate::worker_server::DelegationContext::default(),
+        );
         let token = server.issue_token(delegation_id, std::time::Duration::from_secs(3600));
         Ok((server.url(), token))
     }
