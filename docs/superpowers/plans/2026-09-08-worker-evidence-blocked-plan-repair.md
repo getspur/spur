@@ -33,3 +33,13 @@ Depends on: B for safe display of brain-blocked issues. Scope: core worker MCP r
 ## Handoff gate
 
 Report exact tests and commits, preserving any build/environment blockers. The running app still requires rebuild/restart and a fresh worker smoke test of evidence and blocker persistence before E1-09b can be retried. Do not treat compilation or a solver model as that live smoke test.
+
+## Verification and handoff (2026-09-08)
+
+- B behavioral RED: 85 projector tests passed and the three new regressions failed for the expected missing member, empty merge-readiness and stale-label hold violations. Test commit `a0516fb3d`; fix `08e641c8b`.
+- A behavioral RED: missing registry/HTTP `report_audit` and rejected `blocked` signal. Test commit `084b78df4`; fix `8c355408c`. A follow-up RED verified missing full receipt in the tool response before adding exact post-persistence reload.
+- Final remote command: `SPUR_REMOTE=1 SPUR_NO_LOCAL_FALLBACK=1 scripts/spur-cargo test -p spur-core --lib` — **1,581 passed, 0 failed, 2 ignored**, exit 0. Formatter check and `git diff --check` passed.
+- PRE receipts: A `sol_1fd2d571205147e1` / `sol_31bda6dcb2af4f0c`; B `sol_ffcb53999d7342dd` / `sol_303628f0155b41b2`.
+- POST receipts: A `sol_831075c267c44947` / `sol_3efdfa67bd1540df`; B `sol_3f794bb98d054b06` / `sol_cfb7b77d00e048a9`. Each pair is positive sat/pass then adversarial unsat/fail. Full pinned/reloaded receipts are on `bd-2a4e`. They check bounded abstractions, not arbitrary Rust executions.
+- Independent read-only review: `bd-3aij`, delegation `73db930b-9fa8-4bc1-ad22-3e94e548273b`, codex / gpt-5.6-sol / xhigh. Reviewing `6142413c5..8c355408c`; pending at handoff.
+- No root-branch merge, remote push, running-app restart, or E1-09b retry performed. Spur root remains `6142413c5`; the pre-existing dirty otobank notebook is unchanged.
