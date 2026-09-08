@@ -3789,6 +3789,111 @@ mod tests {
     }
 
     #[test]
+    fn report_signal_schema_required_fields_match_typed_variants() {
+        use crate::plan::signals::WorkerSignal;
+        use std::collections::BTreeSet;
+
+        let schema = crate::mcp::worker_tool_registry()
+            .unwrap()
+            .list_tools()
+            .into_iter()
+            .find(|tool| tool.name == "report_signal")
+            .unwrap()
+            .input_schema;
+        let signal = &schema["properties"]["signal"];
+        let common = signal["required"].as_array().unwrap();
+        assert_eq!(common, &vec![json!("kind"), json!("signal_id")]);
+        let branches = signal["anyOf"]
+            .as_array()
+            .expect("signal schema must require each kind's typed fields");
+        let cases = [
+            ("scope_drift", json!({"severity": 1.0, "reason": "scope"})),
+            ("blocked", json!({"severity": 1.0, "reason": "blocked"})),
+            ("risk", json!({"severity": 1.0, "reason": "risk"})),
+            ("escalate", json!({"reason": "review"})),
+            ("mark_noop", json!({"reason": "intentional no-op"})),
+            (
+                "retry_exhausted",
+                json!({"task_id": "bd-task", "attempt": 1, "last_error": "failure"}),
+            ),
+        ];
+        let mut advertised = BTreeSet::new();
+        for branch in branches {
+            for kind in branch["properties"]["kind"]["enum"].as_array().unwrap() {
+                assert!(
+                    advertised.insert(kind.as_str().unwrap()),
+                    "ambiguous kind branch"
+                );
+            }
+        }
+        assert_eq!(advertised, cases.iter().map(|(kind, _)| *kind).collect());
+
+        for (kind, fields) in cases {
+            let branch = branches
+                .iter()
+                .find(|branch| {
+                    branch["properties"]["kind"]["enum"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(kind))
+                })
+                .unwrap();
+            let required: BTreeSet<_> = branch["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|field| field.as_str().unwrap())
+                .collect();
+            let expected = fields
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                required, expected,
+                "wrong advertised requirements for {kind}"
+            );
+
+            // Only the advertised required fields: optional fields must remain optional.
+            let mut payload = fields;
+            payload["kind"] = json!(kind);
+            payload["signal_id"] = json!(uuid::Uuid::nil());
+            assert!(
+                serde_json::from_value::<WorkerSignal>(payload.clone()).is_ok(),
+                "{kind}"
+            );
+            for field in required.into_iter().chain(["kind", "signal_id"]) {
+                let mut missing = payload.clone();
+                missing.as_object_mut().unwrap().remove(field);
+                assert!(
+                    serde_json::from_value::<WorkerSignal>(missing).is_err(),
+                    "{kind} field {field} must be required by both schema and handler"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn report_signal_schema_catalog_matches_rmcp_router() {
+        let catalog = crate::mcp::worker_tool_registry()
+            .unwrap()
+            .list_tools()
+            .into_iter()
+            .find(|tool| tool.name == "report_signal")
+            .unwrap();
+        let routed = WorkerToolHandler::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "report_signal")
+            .unwrap();
+        assert_eq!(
+            catalog.input_schema,
+            Value::Object((*routed.input_schema).clone())
+        );
+    }
+
+    #[test]
     fn worker_evidence_catalog_and_signal_schema_are_usable() {
         let tools = crate::mcp::worker_tool_registry().unwrap().list_tools();
         assert!(
