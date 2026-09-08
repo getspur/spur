@@ -25,6 +25,22 @@ pub enum WorkerSignal {
         #[serde(default)]
         estimated_subtasks: Option<u8>,
     },
+    /// External dependency prevents progress. Only the brain can resolve it.
+    Blocked {
+        signal_id: Uuid,
+        severity: f32,
+        reason: String,
+        #[serde(default)]
+        estimated_subtasks: Option<u8>,
+    },
+    /// An unresolved design or safety risk requiring a brain decision.
+    Risk {
+        signal_id: Uuid,
+        severity: f32,
+        reason: String,
+        #[serde(default)]
+        estimated_subtasks: Option<u8>,
+    },
     /// Brain-side detector signal: the worker created or modified a file
     /// that overlaps non-trivially with an already-approved upstream task's
     /// tip. Emitted by `clobber_detector` during `review_task`. May also
@@ -62,6 +78,9 @@ impl WorkerSignal {
     pub fn signal_id(&self) -> Uuid {
         match self {
             WorkerSignal::ScopeDrift { signal_id, .. } => *signal_id,
+            WorkerSignal::Blocked { signal_id, .. } | WorkerSignal::Risk { signal_id, .. } => {
+                *signal_id
+            }
             WorkerSignal::PotentialClobber { signal_id, .. } => *signal_id,
             WorkerSignal::RetryExhausted { signal_id, .. } => *signal_id,
             WorkerSignal::Escalate { signal_id, .. } => *signal_id,
@@ -73,6 +92,8 @@ impl WorkerSignal {
     pub fn kind_label(&self) -> &'static str {
         match self {
             WorkerSignal::ScopeDrift { .. } => "scope-drift",
+            WorkerSignal::Blocked { .. } => "blocked",
+            WorkerSignal::Risk { .. } => "risk",
             WorkerSignal::PotentialClobber { .. } => "potential-clobber",
             WorkerSignal::RetryExhausted { .. } => "retry-exhausted",
             WorkerSignal::Escalate { .. } => "escalate",

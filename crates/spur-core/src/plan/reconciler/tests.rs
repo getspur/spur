@@ -1875,6 +1875,12 @@ async fn add_review_signal(
     let (severity, reason) = match signal {
         crate::plan::signals::WorkerSignal::ScopeDrift {
             severity, reason, ..
+        }
+        | crate::plan::signals::WorkerSignal::Blocked {
+            severity, reason, ..
+        }
+        | crate::plan::signals::WorkerSignal::Risk {
+            severity, reason, ..
         } => (*severity, reason.clone()),
         crate::plan::signals::WorkerSignal::Escalate { reason, .. }
         | crate::plan::signals::WorkerSignal::MarkNoop { reason, .. } => (0.0, reason.clone()),

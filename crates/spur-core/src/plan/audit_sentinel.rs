@@ -257,6 +257,14 @@ pub enum AuditSentinelKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delegation_id: Option<String>,
     },
+    /// Append-only worker assertions/evidence, never a lifecycle transition.
+    WorkerEvidence {
+        audit_id: String,
+        delegation_id: String,
+        brain_session_id: String,
+        message: String,
+        evidence: serde_json::Value,
+    },
     Signal {
         signal_id: String,
         #[serde(default)]
@@ -409,6 +417,7 @@ impl AuditSentinelKind {
             Self::RetryRequested { .. } => "retry-requested",
             Self::EscalationRequested { .. } => "escalation-requested",
             Self::Signal { .. } => "signal",
+            Self::WorkerEvidence { .. } => "worker-evidence",
             Self::MutationPlan { .. } => "mutation-plan",
             Self::MutationCommit { .. } => "mutation-commit",
             Self::MutationInvariantViolation { .. } => "mutation-invariant-violation",

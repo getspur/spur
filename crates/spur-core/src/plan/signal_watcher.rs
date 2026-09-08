@@ -162,6 +162,17 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                     continue;
                 }
 
+                // Observing a blocker is not resolving it. A processed label
+                // would make automated review ignore this signal; retain the
+                // durable unresolved fact until an explicit brain decision.
+                if matches!(
+                    &signal,
+                    WorkerSignal::Blocked { .. } | WorkerSignal::Risk { .. }
+                ) {
+                    self.seen.lock().insert(signal_id);
+                    continue;
+                }
+
                 // Worker-requested brain attention is not retry exhaustion.
                 // Keep the completed task awaiting review so the brain can
                 // inspect the durable signal and choose approve, re-plan,
@@ -378,6 +389,11 @@ mod tests {
         );
 
         watcher.tick_once().await.expect("watcher tick");
+
+        assert!(
+            watcher.seen.lock().contains(&signal_id),
+            "signal must be parsed and handled, not skipped as malformed"
+        );
 
         let issue = pm.get_issue(&task_id).await.expect("updated issue");
         assert!(

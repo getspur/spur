@@ -1277,6 +1277,10 @@ struct ReportSignalParams {
 enum ReportSignalKindSchema {
     ScopeDrift,
     RetryExhausted,
+    Blocked,
+    Risk,
+    Escalate,
+    MarkNoop,
 }
 
 #[allow(dead_code)]
@@ -1287,7 +1291,7 @@ struct ReportSignalSchema {
     #[schemars(range(min = 0.0, max = 1.0))]
     severity: Option<f64>,
     reason: Option<String>,
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 0, max = 255))]
     estimated_subtasks: Option<u64>,
     task_id: Option<String>,
     attempt: Option<u32>,
@@ -1973,7 +1977,53 @@ impl WorkerToolHandler {
     // `update_issue` is intentionally NOT exposed on the worker MCP. Workers
     // must not mutate issue state directly — it races with brain-side updates
     // and has hung delegations in the past. Workers should emit `report_signal`
-    // or `report_progress` and let the brain reconcile issue state.
+    // or `report_progress` and let the brain reconcile issue state. Evidence
+    // uses the append-only `report_audit` surface, not generic PM mutation.
+
+    #[tool(
+        name = "report_audit",
+        description = "Append durable evidence to your currently dispatched issue without changing lifecycle state.",
+        input_schema = crate::tool_schemas::schema_object::<crate::mcp::worker_evidence::ReportAuditArgs>()
+    )]
+    async fn report_audit_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "report_audit",
+            context,
+            None,
+            move |worker_ctx| async move {
+                if !deps
+                    .delegations
+                    .lock()
+                    .contains_key(&worker_ctx.delegation_id)
+                {
+                    return Err(McpHandlerError::Unauthorized(
+                        "worker delegation is no longer active".into(),
+                    ));
+                }
+                if !deps
+                    .feature_gate
+                    .has(spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED)
+                {
+                    return Err(McpHandlerError::Unauthorized(
+                        "report_audit requires Beads advanced".into(),
+                    ));
+                }
+                crate::mcp::worker_evidence::report_audit(
+                    deps.pm_service.as_ref(),
+                    &worker_ctx,
+                    args,
+                )
+                .await
+            },
+        )
+        .await
+    }
 
     #[tool(
         name = "doc_navigate",
@@ -2015,6 +2065,15 @@ impl WorkerToolHandler {
             context,
             None,
             move |worker_ctx| async move {
+                if !deps
+                    .delegations
+                    .lock()
+                    .contains_key(&worker_ctx.delegation_id)
+                {
+                    return Err(McpHandlerError::Unauthorized(
+                        "worker delegation is no longer active".into(),
+                    ));
+                }
                 deps.worker_signal_sink
                     .report_signal(&worker_ctx, args)
                     .await
@@ -3816,10 +3875,19 @@ mod tests {
             .await
             .expect("durable audit tool must exist");
         assert_eq!(first.structured_content.as_ref().unwrap()["recorded"], true);
+        assert_eq!(
+            first.structured_content.as_ref().unwrap()["audit"]["evidence"],
+            args["evidence"],
+            "worker must be able to verify the full reloaded receipt"
+        );
         let replay = client.call_tool(request(args.clone())).await.unwrap();
         assert_eq!(
             replay.structured_content.as_ref().unwrap()["idempotent"],
             true
+        );
+        assert_eq!(
+            first.structured_content.as_ref().unwrap()["audit"],
+            replay.structured_content.as_ref().unwrap()["audit"]
         );
         let comments = adv.list_comments(&task).await.unwrap();
         assert_eq!(comments.len(), before + 1);

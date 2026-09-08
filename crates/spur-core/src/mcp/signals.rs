@@ -82,7 +82,11 @@ impl WorkerSignalSink for WorkerSignalMcpToolModule {
 }
 
 pub fn tool_definitions() -> Vec<ToolDefinition> {
-    vec![report_signal_def(), report_progress_def()]
+    vec![
+        report_signal_def(),
+        report_progress_def(),
+        super::worker_evidence::tool_definition(),
+    ]
 }
 
 fn report_signal_def() -> ToolDefinition {
@@ -98,11 +102,11 @@ fn report_signal_def() -> ToolDefinition {
                     "type": "object",
                     "required": ["kind", "signal_id"],
                     "properties": {
-                        "kind": { "type": "string", "enum": ["scope_drift", "retry_exhausted"] },
+                        "kind": { "type": "string", "enum": ["scope_drift", "retry_exhausted", "blocked", "risk", "escalate", "mark_noop"] },
                         "signal_id": { "type": "string", "format": "uuid" },
                         "severity": { "type": "number", "minimum": 0, "maximum": 1 },
                         "reason": { "type": "string" },
-                        "estimated_subtasks": { "type": "integer", "minimum": 1 },
+                        "estimated_subtasks": { "type": "integer", "minimum": 0, "maximum": 255 },
                         "task_id": { "type": "string" },
                         "attempt": { "type": "integer", "minimum": 0 },
                         "last_error": { "type": "string" }
@@ -152,6 +156,13 @@ impl ToolModule for SignalMcpModule {
         let worker_module = WorkerSignalMcpToolModule::new(self.deps.clone());
 
         let result = match name {
+            "report_audit" => {
+                return Err(McpError::new(
+                    ErrorCode(-32001),
+                    "report_audit requires an authenticated worker transport",
+                    None,
+                ))
+            }
             "report_signal" => worker_module
                 .report_signal(&worker_ctx, args)
                 .await
@@ -211,6 +222,8 @@ pub async fn report_signal(
             | WorkerSignal::RetryExhausted { .. }
             | WorkerSignal::Escalate { .. }
             | WorkerSignal::MarkNoop { .. }
+            | WorkerSignal::Blocked { .. }
+            | WorkerSignal::Risk { .. }
     ) {
         return Err(McpHandlerError::InvalidParams(format!(
             "report_signal: only worker-emittable signal kinds are accepted; got {}",
@@ -238,6 +251,16 @@ pub async fn report_signal(
         .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
 
     let signal_id = args.signal.signal_id().to_string();
+
+    // Brain-side legacy calls retain their late-signal path. Worker calls
+    // must prove the target's current durable dispatch before any write.
+    let comments = if ctx.delegation_id.is_empty() {
+        adv.list_comments(&args.task_id)
+            .await
+            .map_err(|e| McpHandlerError::UpstreamPm(e.to_string()))?
+    } else {
+        super::worker_evidence::authorize_worker_task(pm, ctx, &args.task_id).await?
+    };
 
     if issue.status.as_str() == pm.closed_status() {
         adv.add_comment(
@@ -270,6 +293,12 @@ pub async fn report_signal(
     let (severity, reason, kind_label) = match &args.signal {
         WorkerSignal::ScopeDrift {
             severity, reason, ..
+        }
+        | WorkerSignal::Blocked {
+            severity, reason, ..
+        }
+        | WorkerSignal::Risk {
+            severity, reason, ..
         } => (
             *severity,
             reason.clone(),
@@ -289,22 +318,72 @@ pub async fn report_signal(
         }
     };
 
-    adv.add_comment(
-        &args.task_id,
-        &audit_encode(&AuditSentinelKind::Signal {
-            signal_id: signal_id.clone(),
-            delegation_id: ctx.delegation_id.clone(),
-            kind: kind_label.clone(),
-            severity,
-            reason,
-        }),
-    )
-    .await
-    .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+    if !severity.is_finite() || !(0.0..=1.0).contains(&severity) {
+        return Err(McpHandlerError::InvalidParams(
+            "signal severity must be between 0 and 1".into(),
+        ));
+    }
+    if matches!(
+        &args.signal,
+        WorkerSignal::ScopeDrift { .. }
+            | WorkerSignal::Blocked { .. }
+            | WorkerSignal::Risk { .. }
+            | WorkerSignal::Escalate { .. }
+            | WorkerSignal::MarkNoop { .. }
+    ) && reason.trim().is_empty()
+    {
+        return Err(McpHandlerError::InvalidParams(
+            "signal reason must not be empty".into(),
+        ));
+    }
+    let audit = AuditSentinelKind::Signal {
+        signal_id: signal_id.clone(),
+        delegation_id: ctx.delegation_id.clone(),
+        kind: kind_label.clone(),
+        severity,
+        reason,
+    };
+    let mut has_audit = false;
+    let mut has_signal = false;
+    for comment in &comments {
+        if let Some(Ok(existing @ AuditSentinelKind::Signal { .. })) =
+            crate::plan::audit_sentinel::parse_comment(&comment.body)
+        {
+            if let AuditSentinelKind::Signal { signal_id: id, .. } = &existing {
+                if id == &signal_id {
+                    if existing != audit {
+                        return Err(McpHandlerError::InvalidParams(
+                            "signal_id already has a different audit".into(),
+                        ));
+                    }
+                    has_audit = true;
+                }
+            }
+        }
+        if let Some(Ok(existing)) = crate::plan::signals::parse_comment(&comment.body) {
+            if existing.signal_id() == args.signal.signal_id() {
+                if existing != args.signal {
+                    return Err(McpHandlerError::InvalidParams(
+                        "signal_id already has different content".into(),
+                    ));
+                }
+                has_signal = true;
+            }
+        }
+    }
+    // Repair partially persisted calls on retry, without duplicating durable
+    // comments. Success is returned only after the discovery label is saved.
+    if !has_audit {
+        adv.add_comment(&args.task_id, &audit_encode(&audit))
+            .await
+            .map_err(|e| McpHandlerError::UpstreamPm(e.to_string()))?;
+    }
 
-    adv.add_comment(&args.task_id, &signal_encode(&args.signal))
-        .await
-        .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+    if !has_signal {
+        adv.add_comment(&args.task_id, &signal_encode(&args.signal))
+            .await
+            .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+    }
 
     pm.update_issue(
         &args.task_id,
@@ -320,6 +399,7 @@ pub async fn report_signal(
         "recorded": true,
         "signal_id": signal_id,
         "late": false,
+        "idempotent": has_audit && has_signal,
     }))
 }
 

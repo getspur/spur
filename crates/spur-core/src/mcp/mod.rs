@@ -8,6 +8,7 @@ pub mod review_verdict;
 pub mod signals;
 pub mod skills_catalog;
 pub mod worker;
+pub(crate) mod worker_evidence;
 
 pub use families::{resolve_mcp_families, McpFamily, McpFamilyError};
 

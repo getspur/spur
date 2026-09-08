@@ -88,6 +88,7 @@ impl MutationProposer for ScopeDriftSplitProposer {
             WorkerSignal::RetryExhausted { .. } => vec![],
             WorkerSignal::Escalate { .. } => vec![],
             WorkerSignal::MarkNoop { .. } => vec![],
+            WorkerSignal::Blocked { .. } | WorkerSignal::Risk { .. } => vec![],
         }
     }
 }
@@ -246,6 +247,7 @@ mod tests {
             WorkerSignal::RetryExhausted { .. } => false,
             WorkerSignal::Escalate { .. } => false,
             WorkerSignal::MarkNoop { .. } => false,
+            WorkerSignal::Blocked { .. } | WorkerSignal::Risk { .. } => false,
         }
     }
 
