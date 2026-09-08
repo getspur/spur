@@ -43,3 +43,21 @@ Report exact tests and commits, preserving any build/environment blockers. The r
 - POST receipts: A `sol_831075c267c44947` / `sol_3efdfa67bd1540df`; B `sol_3f794bb98d054b06` / `sol_cfb7b77d00e048a9`. Each pair is positive sat/pass then adversarial unsat/fail. Full pinned/reloaded receipts are on `bd-2a4e`. They check bounded abstractions, not arbitrary Rust executions.
 - Independent read-only review: `bd-3aij`, delegation `73db930b-9fa8-4bc1-ad22-3e94e548273b`, codex / gpt-5.6-sol / xhigh. Reviewing `6142413c5..8c355408c`; pending at handoff.
 - No root-branch merge, remote push, running-app restart, or E1-09b retry performed. Spur root remains `6142413c5`; the pre-existing dirty otobank notebook is unchanged.
+
+## Review correction: signal schema contract
+
+Review `73db930b-9fa8-4bc1-ad22-3e94e548273b` requested changes: both advertised signal schemas omit kind-dependent required fields, although the typed handler requires them. No other verified Critical/Important finding was reported. This correction stays within A and `bd-2a4e`.
+
+1. PRE: execute `data_integrity.conditional_required` separately for each of the six worker-emittable kinds. Positive minimal payloads must pass; omission of each kind-specific required field must fail. Split snapshots stay within the catalog variable limit; receipts are pinned, reloaded, and copied into Beads. These are presence-model checks, not a proof of schema evaluation or Rust execution.
+2. RED: compare advertised requirements to minimal typed payloads, check individual required-field omissions against `WorkerSignal`, and assert exact catalog/RMCP schema equality. Commit failing tests separately.
+3. GREEN: one shared input schema, with discriminated `anyOf` requirements. Keep object roots, no `oneOf`/`allOf`/type-union arrays or unresolved references. Preserve each existing signal variant's minimal valid payload; do not globally require severity on retry/escalation/no-op signals. No handler or lifecycle-policy change.
+4. Run targeted regressions and the full remote core library suite, repeat POST checks against the shipped requirements, then request independent read-only re-review. Integration, restart, and E1-09b retry remain outside this correction.
+
+### Correction evidence
+
+- RED: `scripts/spur-cargo test -p spur-core --lib report_signal_schema` with remote-only environment flags compiled and ran both tests; **0 passed, 2 failed**, exit 101. Failures were missing kind-dependent requirements and differing catalog/router schemas. Test-only commit: `ecc57c536`.
+- Fix: `70b61e97f4e6992228de2ea6a811c8b9aef44320`. One shared schema supplies the requirements without changing handler or lifecycle behavior.
+- GREEN: `SPUR_REMOTE=1 SPUR_NO_LOCAL_FALLBACK=1 scripts/spur-cargo test -p spur-core --lib` — **1,583 passed, 0 failed, 2 ignored**, exit 0, 11.96 seconds test execution. Both new regressions and provider shape test passed. Formatter and diff checks passed. Five existing `spur-graph` dead-code warnings remain outside this change.
+- Six PRE positive and six PRE omission controls, followed by the same POST controls against the shipped requirements, returned expected sat/pass and unsat/fail outcomes. Full pinned/reloaded receipts are recorded on `bd-2a4e`. POST positive IDs: `sol_d12c361f58ed4eb3`, `sol_a577d5f7410a4e57`, `sol_74076aae33844394`, `sol_20569cbc401b488d`, `sol_088dfc883ac74058`, `sol_262bdfa3105045df` (scope drift, blocked, risk, escalate, no-op, retry exhausted respectively).
+- Re-review: `bd-f46z`, delegation `f621ea52-70a1-470e-b07a-b4e253e8b6fa`, codex / gpt-5.6-sol / xhigh; exact correction range `8e61e7658..70b61e97f`. Pending at handoff.
+- Still no root merge, push, application restart, or E1-09b retry. The live worker smoke gate remains required after integration and rebuild/restart.
