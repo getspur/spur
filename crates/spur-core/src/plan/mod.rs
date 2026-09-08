@@ -3915,7 +3915,8 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         && n_ready == 0
         && n_blocked_on_setup_conflict == 0
         && n_escalated == 0;
-    let ready_to_merge = all_workers_done
+    let ready_to_merge = total > 0
+        && all_workers_done
         && n_awaiting_review == 0
         && n_rejected == 0
         && n_failed == 0

@@ -806,6 +806,14 @@ pub fn project_status_for_issue(
     let integration_conflict_labeled = has_integration_conflict_label(&issue.labels);
     let status = if issue.status == closed_status {
         project_closed_status(issue, audits)
+    } else if !matches!(issue.status.as_str(), "open" | "in_progress") {
+        // Membership and schedulability are separate. A durable lifecycle hold
+        // must survive restart and take precedence over stale dispatch/review
+        // labels or audits. Reuse the nonterminal brain-attention state so
+        // recompute_open_statuses cannot promote a held issue to Ready.
+        PlanTaskStatus::EscalatedToBrain {
+            last_error: format!("Beads status '{}' holds this task; the brain must explicitly reopen it before processing resumes", issue.status),
+        }
     } else if let Some(kind) = terminal_status_from_audits(audits).filter(|kind| {
         !(integration_conflict_labeled
             && matches!(
@@ -1347,25 +1355,15 @@ pub async fn project_plan_from_beads(
     plan_id: &str,
     feature_gate: &spur_license::FeatureGate,
 ) -> anyhow::Result<PlanState> {
-    let mut summary_by_id = HashMap::new();
-    for status in [
-        Some("open".to_string()),
-        Some("in_progress".to_string()),
-        Some(pm.closed_status().to_string()),
-    ] {
-        for summary in pm
-            .list_issues(spur_pm::IssueFilter {
-                labels: vec![crate::plan::labels::plan_id(plan_id)],
-                status,
-                limit: Some(1_000),
-                ..Default::default()
-            })
-            .await?
-        {
-            summary_by_id.insert(summary.id.clone(), summary);
-        }
-    }
-    let summaries: Vec<spur_pm::IssueSummary> = summary_by_id.into_values().collect();
+    // A lifecycle whitelist silently drops blocked/deferred members. Query
+    // membership by plan label alone, retaining closed review evidence too.
+    let summaries = pm
+        .list_issues(spur_pm::IssueFilter {
+            labels: vec![crate::plan::labels::plan_id(plan_id)],
+            include_closed: true,
+            ..Default::default()
+        })
+        .await?;
     let mut issues = Vec::with_capacity(summaries.len());
     for summary in summaries {
         issues.push(pm.get_issue(&summary.id).await?);
@@ -2491,6 +2489,12 @@ mod tests {
         ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
             let mut out = Vec::new();
             for issue in self.issues_by_id.values() {
+                if filter.status.is_none()
+                    && !filter.include_closed
+                    && issue.status == self.closed_status
+                {
+                    continue;
+                }
                 if let Some(status) = &filter.status {
                     if &issue.status != status {
                         continue;
