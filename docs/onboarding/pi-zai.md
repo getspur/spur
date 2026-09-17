@@ -75,6 +75,26 @@ so SPUR synthesizes `/model` and `/effort`. Do not add a static `/model` command
 A billed ping (`Reply with exactly: pong`) completed with `stopReason=end_turn`
 using the reused OpenCode key.
 
+## Step 5 — SPUR MCP tools (`code_*`, analyst) inside pi
+
+pi has no built-in MCP and pi-acp does not forward ACP `mcpServers`, but pi
+can reach SPUR's standalone stdio MCP servers via the
+[`pi-mcp-adapter`](https://github.com/nicobailon/pi-mcp-adapter) extension:
+
+```bash
+pi install npm:pi-mcp-adapter
+```
+
+The extension reads standard MCP config. This repo ships a project-level
+`.pi/mcp.json` wiring the SPUR servers (`spur graph mcp` = the 9 `code_*`
+tools, `spur analyst mcp`, and the read-only `spur mcp` bundle), so any pi
+session started in the worktree gets them automatically — including pi
+running as a SPUR brain/worker over pi-acp. Verified 2026-09-17:
+`spur exec --agent pi` successfully called `spur-graph_code_symbol_search`.
+
+Servers are lazy: they only spawn on first tool use, so idle context cost is
+one proxy tool (~200 tokens), not the full tool surface.
+
 ## Troubleshooting
 
 - **`Brain agent 'pi' not found`** — `pi-acp` is not on `$PATH`, or `.spur/config.toml`
@@ -85,5 +105,8 @@ using the reused OpenCode key.
 - **No `/model` in the TUI** — probe `session/new` for a non-empty `model`
   select. Until that is advertised, pin `defaultProvider`/`defaultModel` in
   `~/.pi/agent/settings.json`.
-- **MCP tools missing** — `pi-acp` accepts ACP MCP servers but does not forward
-  them to Pi. Configure Pi MCP separately if you need it.
+- **MCP tools missing** — two distinct gaps. (a) ACP-forwarded MCP: `pi-acp`
+  accepts `mcpServers` but drops them — install the `pi-mcp-adapter` extension
+  and use `.pi/mcp.json` (see Step 5) instead. (b) `/model` missing — probe
+  `session/new` for a non-empty `model` select; until advertised, pin
+  `defaultProvider`/`defaultModel` in `~/.pi/agent/settings.json`.

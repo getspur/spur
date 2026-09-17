@@ -266,6 +266,13 @@ and `pi-acp@0.0.33`). Live probe 2026-09-17 advertised `configOptions` `model` a
 `model` command. For Z.AI Coding Plan, reuse OpenCode's `zai-coding-plan` key into
 `~/.pi/agent/auth.json` under `zai`; see `docs/onboarding/pi-zai.md`.
 
+For SPUR MCP tools (`code_*`, analyst) inside pi: `pi install npm:pi-mcp-adapter`
+plus a project `.pi/mcp.json` pointing at the standalone stdio servers
+(`spur graph mcp`, `spur analyst mcp`, `spur mcp`). The adapter is lazy — one
+proxy tool, servers spawn on first use. pi-acp itself still does not forward
+ACP `mcpServers` (accepted but dropped), so ACP-delegated MCP remains
+unavailable.
+
 ## Worked example: a hypothetical `my-agent`
 
 Suppose `my-agent` is a Python CLI that accepts a prompt on stdin and emits text on stdout. It has no slash-command machinery, no ACP support.
