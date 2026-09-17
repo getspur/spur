@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "spur-graph": {
+      "command": "spur",
+      "args": [
+        "graph",
+        "mcp"
+      ]
+    },
+    "spur-analyst": {
+      "command": "spur",
+      "args": [
+        "analyst",
+        "mcp"
+      ]
+    },
+    "spur": {
+      "command": "spur",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

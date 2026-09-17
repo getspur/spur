@@ -33,7 +33,7 @@ pub const INSTALL_HINTS: &[(&str, &str)] = &[
     ),
     (
         "pi",
-        "npm i -g --ignore-scripts @earendil-works/pi-coding-agent@0.85.1 && npm i -g pi-acp@0.0.33",
+        "npm i -g --ignore-scripts @earendil-works/pi-coding-agent@0.85.1 && npm i -g pi-acp@0.0.33 && pi install npm:pi-mcp-adapter",
     ),
 ];
 
@@ -188,6 +188,16 @@ pub async fn run(
         false
     };
 
+    // ── Phase 4b: Pi MCP wiring ──────────────────────────────────────
+    // pi-acp drops ACP mcpServers, so pi reaches SPUR's standalone stdio
+    // MCP servers through the pi-mcp-adapter extension + .pi/mcp.json.
+    // Idempotent; never overwrites user entries.
+    match materialize_pi_mcp_config(&repo_root, &config) {
+        Ok(true) => println!("  ✓ .pi/mcp.json (SPUR MCP servers for pi)"),
+        Ok(false) => {}
+        Err(e) => eprintln!("  [spur] warning: pi MCP wiring failed: {e}"),
+    }
+
     // ── Step 2 of 3: PM tracker ────────────────────────────────────────
     // Idempotent: an existing `.beads/` needs no work, so we don't prompt.
     // Bootstrapping here makes the golden-path "git clone → spur init"
@@ -224,6 +234,90 @@ pub async fn run(
     print_summary(&config, config_written, config_label);
 
     Ok(())
+}
+
+// ── Pi MCP wiring ───────────────────────────────────────────────
+
+/// SPUR standalone stdio MCP servers exposed to pi via the
+/// `pi-mcp-adapter` extension. `command` stays on $PATH (not an absolute
+/// path) so a committed `.pi/mcp.json` stays portable across machines.
+const PI_MCP_SERVERS: &[(&str, &str, &[&str])] = &[
+    ("spur-graph", "spur", &["graph", "mcp"]),
+    ("spur-analyst", "spur", &["analyst", "mcp"]),
+    ("spur", "spur", &["mcp"]),
+];
+
+/// Idempotently ensure `.pi/mcp.json` wires SPUR's standalone stdio MCP
+/// servers for any pi agent in the merged config.
+///
+/// pi has no built-in MCP and pi-acp drops ACP `mcpServers` (accepted but
+/// never forwarded), so the `pi-mcp-adapter` extension + this project
+/// config file are the supported bridge. Servers are lazy — they spawn on
+/// first tool use, so idle context cost is one proxy tool.
+///
+/// Merge semantics: existing user/server entries are preserved verbatim;
+/// SPUR entries are added when missing and left untouched when present
+/// (user overrides like `disabled: true` or extra args win). Returns
+/// `true` when the file was created or modified.
+fn materialize_pi_mcp_config(repo_root: &std::path::Path, config: &SpurConfig) -> Result<bool> {
+    let has_pi = config
+        .agents
+        .entries
+        .iter()
+        .any(|a| a.kind == spur_acp::types::AgentKind::Pi);
+    if !has_pi {
+        return Ok(false);
+    }
+
+    let path = repo_root.join(".pi").join("mcp.json");
+    let existing: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse {} — fix or remove it and re-run `spur init`: {e}",
+                path.display()
+            )
+        })?,
+        Err(_) => serde_json::json!({}),
+    };
+
+    let mut root = existing;
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    let servers = root
+        .as_object_mut()
+        .expect("root is an object")
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    if !servers.is_object() {
+        anyhow::bail!(
+            "{} has a non-object `mcpServers` — fix or remove it and re-run `spur init`",
+            path.display()
+        );
+    }
+    let server_map = servers.as_object_mut().expect("checked above");
+
+    let mut added: Vec<&str> = Vec::new();
+    for (name, command, args) in PI_MCP_SERVERS {
+        // Only insert when absent — user overrides (e.g. `disabled: true`
+        // or extra args) are preserved verbatim.
+        if !server_map.contains_key(*name) {
+            server_map.insert(
+                (*name).to_string(),
+                serde_json::json!({ "command": command, "args": args }),
+            );
+            added.push(name);
+        }
+    }
+
+    if !added.is_empty() {
+        std::fs::create_dir_all(path.parent().expect(".pi parent"))
+            .map_err(|e| anyhow::anyhow!("failed to create .pi/: {e}"))?;
+        std::fs::write(&path, serde_json::to_string_pretty(&root)? + "\n")
+            .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
+    }
+
+    Ok(!added.is_empty())
 }
 
 /// Ask a yes/no question, defaulting to Yes. Returns Yes without prompting
@@ -840,7 +934,19 @@ fn print_gitattributes_advisory_if_needed(repo_root: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::interpret_yes_no;
+    use super::{interpret_yes_no, materialize_pi_mcp_config, SpurConfig};
+
+    fn config_with_pi_kind(enabled: bool) -> SpurConfig {
+        let mut config = SpurConfig::default();
+        let mut agent = spur_acp::config::AgentConfig::with_defaults("pi");
+        agent.kind = if enabled {
+            spur_acp::types::AgentKind::Pi
+        } else {
+            spur_acp::types::AgentKind::Generic
+        };
+        config.agents.entries.push(agent);
+        config
+    }
 
     #[test]
     fn empty_input_defaults_to_yes() {
@@ -861,5 +967,64 @@ mod tests {
         for input in ["y", "Y", "yes", "Yes", "yep", "sure", "1"] {
             assert!(interpret_yes_no(input), "{input:?} should be Yes");
         }
+    }
+
+    #[test]
+    fn pi_mcp_writes_config_only_for_pi_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!materialize_pi_mcp_config(dir.path(), &config_with_pi_kind(false)).unwrap());
+        assert!(!dir.path().join(".pi/mcp.json").exists());
+
+        assert!(materialize_pi_mcp_config(dir.path(), &config_with_pi_kind(true)).unwrap());
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(".pi/mcp.json")).unwrap(),
+        )
+        .unwrap();
+        let servers = written["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 3);
+        assert_eq!(servers["spur-graph"]["command"], "spur");
+        assert_eq!(
+            servers["spur-graph"]["args"],
+            serde_json::json!(["graph", "mcp"])
+        );
+        assert_eq!(servers["spur"]["args"], serde_json::json!(["mcp"]));
+    }
+
+    #[test]
+    fn pi_mcp_is_idempotent_and_preserves_user_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Pre-existing user config with one custom server and one SPUR
+        // server carrying a user override (`disabled`).
+        std::fs::create_dir_all(dir.path().join(".pi")).unwrap();
+        std::fs::write(
+            dir.path().join(".pi/mcp.json"),
+            r#"{"mcpServers":{"chrome":{"command":"npx","args":["-y","x"]},"spur-graph":{"command":"spur","args":["graph","mcp"],"disabled":true}}}"#,
+        )
+        .unwrap();
+
+        // First run adds the two missing servers; second is a no-op.
+        assert!(materialize_pi_mcp_config(dir.path(), &config_with_pi_kind(true)).unwrap());
+        assert!(!materialize_pi_mcp_config(dir.path(), &config_with_pi_kind(true)).unwrap());
+
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(".pi/mcp.json")).unwrap(),
+        )
+        .unwrap();
+        let servers = after["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 4, "chrome + 3 SPUR servers");
+        assert_eq!(servers["chrome"]["command"], "npx");
+        assert_eq!(
+            servers["spur-graph"]["disabled"], true,
+            "user override preserved"
+        );
+        assert_eq!(servers["spur-analyst"]["command"], "spur");
+    }
+
+    #[test]
+    fn pi_mcp_rejects_corrupt_mcp_servers_array() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".pi")).unwrap();
+        std::fs::write(dir.path().join(".pi/mcp.json"), r#"{"mcpServers":[]}"#).unwrap();
+        assert!(materialize_pi_mcp_config(dir.path(), &config_with_pi_kind(true)).is_err());
     }
 }
