@@ -64,7 +64,9 @@ impl Adapter {
             spur_acp::types::AgentKind::Kiro => Some(Self::Kiro),
             spur_acp::types::AgentKind::OpenCode => Some(Self::OpenCode),
             spur_acp::types::AgentKind::Kimi => Some(Self::Kimi),
-            spur_acp::types::AgentKind::Grok | spur_acp::types::AgentKind::Generic => None,
+            spur_acp::types::AgentKind::Grok
+            | spur_acp::types::AgentKind::Pi
+            | spur_acp::types::AgentKind::Generic => None,
         }
     }
 

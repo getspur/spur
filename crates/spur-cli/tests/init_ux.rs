@@ -24,6 +24,7 @@ fn install_hints_cover_all_seed_agents() {
         "opencode",
         "kimi",
         "grok",
+        "pi",
     ];
     let seeds = spur_acp::config::load_seed_template();
     for agent in &seeds.entries {

@@ -7,7 +7,7 @@ No Rust required when the agent uses an existing transport + dispatch combinatio
 
 Open `.spur/config.toml`, add a `[[agents.entries]]` block, then run `spur config check` to validate.
 
-If your agent is one spur knows about (kiro, claude-code, claude-code-acp, codex, gemini), `spur init` writes a matching block automatically when the binary is on `$PATH`. **`spur init` overwrites `.spur/config.toml`** — if you have customizations, edit by hand instead.
+If your agent is one spur knows about (kiro, claude-code, claude-code-acp, codex, gemini, opencode, kimi, grok, pi), `spur init` writes a matching block automatically when the binary is on `$PATH`. **`spur init` overwrites `.spur/config.toml`** — if you have customizations, edit by hand instead.
 
 ## Decision tree
 
@@ -38,6 +38,7 @@ kind = "claude-code-acp"   # or one of the values below
 | Kiro CLI (`kiro-cli acp`) | `"kiro"` |
 | Gemini CLI (`gemini --acp`) | `"gemini"` |
 | xAI Grok Build CLI (`grok agent stdio`) | `"grok"` |
+| Pi coding agent via `pi-acp` | `"pi"` |
 | Anything else | `"generic"` (this is also the default when the field is omitted) |
 
 `"generic"` applies heuristic fallbacks (case-insensitive title matching, ACP `ToolKind` passthrough). Your agent will work fine — you'll just get generic glyphs and no mode-badge translation. File an issue if your agent's tool vocabulary is widely used and deserves a dedicated `AgentKind` variant.
@@ -239,6 +240,31 @@ records vendor-neutral meta planes and the same compact SPUR capability matrix.
 Do not add a static `[[commands.static]] name = "model"` unless you have
 verified Grok honors `/model …` as prompt text — a static entry does not call
 `session/set_config_option`.
+
+## Worked example: Pi coding agent (`pi-acp`)
+
+```toml
+[[agents.entries]]
+name = "pi"
+command = "pi-acp"
+args = []
+transport = "acp"
+kind = "pi"
+role = "both"
+cost_tier = "medium"
+
+[agents.entries.display]
+handle = "pi"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+```
+
+`pi-acp` spawns `pi --mode rpc`. Install both (`@earendil-works/pi-coding-agent@0.85.1`
+and `pi-acp@0.0.33`). Live probe 2026-09-17 advertised `configOptions` `model` and
+`thought_level`, so SPUR synthesizes `/model` and `/effort` — do not add a static
+`model` command. For Z.AI Coding Plan, reuse OpenCode's `zai-coding-plan` key into
+`~/.pi/agent/auth.json` under `zai`; see `docs/onboarding/pi-zai.md`.
 
 ## Worked example: a hypothetical `my-agent`
 

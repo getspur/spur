@@ -15,7 +15,7 @@ pub fn usage_emit_default(kind: AgentKind) -> bool {
         AgentKind::Kiro => true,
         AgentKind::Kimi => true,
         AgentKind::Gemini => true,
-        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Generic => true,
+        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Pi | AgentKind::Generic => true,
     }
 }
 
@@ -35,6 +35,7 @@ mod tests {
             (AgentKind::Gemini, true),
             (AgentKind::OpenCode, true),
             (AgentKind::Grok, true),
+            (AgentKind::Pi, true),
             (AgentKind::Generic, true),
         ];
 

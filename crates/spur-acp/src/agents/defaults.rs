@@ -28,6 +28,7 @@ pub fn builtin_descriptor(agent_name: &str) -> Option<DelegationDescriptor> {
         "codex-acp" => "codex",
         "codex-bin" => "codex",
         "gemini-acp" => "gemini",
+        "pi-acp" => "pi",
         other => other,
     };
     defaults().get(key).cloned()
@@ -48,6 +49,8 @@ pub fn known_agents() -> &'static [&'static str] {
         "opencode",
         "kimi",
         "grok",
+        "pi",
+        "pi-acp",
     ]
 }
 
@@ -357,6 +360,13 @@ transport = "acp""#,
     fn gemini_acp_aliases_to_gemini() {
         let a = builtin_descriptor("gemini-acp").unwrap();
         let b = builtin_descriptor("gemini").unwrap();
+        assert_eq!(a.description, b.description);
+    }
+
+    #[test]
+    fn pi_acp_aliases_to_pi() {
+        let a = builtin_descriptor("pi-acp").unwrap();
+        let b = builtin_descriptor("pi").unwrap();
         assert_eq!(a.description, b.description);
     }
 

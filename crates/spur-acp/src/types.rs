@@ -179,6 +179,8 @@ pub enum AgentKind {
     OpenCode,
     /// xAI Grok Build CLI via `grok agent stdio`.
     Grok,
+    /// Pi coding agent via `pi-acp` (`pi --mode rpc`).
+    Pi,
     /// Any ACP-speaking agent not otherwise recognized.
     #[default]
     Generic,
@@ -202,6 +204,7 @@ impl AgentKind {
             "gemini" | "gemini-acp" | "gemini-cli" | "gemini cli" => Self::Gemini,
             "opencode" | "open-code" => Self::OpenCode,
             "grok" | "grok-code" | "grok build" | "grok-build" => Self::Grok,
+            "pi" | "pi-acp" | "pi-coding-agent" => Self::Pi,
             _ => Self::Generic,
         }
     }
@@ -328,6 +331,15 @@ mod agent_kind_tests {
         let kind = AgentKind::from_name("grok");
         assert_eq!(kind, AgentKind::Grok);
         assert_eq!(serde_json::to_string(&kind).unwrap(), "\"grok\"");
+    }
+
+    #[test]
+    fn from_name_recognizes_pi_as_first_class_kind() {
+        let kind = AgentKind::from_name("pi");
+        assert_eq!(kind, AgentKind::Pi);
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"pi\"");
+        assert_eq!(AgentKind::from_name("pi-acp"), AgentKind::Pi);
+        assert_eq!(AgentKind::from_name("pi-coding-agent"), AgentKind::Pi);
     }
 
     #[test]

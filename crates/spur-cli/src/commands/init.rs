@@ -31,6 +31,10 @@ pub const INSTALL_HINTS: &[(&str, &str)] = &[
         "grok",
         "curl -fsSL https://x.ai/cli/install.sh | bash   # then `grok login`",
     ),
+    (
+        "pi",
+        "npm i -g --ignore-scripts @earendil-works/pi-coding-agent@0.85.1 && npm i -g pi-acp@0.0.33",
+    ),
 ];
 
 pub fn install_hint(name: &str) -> &'static str {

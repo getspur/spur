@@ -783,6 +783,7 @@ mod tests {
     fn adapter_identity_helpers_cover_supported_agent_kinds() {
         use AgentKind::{
             ClaudeCodeAcp, ClaudeStreamJson, CodexAcp, Gemini, Generic, Grok, Kimi, Kiro, OpenCode,
+            Pi,
         };
 
         assert_eq!(Adapter::SpurHermetic.key(), "spur-hermetic");
@@ -807,6 +808,7 @@ mod tests {
         assert_eq!(Adapter::for_agent_kind(OpenCode), Some(Adapter::OpenCode));
         assert_eq!(Adapter::for_agent_kind(Kimi), Some(Adapter::Kimi));
         assert_eq!(Adapter::for_agent_kind(Grok), None);
+        assert_eq!(Adapter::for_agent_kind(Pi), None);
         assert_eq!(Adapter::for_agent_kind(Generic), None);
         assert!(!Adapter::Cursor.target_is_directory());
         assert!(Adapter::Codex.target_is_directory());

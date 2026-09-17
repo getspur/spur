@@ -1941,6 +1941,23 @@ mod tests {
     }
 
     #[test]
+    fn seed_template_pi_uses_pi_acp_binary() {
+        // Live probe 2026-09-17: pi-acp 0.0.33 advertises model +
+        // thought_level configOptions, modes, and available_commands.
+        // The adapter spawns `pi --mode rpc`; argv stays empty.
+        let seeds = load_seed_template();
+        let pi = seeds
+            .entries
+            .iter()
+            .find(|a| a.name == "pi")
+            .expect("pi should be in seed template");
+        assert_eq!(pi.kind, crate::types::AgentKind::Pi);
+        assert_eq!(pi.command, "pi-acp");
+        assert!(pi.effective_args().is_empty());
+        assert_eq!(pi.transport, crate::types::TransportKind::Acp);
+    }
+
+    #[test]
     fn brain_delegation_framework_defaults_per_build() {
         // Empty [brain.delegation] block → build-aware default.
         let toml = r#"

@@ -213,3 +213,38 @@ handle = "grok"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
+
+# ── pi ────────────────────────────────────────────────────────────
+# Pi coding agent via svkozak/pi-acp. The adapter speaks ACP over stdio
+# and spawns `pi --mode rpc`, so both binaries must be on $PATH.
+# Install (solver-verified 2026-09-17, sol_85fe994647ef4427):
+#   npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.85.1
+#   npm install -g pi-acp@0.0.33
+# pi-acp requires pi >= 0.80.4 and Node 20+ (docs recommend Node 22).
+#
+# Live probe 2026-09-17 (`scripts/probe_acp_capabilities.py --command pi-acp`):
+#   initialize agentInfo name=pi-acp version=0.0.33
+#   loadSession=true; promptCapabilities.image=true; embeddedContext=false
+#   session/new advertises configOptions id=model (select) and
+#   id=thought_level (select) plus ACP models/modes catalogs — SPUR
+#   synthesizes /model and /effort. Dynamic available_commands include
+#   compact/autocompact/export/session/name/steering/follow-up/changelog.
+#   Do NOT add static [[commands.static]] name="model"; that would not
+#   call session/set_config_option.
+# Z.AI Coding Plan: reuse OpenCode `~/.local/share/opencode/auth.json`
+# provider `zai-coding-plan` into `~/.pi/agent/auth.json` key `zai`
+# (type=api_key). Optional: defaultProvider=zai, defaultModel=glm-4.7.
+[[agents.entries]]
+name = "pi"
+command = "pi-acp"
+args = []
+transport = "acp"
+kind = "pi"
+role = "both"
+cost_tier = "medium"
+
+[agents.entries.display]
+handle = "pi"
+
+[agents.entries.commands]
+dispatch = "prompt_text"

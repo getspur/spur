@@ -54,6 +54,7 @@ fn agent_kind_tag(kind: AgentKind) -> &'static str {
         AgentKind::Gemini => "gemini",
         AgentKind::OpenCode => "opencode",
         AgentKind::Grok => "grok",
+        AgentKind::Pi => "pi",
         AgentKind::Generic => "generic",
     }
 }

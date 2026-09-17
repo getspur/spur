@@ -110,3 +110,25 @@ limitations = [
 ]
 input_expectations = ""
 output_shape = "Unified diff + summary."
+
+[pi]
+description = "Generalist coding agent (Pi via pi-acp) with native ACP transport."
+tier = "generalist"
+good_for = [
+  "single and multi-file edits",
+  "code generation from spec",
+  "Z.AI GLM coding-plan sessions",
+]
+avoid_for = [
+  "workflows that need ACP-delegated MCP or filesystem",
+]
+strengths = [
+  "ACP configOptions for /model and /effort",
+  "loadSession and advertised slash commands",
+]
+limitations = [
+  "pi-acp does not forward ACP MCP servers or fs/terminal delegation to pi",
+  "requires pi >= 0.80.4 on PATH in addition to the pi-acp adapter",
+]
+input_expectations = "Authenticate Pi (ZAI_API_KEY or ~/.pi/agent/auth.json zai) before dispatch."
+output_shape = "Unified diff + summary."

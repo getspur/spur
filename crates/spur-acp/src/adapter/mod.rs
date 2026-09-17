@@ -191,7 +191,9 @@ pub fn classify_tool_parts(title: &str, tool_kind: ToolKind, kind: AgentKind) ->
         AgentKind::Kimi => kimi::refine(title, base),
         AgentKind::Gemini => gemini::refine(title, base),
         AgentKind::Kiro => kiro::refine(title, base),
-        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Generic => generic::refine(title, base),
+        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Pi | AgentKind::Generic => {
+            generic::refine(title, base)
+        }
     }
 }
 
@@ -206,7 +208,7 @@ pub fn format_input(raw_input: &Value, kind: AgentKind) -> ToolInputDisplay {
         AgentKind::Kimi => kimi::try_format_input(raw_input),
         AgentKind::Gemini => gemini::try_format_input(raw_input),
         AgentKind::Kiro => kiro::try_format_input(raw_input),
-        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Generic => None,
+        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Pi | AgentKind::Generic => None,
     };
     per_kind.unwrap_or_else(|| generic::format_input(raw_input))
 }
@@ -228,7 +230,7 @@ pub fn extract_observe(raw_output: &Value, kind: AgentKind) -> ObservePayload {
         AgentKind::Kimi => kimi::try_extract_observe(&unwrapped),
         AgentKind::Gemini => gemini::try_extract_observe(&unwrapped),
         AgentKind::Kiro => kiro::try_extract_observe(&unwrapped),
-        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Generic => None,
+        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Pi | AgentKind::Generic => None,
     };
     per_kind.unwrap_or_else(|| generic::extract_observe(&unwrapped))
 }
@@ -250,6 +252,7 @@ mod extract_observe_tests {
             AgentKind::Gemini,
             AgentKind::OpenCode,
             AgentKind::Grok,
+            AgentKind::Pi,
             AgentKind::Generic,
         ];
         let values = [
@@ -278,7 +281,7 @@ pub fn mode_badge(mode_id: &str, kind: AgentKind) -> Option<ModeBadge> {
         AgentKind::Kimi => None,
         AgentKind::Gemini => None,
         AgentKind::Kiro => kiro::mode_badge(mode_id),
-        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Generic => None,
+        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Pi | AgentKind::Generic => None,
     }
 }
 
@@ -321,7 +324,9 @@ pub fn extract_tool_meta(tc: &ToolCall, kind: AgentKind) -> SpurToolMeta {
         AgentKind::Kimi => kimi::extract_tool_meta(tc),
         AgentKind::Gemini => gemini::extract_tool_meta(tc),
         AgentKind::Kiro => kiro::extract_tool_meta(tc),
-        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Generic => SpurToolMeta::default(),
+        AgentKind::OpenCode | AgentKind::Grok | AgentKind::Pi | AgentKind::Generic => {
+            SpurToolMeta::default()
+        }
     }
 }
 
