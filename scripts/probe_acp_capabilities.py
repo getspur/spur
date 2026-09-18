@@ -20,17 +20,26 @@ payloads. Pass ``--probe-vendor-rpc`` to also invoke discovered
 proprietary planes advertise values, and any ``--vendor-method`` extras.
 
 Use ``--prompt`` only when session/update evidence is worth a billed turn.
+Use ``--terminal-mode strict`` to execute terminal callbacks, or ``grok`` to
+mirror SPUR's packed Bash argv workaround. Both execute commands locally.
+Repeat ``--follow-up-prompt`` to test continuation in the same ACP session.
+Filesystem callbacks are not implemented and are never advertised.
+
+Exit codes: 0 for a completed probe (tool failures remain report evidence),
+1 for a hard process/handshake failure, 2 for a prompt RPC error or timeout.
 """
 
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -1799,6 +1808,10 @@ class AcpClient:
                 self.proc.wait(timeout=2)
         self._reader.join(timeout=1)
         self._stderr_reader.join(timeout=1)
+        if not self._reader.is_alive():
+            self.stdout.close()
+        if not self._stderr_reader.is_alive():
+            self.stderr.close()
         self._log_file.close()
         return self.proc.returncode, forced
 
@@ -1827,13 +1840,214 @@ def _permission_option(options: list[JsonObject], approve: bool) -> str:
     return "approve" if approve else "cancel"
 
 
+class _ProbeTerminal:
+    """Drain a child independently so wait/kill/output callbacks can overlap."""
+
+    def __init__(self, proc: subprocess.Popen[bytes], session_id: str, limit: int):
+        self.proc = proc
+        self.session_id = session_id
+        self.limit = limit
+        self.output = ""
+        self.truncated = False
+        self.kill_sent = False
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+
+    def _append(self, text: str) -> None:
+        with self.lock:
+            data = (self.output + text).encode("utf-8")
+            if len(data) > self.limit:
+                self.truncated = True
+                data = data[-self.limit :] if self.limit else b""
+                # Drop a partial leading code point, retaining the valid tail.
+                self.output = data.decode("utf-8", errors="ignore")
+            else:
+                self.output = data.decode("utf-8")
+
+    def _read(self) -> None:
+        assert self.proc.stdout is not None
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        try:
+            while chunk := self.proc.stdout.read1(4096):
+                self._append(decoder.decode(chunk))
+            self._append(decoder.decode(b"", final=True))
+        finally:
+            self.proc.stdout.close()
+            self.proc.wait()
+            self.done.set()
+
+    def exit_status(self) -> JsonObject:
+        code = self.proc.returncode
+        if code is not None and code < 0:
+            return {"exitCode": None, "signal": signal.Signals(-code).name}
+        return {"exitCode": code, "signal": None}
+
+    def kill(self) -> None:
+        if self.done.is_set() or self.kill_sent:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            else:
+                self.proc.kill()
+            self.kill_sent = True
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            # macOS can report EPERM for an already-exited process group.
+            if self.proc.poll() is None:
+                raise
+
+
+class TerminalHost:
+    """Opt-in ACP terminal host; `grok` mirrors native.rs's narrow workaround."""
+
+    def __init__(self, send: Callable[[JsonObject], None], cwd: Path, mode: str):
+        self.send = send
+        self.cwd = cwd
+        self.mode = mode
+        self.terminals: dict[str, _ProbeTerminal] = {}
+        self._children: list[_ProbeTerminal] = []
+        self._waiters: list[threading.Thread] = []
+
+    def _create(self, params: JsonObject) -> JsonObject:
+        command = params["command"]
+        args = params.get("args", [])
+        if not isinstance(command, str) or not command:
+            raise ValueError("command must be a nonempty string")
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            raise ValueError("args must be an array of strings")
+        argv = [command, *args]
+        if self.mode == "grok" and os.name == "posix" and not args:
+            if re.match(r"^/bin/bash[ \t\r\n]", command):
+                try:
+                    words = shlex.split(command)
+                except ValueError:
+                    words = []
+                if (
+                    len(words) == 3
+                    and words[0] == "/bin/bash"
+                    and words[1] in ("-lc", "-c")
+                ):
+                    argv = words
+        limit = params.get("outputByteLimit")
+        if limit is None:
+            limit = 10 * 1024 * 1024
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("outputByteLimit must be a nonnegative integer")
+        env = dict(os.environ)
+        for item in params.get("env", []):
+            env[item["name"]] = item["value"]
+        proc = subprocess.Popen(
+            argv,
+            cwd=params.get("cwd") or self.cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=os.name == "posix",
+        )
+        terminal = _ProbeTerminal(proc, params["sessionId"], limit)
+        terminal_id = str(uuid.uuid4())
+        self.terminals[terminal_id] = terminal
+        self._children.append(terminal)
+        return {"terminalId": terminal_id}
+
+    def _wait(self, request_id: JsonRpcId, terminal: _ProbeTerminal) -> None:
+        terminal.done.wait()
+        try:
+            self.send(_make_response(request_id, result=terminal.exit_status()))
+        except (OSError, ProbeHardFailure):
+            pass  # The agent may have exited while the child was running.
+
+    def handle(self, request: JsonObject) -> bool:
+        method = request.get("method", "")
+        if self.mode == "off" or not method.startswith("terminal/"):
+            return False
+        request_id = request["id"]
+        params = request.get("params") or {}
+        try:
+            if not isinstance(params, dict):
+                raise ValueError("params must be an object")
+            if not isinstance(params.get("sessionId"), str):
+                raise ValueError("sessionId is required")
+            if method == "terminal/create":
+                result = self._create(params)
+            elif method in (
+                "terminal/output",
+                "terminal/wait_for_exit",
+                "terminal/kill",
+                "terminal/release",
+            ):
+                terminal = self.terminals[params["terminalId"]]
+                if terminal.session_id != params["sessionId"]:
+                    raise ValueError("terminal belongs to another session")
+                if method == "terminal/wait_for_exit":
+                    waiter = threading.Thread(
+                        target=self._wait, args=(request_id, terminal), daemon=True
+                    )
+                    self._waiters.append(waiter)
+                    waiter.start()
+                    return True
+                if method == "terminal/output":
+                    with terminal.lock:
+                        result = {
+                            "output": terminal.output,
+                            "truncated": terminal.truncated,
+                        }
+                        if terminal.done.is_set():
+                            result["exitStatus"] = terminal.exit_status()
+                else:
+                    terminal.kill()
+                    if method == "terminal/release":
+                        del self.terminals[params["terminalId"]]
+                    result = {}
+            else:
+                self.send(
+                    _make_response(
+                        request_id,
+                        error={
+                            "code": -32601,
+                            "message": f"Unknown terminal method: {method}",
+                        },
+                    )
+                )
+                return True
+            response = _make_response(request_id, result=result)
+        except OSError as exc:
+            response = _make_response(
+                request_id, error={"code": -32603, "message": str(exc)}
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            response = _make_response(
+                request_id, error={"code": -32602, "message": str(exc)}
+            )
+        self.send(response)
+        return True
+
+    def close(self) -> None:
+        for terminal in self._children:
+            terminal.kill()
+        for terminal in self._children:
+            terminal.reader.join(timeout=5)
+        for waiter in self._waiters:
+            waiter.join(timeout=1)
+        self.terminals.clear()
+
+
 def _server_request_handler(
-    client: AcpClient, always_approve: bool
+    client: AcpClient,
+    always_approve: bool,
+    terminal_host: Optional[TerminalHost] = None,
 ) -> Callable[[JsonObject], None]:
     def handle(request: JsonObject) -> None:
         request_id = request.get("id")
         method = request.get("method")
         if request_id is None:
+            return
+        if terminal_host is not None and terminal_host.handle(request):
             return
         if method == "session/request_permission":
             raw_options = (request.get("params") or {}).get("options", [])
@@ -2056,6 +2270,7 @@ def run_probe(args: argparse.Namespace) -> int:
     session_new: Optional[JsonObject] = None
     authentication: Optional[JsonObject] = None
     prompt_result: Optional[JsonObject] = None
+    prompt_results: list[JsonObject] = []
     notifications: list[JsonObject] = []
     set_results: list[JsonObject] = []
     vendor_rpc_results: list[JsonObject] = []
@@ -2063,6 +2278,7 @@ def run_probe(args: argparse.Namespace) -> int:
     hard_failure: Optional[str] = None
     handshake_complete = False
     client: Optional[AcpClient] = None
+    terminal_host: Optional[TerminalHost] = None
 
     try:
         proc = subprocess.Popen(
@@ -2076,7 +2292,8 @@ def run_probe(args: argparse.Namespace) -> int:
             bufsize=1,
         )
         client = AcpClient(proc, out_path, args.quiet)
-        handler = _server_request_handler(client, args.always_approve)
+        terminal_host = TerminalHost(client.send, cwd, args.terminal_mode)
+        handler = _server_request_handler(client, args.always_approve, terminal_host)
 
         init_response = client.request(
             "initialize",
@@ -2087,8 +2304,8 @@ def run_probe(args: argparse.Namespace) -> int:
                     "version": "0.1.0",
                 },
                 "clientCapabilities": {
-                    "fs": {"readTextFile": True, "writeTextFile": True},
-                    "terminal": True,
+                    "fs": {"readTextFile": False, "writeTextFile": False},
+                    "terminal": args.terminal_mode != "off",
                     "session": {"configOptions": {}},
                 },
             },
@@ -2187,15 +2404,49 @@ def run_probe(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
 
-        if args.prompt is not None:
+        prompts = (
+            [args.prompt] if args.prompt is not None else []
+        ) + args.follow_up_prompt
+        for prompt in prompts:
             params = {
                 "sessionId": session_id,
-                "prompt": [{"type": "text", "text": args.prompt}],
+                "prompt": [{"type": "text", "text": prompt}],
             }
             response = client.request("session/prompt", params, args.timeout, handler)
-            prompt_result = _record_result("session/prompt", params, response)
+            rpc = _record_result("session/prompt", params, response)
+            if prompt_result is None:
+                prompt_result = rpc
             time.sleep(0.2)
-            notifications.extend(client.drain_notifications())
+            turn_notifications = client.drain_notifications()
+            notifications.extend(turn_notifications)
+            updates = [_session_update(n) for n in turn_notifications]
+            prompt_results.append(
+                {
+                    "rpc": rpc,
+                    "assistant_text": "".join(
+                        u.get("content", {}).get("text", "")
+                        for u in updates
+                        if u.get("sessionUpdate") == "agent_message_chunk"
+                    ),
+                    "failed_tool_calls": list(
+                        dict.fromkeys(
+                            u["toolCallId"]
+                            for u in updates
+                            if u.get("status") == "failed" and "toolCallId" in u
+                        )
+                    ),
+                }
+            )
+            if response is None:
+                # A timeout does not complete a turn. Never overlap a follow-up.
+                client.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "session/cancel",
+                        "params": {"sessionId": session_id},
+                    }
+                )
+                break
         if return_code := client.proc.poll():
             # After a successful handshake, a later agent exit (e.g. unstable
             # vendor RPC) is recorded on the report but is not a hard fail.
@@ -2206,6 +2457,8 @@ def run_probe(args: argparse.Namespace) -> int:
     except (OSError, ValueError, ProbeHardFailure) as exc:
         hard_failure = str(exc)
     finally:
+        if terminal_host is not None:
+            terminal_host.close()
         if client is not None:
             return_code, forced = client.close()
             protocol_frames = client.protocol_frame_ledger()
@@ -2228,6 +2481,11 @@ def run_probe(args: argparse.Namespace) -> int:
         hard_failure=hard_failure,
         vendor_rpc_results=vendor_rpc_results,
         protocol_frames=protocol_frames,
+    )
+    report["terminal_mode"] = args.terminal_mode
+    report["prompt_results"] = redact_json(prompt_results)
+    report["prompts_requested"] = (1 if args.prompt is not None else 0) + len(
+        args.follow_up_prompt
     )
     if client is None:
         out_path.write_text(
@@ -2273,6 +2531,12 @@ def run_probe(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
+    if any(turn["rpc"]["status"] != "ok" for turn in prompt_results):
+        print(
+            "[FAIL] one or more prompt RPCs failed or timed out; inspect prompt_results",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 
@@ -2336,6 +2600,18 @@ def parse_cli(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Optional billed prompt; omitted by default for handshake-only probing.",
     )
     parser.add_argument(
+        "--follow-up-prompt",
+        action="append",
+        default=[],
+        help="Additional billed prompt in the same session (repeatable; requires --prompt).",
+    )
+    parser.add_argument(
+        "--terminal-mode",
+        choices=("off", "strict", "grok"),
+        default="off",
+        help="Execute terminal callbacks locally: strict ACP argv or SPUR's Grok Bash workaround (default: off).",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=60.0,
@@ -2355,7 +2631,10 @@ def parse_cli(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Select an allow option for agent permission requests.",
     )
     parser.add_argument("--quiet", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.follow_up_prompt and args.prompt is None:
+        parser.error("--follow-up-prompt requires --prompt")
+    return args
 
 
 def main() -> int:

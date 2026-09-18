@@ -1,0 +1,1140 @@
+{
+  "scope": "Caller-normalized observed traces, not an unbounded liveness proof.",
+  "pre_solve_id": "sol_b7018719638e4fe0",
+  "evaluations": [
+    {
+      "name": "strict",
+      "request": {
+        "family": "workflow",
+        "mode": "verify",
+        "facts": {
+          "horizon": 5,
+          "state_domain": [
+            "Ready",
+            "Running",
+            "ExitZero",
+            "CallbackError",
+            "TurnFinished",
+            "FollowupRunning",
+            "ExitNonzero",
+            "Recovered",
+            "Continued",
+            "Stalled"
+          ],
+          "event_domain": [
+            "submit",
+            "exit_zero",
+            "callback_error",
+            "prompt_result",
+            "exit_nonzero"
+          ],
+          "initial_states": [
+            "Ready"
+          ],
+          "safe_states": [
+            "Ready",
+            "Running",
+            "ExitZero",
+            "CallbackError",
+            "TurnFinished",
+            "FollowupRunning",
+            "ExitNonzero",
+            "Recovered",
+            "Continued"
+          ],
+          "target_states": [
+            "Continued"
+          ],
+          "enabled_transitions": [
+            {
+              "step": 0,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 0,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 0,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 0,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 0,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 0,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 0,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 0,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 1,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 1,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 1,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 1,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 1,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 1,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 1,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 1,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 1,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 1,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 2,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 2,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 2,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 2,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 2,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 2,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 2,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 2,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 2,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 2,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 3,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 3,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 3,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 3,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 3,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 3,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 3,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 3,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 3,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 3,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 4,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 4,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 4,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 4,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 4,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 4,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 4,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 4,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 4,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 4,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            }
+          ],
+          "traces": {
+            "strict": {
+              "states": [
+                "Ready",
+                "Running",
+                "CallbackError",
+                "TurnFinished",
+                "FollowupRunning",
+                "Continued"
+              ],
+              "events": [
+                "submit",
+                "callback_error",
+                "prompt_result",
+                "submit",
+                "prompt_result"
+              ]
+            }
+          }
+        },
+        "rules": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "subjects": [
+              "strict"
+            ]
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "subjects": [
+              "strict"
+            ]
+          },
+          {
+            "rule_id": "workflow.safety_invariant",
+            "subjects": [
+              "strict"
+            ]
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "subjects": [
+              "strict"
+            ]
+          }
+        ],
+        "persist": true
+      },
+      "result": {
+        "family": "workflow",
+        "mode": "verify",
+        "outcome": "pass",
+        "rule_results": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "binding_index": 0,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "binding_index": 1,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.safety_invariant",
+            "binding_index": 2,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "binding_index": 3,
+            "status": "sat",
+            "outcome": "pass"
+          }
+        ],
+        "evaluation_scope": {
+          "kind": "bounded_trace",
+          "horizon": 5,
+          "reachability": [
+            {
+              "rule_id": "workflow.bounded_reachability",
+              "binding_index": 3,
+              "effective_bound": 5
+            }
+          ]
+        },
+        "total_duration_ms": 60,
+        "status": "sat",
+        "model": {},
+        "duration_ms": 38,
+        "solve_id": "sol_db361435f11742a7",
+        "reason": null,
+        "solver_version": "Z3 version 4.16.0 - 64 bit"
+      }
+    },
+    {
+      "name": "compat",
+      "request": {
+        "family": "workflow",
+        "mode": "verify",
+        "facts": {
+          "horizon": 9,
+          "state_domain": [
+            "Ready",
+            "Running",
+            "ExitZero",
+            "CallbackError",
+            "TurnFinished",
+            "FollowupRunning",
+            "ExitNonzero",
+            "Recovered",
+            "Continued",
+            "Stalled"
+          ],
+          "event_domain": [
+            "submit",
+            "exit_zero",
+            "callback_error",
+            "prompt_result",
+            "exit_nonzero"
+          ],
+          "initial_states": [
+            "Ready"
+          ],
+          "safe_states": [
+            "Ready",
+            "Running",
+            "ExitZero",
+            "CallbackError",
+            "TurnFinished",
+            "FollowupRunning",
+            "ExitNonzero",
+            "Recovered",
+            "Continued"
+          ],
+          "target_states": [
+            "Continued"
+          ],
+          "enabled_transitions": [
+            {
+              "step": 0,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 0,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 0,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 0,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 0,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 0,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 0,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 0,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 1,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 1,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 1,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 1,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 1,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 1,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 1,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 1,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 1,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 1,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 2,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 2,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 2,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 2,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 2,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 2,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 2,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 2,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 2,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 2,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 3,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 3,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 3,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 3,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 3,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 3,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 3,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 3,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 3,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 3,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 4,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 4,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 4,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 4,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 4,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 4,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 4,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 4,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 4,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 4,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 5,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 5,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 5,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 5,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 5,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 5,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 5,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 5,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 5,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 5,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 6,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 6,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 6,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 6,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 6,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 6,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 6,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 6,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 6,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 6,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 7,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 7,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 7,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 7,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 7,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 7,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 7,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 7,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 7,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 7,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            },
+            {
+              "step": 8,
+              "from": "Ready",
+              "event": "submit",
+              "to": "Running"
+            },
+            {
+              "step": 8,
+              "from": "Running",
+              "event": "exit_zero",
+              "to": "ExitZero"
+            },
+            {
+              "step": 8,
+              "from": "Running",
+              "event": "callback_error",
+              "to": "CallbackError"
+            },
+            {
+              "step": 8,
+              "from": "ExitZero",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 8,
+              "from": "CallbackError",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 8,
+              "from": "TurnFinished",
+              "event": "submit",
+              "to": "FollowupRunning"
+            },
+            {
+              "step": 8,
+              "from": "FollowupRunning",
+              "event": "exit_nonzero",
+              "to": "ExitNonzero"
+            },
+            {
+              "step": 8,
+              "from": "ExitNonzero",
+              "event": "exit_zero",
+              "to": "Recovered"
+            },
+            {
+              "step": 8,
+              "from": "Recovered",
+              "event": "prompt_result",
+              "to": "TurnFinished"
+            },
+            {
+              "step": 8,
+              "from": "FollowupRunning",
+              "event": "prompt_result",
+              "to": "Continued"
+            }
+          ],
+          "traces": {
+            "compat": {
+              "states": [
+                "Ready",
+                "Running",
+                "ExitZero",
+                "TurnFinished",
+                "FollowupRunning",
+                "ExitNonzero",
+                "Recovered",
+                "TurnFinished",
+                "FollowupRunning",
+                "Continued"
+              ],
+              "events": [
+                "submit",
+                "exit_zero",
+                "prompt_result",
+                "submit",
+                "exit_nonzero",
+                "exit_zero",
+                "prompt_result",
+                "submit",
+                "prompt_result"
+              ]
+            }
+          }
+        },
+        "rules": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "subjects": [
+              "compat"
+            ]
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "subjects": [
+              "compat"
+            ]
+          },
+          {
+            "rule_id": "workflow.safety_invariant",
+            "subjects": [
+              "compat"
+            ]
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "subjects": [
+              "compat"
+            ]
+          }
+        ],
+        "persist": true
+      },
+      "result": {
+        "family": "workflow",
+        "mode": "verify",
+        "outcome": "pass",
+        "rule_results": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "binding_index": 0,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "binding_index": 1,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.safety_invariant",
+            "binding_index": 2,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "binding_index": 3,
+            "status": "sat",
+            "outcome": "pass"
+          }
+        ],
+        "evaluation_scope": {
+          "kind": "bounded_trace",
+          "horizon": 9,
+          "reachability": [
+            {
+              "rule_id": "workflow.bounded_reachability",
+              "binding_index": 3,
+              "effective_bound": 9
+            }
+          ]
+        },
+        "total_duration_ms": 14,
+        "status": "sat",
+        "model": {},
+        "duration_ms": 5,
+        "solve_id": "sol_1d8f6c91bfe84ff4",
+        "reason": null,
+        "solver_version": "Z3 version 4.16.0 - 64 bit"
+      }
+    }
+  ]
+}

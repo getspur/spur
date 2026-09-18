@@ -10,7 +10,7 @@ import shlex
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from scripts import probe_acp_capabilities as probe
@@ -163,6 +163,17 @@ class TerminalTests(unittest.TestCase):
         self.assertFalse(child.reader.is_alive())
         self.assertEqual(self.responses.get(timeout=5)["id"], wait_id)
 
+    def test_nullable_output_limit_uses_default(self) -> None:
+        terminal = self.create("/bin/sh", ["-c", "printf ok"], outputByteLimit=None)
+        self.call("terminal/wait_for_exit", terminalId=terminal)
+        self.assertEqual(
+            self.call("terminal/output", terminalId=terminal)["result"]["output"], "ok"
+        )
+
+    def test_malformed_callback_params_returns_error_without_crashing(self) -> None:
+        self.host.handle({"id": 0, "method": "terminal/create", "params": ["bad"]})
+        self.assertEqual(self.responses.get(timeout=5)["error"]["code"], -32602)
+
 
 FAKE_AGENT = r"""
 import json, sys
@@ -286,7 +297,7 @@ class ContinuationTests(unittest.TestCase):
                     "--quiet",
                 ]
             )
-            with redirect_stdout(io.StringIO()):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 code = probe.run_probe(args)
             report = json.loads((root / "report.json").read_text())
             self.assertEqual(report["prompt_results"][0]["rpc"]["status"], "timeout")
