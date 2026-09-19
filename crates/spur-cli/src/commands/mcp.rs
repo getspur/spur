@@ -190,10 +190,35 @@ fn legacy_context_server_registry(url: String, token: String) -> Result<ToolRegi
 /// the worker MCP's per-repo-root solver services. The Z3 process is lazy: it
 /// spawns on first tool use, so an idle server costs only the stdio process.
 pub async fn run_solver_server(root: Option<PathBuf>) -> Result<()> {
-    let resolved = resolve_mcp_worktree_root(root)?;
+    let resolved = solver_service_root(root)?;
     let registry = solver_server_registry(resolved.as_deref())?;
     let handler = RegistryServerHandler::new(registry, "spur-solver-mcp", SOLVER_INSTRUCTIONS);
     serve_stdio_server(handler).await
+}
+
+/// Resolve the solver service root: explicit `--root`, then `SPUR_WORKTREE`,
+/// then the MCP client launch directory, canonicalized.
+///
+/// Unlike the graph/analyst servers, which scope each request through
+/// [`with_mcp_worktree_scope`] after startup, [`SolverService`] binds its
+/// artifact store at construction, so the documented client-launch-directory
+/// fallback must be applied here — otherwise `persist: true` fails with
+/// "solver persistence requires an explicit repository root" for servers
+/// started from a portable `.pi/mcp.json` entry without `--root`.
+fn solver_service_root(root: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    let resolved = resolve_mcp_worktree_root(root)?;
+    if resolved.is_some() {
+        return Ok(resolved);
+    }
+    let launch_dir = std::env::current_dir()
+        .with_context(|| "failed to read MCP client launch directory".to_string())?;
+    let launch_dir = launch_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize MCP client launch directory `{}`",
+            launch_dir.display()
+        )
+    })?;
+    Ok(Some(launch_dir))
 }
 
 fn solver_server_registry(root: Option<&std::path::Path>) -> Result<ToolRegistry> {
@@ -282,6 +307,30 @@ mod tests {
                 "solve_rules",
                 "solve_smt",
             ]
+        );
+    }
+
+    #[test]
+    fn solver_root_falls_back_to_client_launch_directory() {
+        let explicit = tempfile::tempdir().expect("tempdir");
+        let explicit = explicit
+            .path()
+            .canonicalize()
+            .expect("canonical explicit root");
+        assert_eq!(
+            super::solver_service_root(Some(explicit.clone())).unwrap(),
+            Some(explicit),
+            "explicit --root wins unchanged"
+        );
+
+        let cwd = std::env::current_dir()
+            .expect("current dir")
+            .canonicalize()
+            .expect("canonical cwd");
+        assert_eq!(
+            super::solver_service_root(None).unwrap(),
+            Some(cwd),
+            "omitted root falls back to the canonicalized client launch directory"
         );
     }
 
