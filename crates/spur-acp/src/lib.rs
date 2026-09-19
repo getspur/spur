@@ -19,10 +19,6 @@
     reason = "legacy ACP defaults code keeps iterator spelling explicit in config matching"
 )]
 #![expect(
-    clippy::iter_over_hash_type,
-    reason = "shutdown cleanup iterates a terminal map where order is not behaviorally significant"
-)]
-#![expect(
     clippy::map_err_ignore,
     reason = "legacy ACP channel error mapping intentionally replaces send/receive details with domain messages"
 )]

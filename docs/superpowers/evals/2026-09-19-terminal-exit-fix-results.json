@@ -1,0 +1,306 @@
+{
+  "issue": "bd-3stsw",
+  "scope": "Captured native ACP regression runs; full crate verification recorded separately in the evaluation report.",
+  "red": {
+    "source_log": ".spur/logs/terminal-exit-fix-red-20260919.log",
+    "process_exit_code": 101,
+    "reports": [
+      {
+        "schema": "spur.grok-terminal-golden-result",
+        "version": 1,
+        "cases": [],
+        "follow_up": true,
+        "lifecycle": {
+          "cases": [
+            {
+              "command_form": "split",
+              "parent_exit_observed": true,
+              "wait_returned_before_release": false,
+              "observation_window_seconds": 0.25,
+              "exit_code": 0,
+              "late_output_captured": true,
+              "verdict": "fail"
+            },
+            {
+              "command_form": "packed",
+              "parent_exit_observed": true,
+              "wait_returned_before_release": false,
+              "observation_window_seconds": 0.25,
+              "exit_code": 0,
+              "late_output_captured": true,
+              "verdict": "fail"
+            }
+          ],
+          "verdict": "fail"
+        }
+      },
+      {
+        "schema": "spur.grok-terminal-golden-result",
+        "version": 1,
+        "cases": [],
+        "follow_up": true,
+        "lifecycle": null,
+        "cleanup": [
+          {
+            "method": "shutdown",
+            "parent_exits": true,
+            "pids": [
+              7389,
+              7392
+            ],
+            "release_path": "/mnt/cargo/tmp/.tmpaR3FSX/cleanup-True-shutdown/release-child"
+          }
+        ],
+        "shutdown_processes_stopped": false
+      },
+      {
+        "schema": "spur.grok-terminal-golden-result",
+        "version": 1,
+        "follow_up": true,
+        "lifecycle": null,
+        "runtimes": {
+          "bash": {
+            "path": "/usr/bin/bash",
+            "version": "GNU bash, version 5.2.15(1)-release (aarch64-unknown-linux-gnu)"
+          },
+          "python3": {
+            "path": "/usr/bin/python3",
+            "version": "Python 3.11.2"
+          },
+          "node": {
+            "path": "/usr/bin/node",
+            "version": "v24.21.0"
+          },
+          "ruby": {
+            "path": null,
+            "version": null
+          },
+          "perl": {
+            "path": "/usr/bin/perl",
+            "version": "This is perl 5, version 36, subversion 0 (v5.36.0) built for aarch64-linux-gnu-thread-multi"
+          }
+        },
+        "script_summary": {
+          "passed": 22,
+          "skipped": [
+            {
+              "id": "ruby_inline",
+              "status": "skipped",
+              "missing": [
+                "ruby"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "schema": "spur.grok-terminal-golden-result",
+        "version": 1,
+        "cases": [],
+        "follow_up": true,
+        "lifecycle": null,
+        "cleanup": [
+          {
+            "method": "kill",
+            "parent_exits": false,
+            "processes_stopped": false,
+            "output_retained": true
+          },
+          {
+            "method": "release",
+            "parent_exits": false,
+            "processes_stopped": false
+          },
+          {
+            "method": "kill",
+            "parent_exits": true,
+            "processes_stopped": false,
+            "output_retained": true
+          },
+          {
+            "method": "release",
+            "parent_exits": true,
+            "processes_stopped": false
+          }
+        ]
+      }
+    ]
+  },
+  "focused_green": {
+    "source_log": ".spur/logs/terminal-exit-fix-focused-20260919.log",
+    "process_exit_code": 0,
+    "reports": [
+      {
+        "schema": "spur.grok-terminal-golden-result",
+        "version": 1,
+        "cases": [],
+        "follow_up": true,
+        "lifecycle": null,
+        "output_stress": [
+          {
+            "limit": null,
+            "bytes": 524288,
+            "exit_code": 11,
+            "status": "pass"
+          },
+          {
+            "limit": 4096,
+            "bytes": 4096,
+            "exit_code": 11,
+            "status": "pass"
+          }
+        ]
+      },
+      {
+        "schema": "spur.grok-terminal-golden-result",
+        "version": 1,
+        "cases": [],
+        "follow_up": true,
+        "lifecycle": null,
+        "cleanup": [
+          {
+            "method": "shutdown",
+            "parent_exits": true,
+            "pids": [
+              8847,
+              8854
+            ],
+            "release_path": "/mnt/cargo/tmp/.tmp6Zj6Yo/cleanup-True-shutdown/release-child",
+            "exit_published_before_cleanup": true
+          }
+        ],
+        "shutdown_processes_stopped": true
+      },
+      {
+        "schema": "spur.grok-terminal-golden-result",
+        "version": 1,
+        "cases": [],
+        "follow_up": true,
+        "lifecycle": {
+          "cases": [
+            {
+              "command_form": "split",
+              "parent_exit_observed": true,
+              "wait_returned_before_release": true,
+              "observation_window_seconds": 0.25,
+              "exit_code": 0,
+              "late_output_captured": true,
+              "verdict": "pass"
+            },
+            {
+              "command_form": "packed",
+              "parent_exit_observed": true,
+              "wait_returned_before_release": true,
+              "observation_window_seconds": 0.25,
+              "exit_code": 0,
+              "late_output_captured": true,
+              "verdict": "pass"
+            }
+          ],
+          "verdict": "pass"
+        }
+      },
+      {
+        "schema": "spur.grok-terminal-golden-result",
+        "version": 1,
+        "cases": [],
+        "follow_up": true,
+        "lifecycle": null,
+        "cleanup": [
+          {
+            "method": "kill",
+            "parent_exits": false,
+            "processes_stopped": true,
+            "exit_published_before_cleanup": null,
+            "output_retained": true
+          },
+          {
+            "method": "release",
+            "parent_exits": false,
+            "processes_stopped": true,
+            "exit_published_before_cleanup": null
+          },
+          {
+            "method": "kill",
+            "parent_exits": true,
+            "processes_stopped": true,
+            "exit_published_before_cleanup": true,
+            "output_retained": true
+          },
+          {
+            "method": "release",
+            "parent_exits": true,
+            "processes_stopped": true,
+            "exit_published_before_cleanup": true
+          }
+        ]
+      },
+      {
+        "schema": "spur.grok-terminal-golden-result",
+        "version": 1,
+        "follow_up": true,
+        "lifecycle": null,
+        "runtimes": {
+          "bash": {
+            "path": "/usr/bin/bash",
+            "version": "GNU bash, version 5.2.15(1)-release (aarch64-unknown-linux-gnu)"
+          },
+          "python3": {
+            "path": "/usr/bin/python3",
+            "version": "Python 3.11.2"
+          },
+          "node": {
+            "path": "/usr/bin/node",
+            "version": "v24.21.0"
+          },
+          "ruby": {
+            "path": null,
+            "version": null
+          },
+          "perl": {
+            "path": "/usr/bin/perl",
+            "version": "This is perl 5, version 36, subversion 0 (v5.36.0) built for aarch64-linux-gnu-thread-multi"
+          }
+        },
+        "script_summary": {
+          "passed": 22,
+          "skipped": [
+            {
+              "id": "ruby_inline",
+              "status": "skipped",
+              "missing": [
+                "ruby"
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "test_first_commit": "c9bc6aa1d",
+  "review_followup": "The final shared completion handle retains release cleanup across callback cancellation; the full crate run verifies that subsequent change.",
+  "final_crate_run": {
+    "source_log": ".spur/logs/terminal-exit-fix-crate-final-20260919.log",
+    "process_exit_code": 0,
+    "suites": 36,
+    "passed": 626,
+    "failed": 0,
+    "ignored": 1
+  },
+  "all_tests_clippy": {
+    "source_log": ".spur/logs/terminal-exit-fix-clippy-final-20260919.log",
+    "process_exit_code": 101,
+    "status": "failed_existing_integration_lints",
+    "unchanged_files": [
+      "crates/spur-acp/tests/agent_model_catalog.rs",
+      "crates/spur-acp/tests/native_trailing_notification.rs",
+      "crates/spur-acp/tests/process_kill_on_drop.rs",
+      "crates/spur-acp/tests/skip_permissions_config.rs"
+    ]
+  },
+  "changed_targets_clippy": {
+    "source_log": ".spur/logs/terminal-exit-fix-clippy-targeted-20260919.log",
+    "process_exit_code": 0,
+    "command": "SPUR_REMOTE=1 SPUR_NO_LOCAL_FALLBACK=1 scripts/spur-cargo clippy -p spur-acp --lib --test grok_terminal_golden -- -D warnings"
+  }
+}

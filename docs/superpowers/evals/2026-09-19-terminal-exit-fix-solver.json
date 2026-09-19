@@ -1,0 +1,755 @@
+{
+  "issue": "bd-3stsw",
+  "scope": "Workflow catalog verification of finite, caller-transcribed terminal traces. Runtime tests establish the observations. This is not an unbounded liveness proof or a guarantee about OS scheduling. The 50 ms drain grace is explicit implementation policy; runtime regression observes wait response before descendant release within 250 ms.",
+  "pre": [
+    {
+      "name": "existing_inherited_pipe_counterexample",
+      "request": {
+        "family": "workflow",
+        "mode": "verify",
+        "persist": true,
+        "facts": {
+          "horizon": 4,
+          "state_domain": [
+            "Running",
+            "ExitedPipesOpen",
+            "WaitPending",
+            "ExitReported",
+            "Continued"
+          ],
+          "event_domain": [
+            "parent_exit_observed",
+            "wait_pending_250ms",
+            "release_descendant",
+            "next_prompt"
+          ],
+          "initial_states": [
+            "Running"
+          ],
+          "target_states": [
+            "ExitReported"
+          ],
+          "enabled_transitions": [
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "parent_exit_observed",
+              "to": "ExitedPipesOpen"
+            },
+            {
+              "step": 1,
+              "from": "ExitedPipesOpen",
+              "event": "wait_pending_250ms",
+              "to": "WaitPending"
+            },
+            {
+              "step": 2,
+              "from": "WaitPending",
+              "event": "release_descendant",
+              "to": "ExitReported"
+            },
+            {
+              "step": 3,
+              "from": "ExitReported",
+              "event": "next_prompt",
+              "to": "Continued"
+            }
+          ],
+          "traces": {
+            "observed_before_release": {
+              "states": [
+                "Running",
+                "ExitedPipesOpen",
+                "WaitPending",
+                "ExitReported",
+                "Continued"
+              ],
+              "events": [
+                "parent_exit_observed",
+                "wait_pending_250ms",
+                "release_descendant",
+                "next_prompt"
+              ]
+            }
+          },
+          "safe_states": [
+            "Running",
+            "ExitedPipesOpen",
+            "WaitPending",
+            "ExitReported",
+            "Continued"
+          ]
+        },
+        "rules": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "subjects": [
+              "observed_before_release"
+            ]
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "subjects": [
+              "observed_before_release"
+            ]
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "subjects": [
+              "observed_before_release"
+            ],
+            "parameters": {
+              "bound": 2
+            }
+          }
+        ]
+      },
+      "result": {
+        "family": "workflow",
+        "mode": "verify",
+        "outcome": "fail",
+        "rule_results": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "binding_index": 0,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "binding_index": 1,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "binding_index": 2,
+            "status": "unsat",
+            "outcome": "fail",
+            "diagnostic": "workflow.bounded_reachability.violation"
+          }
+        ],
+        "evaluation_scope": {
+          "kind": "bounded_trace",
+          "horizon": 4,
+          "reachability": [
+            {
+              "rule_id": "workflow.bounded_reachability",
+              "binding_index": 2,
+              "effective_bound": 2
+            }
+          ]
+        },
+        "total_duration_ms": 28,
+        "status": "unsat",
+        "duration_ms": 0,
+        "solve_id": "sol_dbe145bc10324a23",
+        "reason": null,
+        "unsat_core": [
+          "workflow_rule_2_workflow_bounded_reachability"
+        ],
+        "cached": true,
+        "solver_version": "Z3 version 4.16.0 - 64 bit"
+      }
+    },
+    {
+      "name": "desired_exit_drain_and_release",
+      "request": {
+        "family": "workflow",
+        "mode": "verify",
+        "persist": true,
+        "facts": {
+          "horizon": 4,
+          "state_domain": [
+            "Running",
+            "ExitedDraining",
+            "ReportedPipesOpen",
+            "LateOutputCaptured",
+            "Released"
+          ],
+          "event_domain": [
+            "command_exit",
+            "eof_or_50ms_deadline",
+            "descendant_write",
+            "release"
+          ],
+          "initial_states": [
+            "Running"
+          ],
+          "safe_states": [
+            "Running",
+            "ExitedDraining",
+            "ReportedPipesOpen",
+            "LateOutputCaptured",
+            "Released"
+          ],
+          "target_states": [
+            "ReportedPipesOpen"
+          ],
+          "enabled_transitions": [
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "command_exit",
+              "to": "ExitedDraining"
+            },
+            {
+              "step": 1,
+              "from": "ExitedDraining",
+              "event": "eof_or_50ms_deadline",
+              "to": "ReportedPipesOpen"
+            },
+            {
+              "step": 2,
+              "from": "ReportedPipesOpen",
+              "event": "descendant_write",
+              "to": "LateOutputCaptured"
+            },
+            {
+              "step": 3,
+              "from": "LateOutputCaptured",
+              "event": "release",
+              "to": "Released"
+            }
+          ],
+          "traces": {
+            "desired_exit_drain_and_release": {
+              "states": [
+                "Running",
+                "ExitedDraining",
+                "ReportedPipesOpen",
+                "LateOutputCaptured",
+                "Released"
+              ],
+              "events": [
+                "command_exit",
+                "eof_or_50ms_deadline",
+                "descendant_write",
+                "release"
+              ]
+            }
+          }
+        },
+        "rules": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "subjects": [
+              "desired_exit_drain_and_release"
+            ]
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "subjects": [
+              "desired_exit_drain_and_release"
+            ]
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "subjects": [
+              "desired_exit_drain_and_release"
+            ],
+            "parameters": {
+              "bound": 2
+            }
+          }
+        ]
+      },
+      "result": {
+        "family": "workflow",
+        "mode": "verify",
+        "outcome": "pass",
+        "rule_results": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "binding_index": 0,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "binding_index": 1,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "binding_index": 2,
+            "status": "sat",
+            "outcome": "pass"
+          }
+        ],
+        "evaluation_scope": {
+          "kind": "bounded_trace",
+          "horizon": 4,
+          "reachability": [
+            {
+              "rule_id": "workflow.bounded_reachability",
+              "binding_index": 2,
+              "effective_bound": 2
+            }
+          ]
+        },
+        "total_duration_ms": 76,
+        "status": "sat",
+        "model": {},
+        "duration_ms": 51,
+        "solve_id": "sol_f49849d68d864026",
+        "reason": null,
+        "solver_version": "Z3 version 4.16.0 - 64 bit"
+      }
+    }
+  ],
+  "post": [
+    {
+      "name": "split_exit_before_release",
+      "request": {
+        "family": "workflow",
+        "mode": "verify",
+        "persist": true,
+        "facts": {
+          "horizon": 5,
+          "state_domain": [
+            "Running",
+            "ExitedPipesOpen",
+            "ExitReported",
+            "LateOutputCaptured",
+            "Released",
+            "Continued"
+          ],
+          "event_domain": [
+            "parent_exit_observed",
+            "wait_response_before_release",
+            "release_descendant_and_read_output",
+            "terminal_release",
+            "next_prompt"
+          ],
+          "initial_states": [
+            "Running"
+          ],
+          "safe_states": [
+            "Running",
+            "ExitedPipesOpen",
+            "ExitReported",
+            "LateOutputCaptured",
+            "Released",
+            "Continued"
+          ],
+          "target_states": [
+            "ExitReported"
+          ],
+          "enabled_transitions": [
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "parent_exit_observed",
+              "to": "ExitedPipesOpen"
+            },
+            {
+              "step": 1,
+              "from": "ExitedPipesOpen",
+              "event": "wait_response_before_release",
+              "to": "ExitReported"
+            },
+            {
+              "step": 2,
+              "from": "ExitReported",
+              "event": "release_descendant_and_read_output",
+              "to": "LateOutputCaptured"
+            },
+            {
+              "step": 3,
+              "from": "LateOutputCaptured",
+              "event": "terminal_release",
+              "to": "Released"
+            },
+            {
+              "step": 4,
+              "from": "Released",
+              "event": "next_prompt",
+              "to": "Continued"
+            }
+          ],
+          "traces": {
+            "split_exit_before_release": {
+              "states": [
+                "Running",
+                "ExitedPipesOpen",
+                "ExitReported",
+                "LateOutputCaptured",
+                "Released",
+                "Continued"
+              ],
+              "events": [
+                "parent_exit_observed",
+                "wait_response_before_release",
+                "release_descendant_and_read_output",
+                "terminal_release",
+                "next_prompt"
+              ]
+            }
+          }
+        },
+        "rules": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "subjects": [
+              "split_exit_before_release"
+            ]
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "subjects": [
+              "split_exit_before_release"
+            ]
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "subjects": [
+              "split_exit_before_release"
+            ],
+            "parameters": {
+              "bound": 2
+            }
+          }
+        ]
+      },
+      "result": {
+        "family": "workflow",
+        "mode": "verify",
+        "outcome": "pass",
+        "rule_results": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "binding_index": 0,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "binding_index": 1,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "binding_index": 2,
+            "status": "sat",
+            "outcome": "pass"
+          }
+        ],
+        "evaluation_scope": {
+          "kind": "bounded_trace",
+          "horizon": 5,
+          "reachability": [
+            {
+              "rule_id": "workflow.bounded_reachability",
+              "binding_index": 2,
+              "effective_bound": 2
+            }
+          ]
+        },
+        "total_duration_ms": 10,
+        "status": "sat",
+        "model": {},
+        "duration_ms": 0,
+        "solve_id": "sol_e9e3aed36d5449ce",
+        "reason": null,
+        "cached": true,
+        "solver_version": "Z3 version 4.16.0 - 64 bit"
+      }
+    },
+    {
+      "name": "packed_exit_before_release",
+      "request": {
+        "family": "workflow",
+        "mode": "verify",
+        "persist": true,
+        "facts": {
+          "horizon": 5,
+          "state_domain": [
+            "Running",
+            "ExitedPipesOpen",
+            "ExitReported",
+            "LateOutputCaptured",
+            "Released",
+            "Continued"
+          ],
+          "event_domain": [
+            "parent_exit_observed",
+            "wait_response_before_release",
+            "release_descendant_and_read_output",
+            "terminal_release",
+            "next_prompt"
+          ],
+          "initial_states": [
+            "Running"
+          ],
+          "safe_states": [
+            "Running",
+            "ExitedPipesOpen",
+            "ExitReported",
+            "LateOutputCaptured",
+            "Released",
+            "Continued"
+          ],
+          "target_states": [
+            "ExitReported"
+          ],
+          "enabled_transitions": [
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "parent_exit_observed",
+              "to": "ExitedPipesOpen"
+            },
+            {
+              "step": 1,
+              "from": "ExitedPipesOpen",
+              "event": "wait_response_before_release",
+              "to": "ExitReported"
+            },
+            {
+              "step": 2,
+              "from": "ExitReported",
+              "event": "release_descendant_and_read_output",
+              "to": "LateOutputCaptured"
+            },
+            {
+              "step": 3,
+              "from": "LateOutputCaptured",
+              "event": "terminal_release",
+              "to": "Released"
+            },
+            {
+              "step": 4,
+              "from": "Released",
+              "event": "next_prompt",
+              "to": "Continued"
+            }
+          ],
+          "traces": {
+            "packed_exit_before_release": {
+              "states": [
+                "Running",
+                "ExitedPipesOpen",
+                "ExitReported",
+                "LateOutputCaptured",
+                "Released",
+                "Continued"
+              ],
+              "events": [
+                "parent_exit_observed",
+                "wait_response_before_release",
+                "release_descendant_and_read_output",
+                "terminal_release",
+                "next_prompt"
+              ]
+            }
+          }
+        },
+        "rules": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "subjects": [
+              "packed_exit_before_release"
+            ]
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "subjects": [
+              "packed_exit_before_release"
+            ]
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "subjects": [
+              "packed_exit_before_release"
+            ],
+            "parameters": {
+              "bound": 2
+            }
+          }
+        ]
+      },
+      "result": {
+        "family": "workflow",
+        "mode": "verify",
+        "outcome": "pass",
+        "rule_results": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "binding_index": 0,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "binding_index": 1,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "binding_index": 2,
+            "status": "sat",
+            "outcome": "pass"
+          }
+        ],
+        "evaluation_scope": {
+          "kind": "bounded_trace",
+          "horizon": 5,
+          "reachability": [
+            {
+              "rule_id": "workflow.bounded_reachability",
+              "binding_index": 2,
+              "effective_bound": 2
+            }
+          ]
+        },
+        "total_duration_ms": 79,
+        "status": "sat",
+        "model": {},
+        "duration_ms": 69,
+        "solve_id": "sol_0855fd9851bb4c82",
+        "reason": null,
+        "solver_version": "Z3 version 4.16.0 - 64 bit"
+      }
+    },
+    {
+      "name": "cleanup_after_exit_reported",
+      "request": {
+        "family": "workflow",
+        "mode": "verify",
+        "persist": true,
+        "facts": {
+          "horizon": 3,
+          "state_domain": [
+            "ExitReported",
+            "CleanupRequested",
+            "ProcessesStopped",
+            "Continued"
+          ],
+          "event_domain": [
+            "kill_or_release",
+            "parent_and_descendant_stopped",
+            "next_prompt"
+          ],
+          "initial_states": [
+            "ExitReported"
+          ],
+          "safe_states": [
+            "ExitReported",
+            "CleanupRequested",
+            "ProcessesStopped",
+            "Continued"
+          ],
+          "target_states": [
+            "ProcessesStopped"
+          ],
+          "enabled_transitions": [
+            {
+              "step": 0,
+              "from": "ExitReported",
+              "event": "kill_or_release",
+              "to": "CleanupRequested"
+            },
+            {
+              "step": 1,
+              "from": "CleanupRequested",
+              "event": "parent_and_descendant_stopped",
+              "to": "ProcessesStopped"
+            },
+            {
+              "step": 2,
+              "from": "ProcessesStopped",
+              "event": "next_prompt",
+              "to": "Continued"
+            }
+          ],
+          "traces": {
+            "cleanup_after_exit_reported": {
+              "states": [
+                "ExitReported",
+                "CleanupRequested",
+                "ProcessesStopped",
+                "Continued"
+              ],
+              "events": [
+                "kill_or_release",
+                "parent_and_descendant_stopped",
+                "next_prompt"
+              ]
+            }
+          }
+        },
+        "rules": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "subjects": [
+              "cleanup_after_exit_reported"
+            ]
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "subjects": [
+              "cleanup_after_exit_reported"
+            ]
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "subjects": [
+              "cleanup_after_exit_reported"
+            ],
+            "parameters": {
+              "bound": 2
+            }
+          }
+        ]
+      },
+      "result": {
+        "family": "workflow",
+        "mode": "verify",
+        "outcome": "pass",
+        "rule_results": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "binding_index": 0,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "binding_index": 1,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "binding_index": 2,
+            "status": "sat",
+            "outcome": "pass"
+          }
+        ],
+        "evaluation_scope": {
+          "kind": "bounded_trace",
+          "horizon": 3,
+          "reachability": [
+            {
+              "rule_id": "workflow.bounded_reachability",
+              "binding_index": 2,
+              "effective_bound": 2
+            }
+          ]
+        },
+        "total_duration_ms": 29,
+        "status": "sat",
+        "model": {},
+        "duration_ms": 0,
+        "solve_id": "sol_62bed5a7162a4c6d",
+        "reason": null,
+        "cached": true,
+        "solver_version": "Z3 version 4.16.0 - 64 bit"
+      }
+    }
+  ]
+}

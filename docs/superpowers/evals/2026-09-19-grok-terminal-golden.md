@@ -1,5 +1,10 @@
 # Grok terminal script golden evaluation
 
+**Historical baseline:** the lifecycle failure below was subsequently fixed
+in bd-3stsw. See [the fix and verification](2026-09-19-terminal-exit-fix.md).
+The current inherited-pipe regression is enabled; run it without `--ignored`.
+The failure observations below remain the pre-fix evidence.
+
 Issue: bd-1mp6c. Existing lifecycle defect: **bd-3stsw**.
 
 The golden corpus checks the existing Grok compatibility workaround against

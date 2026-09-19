@@ -9,7 +9,7 @@ use agent_client_protocol::schema::{
 };
 use serde_json::Value;
 use spur_acp::{
-    connection::{native::NativeAcpConnection, AgentConnection},
+    connection::{native::NativeAcpConnection, AgentConnection as _},
     types::AgentKind,
 };
 
@@ -26,7 +26,11 @@ async fn prompt(conn: &mut NativeAcpConnection, session: &SessionId, text: &str)
         .expect("bounded golden prompt completion")
         .expect("golden peer assertions and callbacks must pass")
         .expect("native prompt response");
-    assert_eq!(response.stop_reason, StopReason::EndTurn);
+    assert_eq!(
+        response.stop_reason,
+        StopReason::EndTurn,
+        "golden prompt must finish normally"
+    );
 }
 
 async fn replay(action: &str) -> Value {
@@ -100,7 +104,11 @@ async fn grok_golden_scripts_execute_and_continue_via_native_acp() {
     let corpus: Value = serde_json::from_str(include_str!("fixtures/grok_terminal_golden.json"))
         .expect("golden corpus");
     let cases = report["cases"].as_array().expect("case results");
-    assert_eq!(cases.len(), corpus["cases"].as_array().unwrap().len());
+    assert_eq!(
+        cases.len(),
+        corpus["cases"].as_array().unwrap().len(),
+        "report must account for every fixture"
+    );
     for case in cases {
         assert!(
             case["status"] == "pass" || case["status"] == "skipped",
@@ -110,9 +118,12 @@ async fn grok_golden_scripts_execute_and_continue_via_native_acp() {
             eprintln!("GROK_GOLDEN_SKIP={case}");
         }
     }
-    assert!(cases
-        .iter()
-        .any(|case| case["id"] == "python_heredoc" && case["status"] == "pass"));
+    assert!(
+        cases
+            .iter()
+            .any(|case| case["id"] == "python_heredoc" && case["status"] == "pass"),
+        "required Python heredoc case must execute successfully"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -133,7 +144,11 @@ async fn grok_golden_inherited_pipe_must_not_delay_command_exit() {
 async fn grok_golden_kill_and_release_clean_up_descendants() {
     let report = replay("cleanup").await;
     let cases = report["cleanup"].as_array().expect("cleanup cases");
-    assert_eq!(cases.len(), 4);
+    assert_eq!(
+        cases.len(),
+        4,
+        "kill/release must cover running and exited parents"
+    );
     for case in cases {
         assert_eq!(case["processes_stopped"], true, "{case}");
         if case["parent_exits"] == true {
@@ -161,7 +176,7 @@ async fn grok_golden_exit_preserves_final_output_and_truncation() {
     let cases = report["output_stress"]
         .as_array()
         .expect("output stress cases");
-    assert_eq!(cases.len(), 2);
+    assert_eq!(cases.len(), 2, "verify full and byte-limited output");
     for case in cases {
         assert_eq!(case["status"], "pass", "{case}");
     }

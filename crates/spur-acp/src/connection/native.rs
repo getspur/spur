@@ -3,9 +3,8 @@
 //   graceful-shutdown escalation caller pairs it with child.wait()/child.kill(),
 //   but the Drop safety-net caller cannot reap. Phase 0a follow-up: keep this
 //   distinction explicit when adding kill_on_drop(true).
-// - pre-audit lines 884, 1340, and 1367 are terminal SIGKILL fallbacks. The terminal
-//   Child is owned by terminal_reader, which always reaches child.wait().await
-//   after stdout/stderr close, so these explicit kills are paired with reaping.
+// - Terminal kill/release/shutdown controls go to terminal_reader, which owns
+//   Child and pairs termination with child.wait(), independently of pipe EOF.
 // Second SIGKILL races after kill_on_drop are benign on POSIX (ESRCH/no-op).
 //! `NativeAcpConnection` — drives an ACP agent subprocess over stdio using the
 //! official SDK's builder/handler API (`Client.builder()…connect_with`).
@@ -46,8 +45,9 @@ use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 
 use async_trait::async_trait;
+use futures::future::{BoxFuture, Shared};
 use futures::stream::unfold;
-use futures::Stream;
+use futures::{FutureExt, Stream};
 use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::schema::v1::{
@@ -1860,7 +1860,7 @@ fn complete_new_session(
     // The response is the baseline. Notifications emitted before the response
     // are temporally newer and must be replayed after these snapshots.
     cache_session_modes(session_modes, &response.session_id, response.modes.as_ref());
-    if let Some(ref options) = response.config_options {
+    if let Some(options) = &response.config_options {
         cache_config_options_model_effort(
             grok_session_models,
             session_efforts,
@@ -2454,7 +2454,7 @@ impl AgentConnection for NativeAcpConnection {
         })??;
         // Belt-and-suspenders: also record usage here (ACP thread path does the same).
         // sol_55e2f7194a224bba primary path — PromptResponse.usage → last_prompt_usage
-        if let Some(ref usage) = response.usage {
+        if let Some(usage) = &response.usage {
             if let Ok(mut slot) = self.last_prompt_usage.lock() {
                 *slot = Some(usage.clone());
             }
@@ -3532,20 +3532,24 @@ fn acp_thread_main(
                                 let output = Arc::new(Mutex::new(String::new()));
                                 let truncated = Arc::new(AtomicBool::new(false));
                                 let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
+                                let (control_tx, control_rx) = mpsc::unbounded_channel();
 
                                 // Reader runs on the LocalSet task — its captured
                                 // state is all `Send` so it would also satisfy
                                 // `tokio::spawn`, but we don't have a multi-threaded
                                 // runtime here.
-                                tokio::task::spawn_local(terminal_reader(
+                                let reader = tokio::task::spawn_local(terminal_reader(
                                     child_stdout,
                                     child_stderr,
                                     child,
                                     output.clone(),
                                     truncated.clone(),
                                     byte_limit,
-                                    exit_tx,
+                                    TerminalChannels { exit_tx, control_rx },
                                 ));
+                                let reader = async move {
+                                    let _ = reader.await;
+                                }.boxed().shared();
 
                                 let terminal_id =
                                     TerminalId::new(uuid::Uuid::new_v4().to_string());
@@ -3562,7 +3566,8 @@ fn acp_thread_main(
                                         output,
                                         truncated,
                                         exit_rx,
-                                        pid,
+                                        control_tx,
+                                        reader,
                                     },
                                 );
                                 Ok(CreateTerminalResponse::new(terminal_id))
@@ -3643,28 +3648,19 @@ fn acp_thread_main(
                 .on_receive_request(
                     async move |req: KillTerminalRequest, responder, _cx| {
                         let key = req.terminal_id.to_string();
-                        let result: Option<(u32, bool)> = {
+                        let control = {
                             let map = terminals_kill.lock().unwrap();
-                            map.get(&key)
-                                .map(|t| (t.pid, t.exit_rx.borrow().is_none()))
+                            map.get(&key).map(|t| t.control_tx.clone())
                         };
-                        match result {
+                        match control {
                             None => responder.respond_with_result(Err(
                                 agent_client_protocol::Error::invalid_params()
                                     .data(format!("Terminal '{}' not found", key)),
                             )),
-                            Some((pid, is_running)) => {
-                                if is_running {
-                                    tracing::debug!(
-                                        terminal = %key,
-                                        pid = pid,
-                                        "Killing terminal"
-                                    );
-                                    let _ = std::process::Command::new("kill")
-                                        .arg("-9")
-                                        .arg(pid.to_string())
-                                        .status();
-                                }
+                            Some(control) => {
+                                // Descendants can still hold the pipes after
+                                // the command's exit status has been published.
+                                let _ = control.send(TerminalControl::Kill);
                                 responder.respond(KillTerminalResponse::new())
                             }
                         }
@@ -3675,28 +3671,16 @@ fn acp_thread_main(
                 .on_receive_request(
                     async move |req: ReleaseTerminalRequest, responder, _cx| {
                         let key = req.terminal_id.to_string();
-                        let pid_to_kill: Option<u32> = {
-                            let map = terminals_release.lock().unwrap();
-                            map.get(&key).and_then(|t| {
-                                if t.exit_rx.borrow().is_none() {
-                                    Some(t.pid)
-                                } else {
-                                    None
-                                }
-                            })
-                        };
-                        if let Some(pid) = pid_to_kill {
-                            tracing::debug!(
-                                terminal = %key,
-                                pid = pid,
-                                "Killing terminal on release"
-                            );
-                            let _ = std::process::Command::new("kill")
-                                .arg("-9")
-                                .arg(pid.to_string())
-                                .status();
+                        let terminal = terminals_release.lock().unwrap().get(&key)
+                            .map(|terminal| (terminal.control_tx.clone(), terminal.reader.clone()));
+                        if let Some((control, reader)) = terminal {
+                            // Retain completion in the map while awaiting it:
+                            // disconnect can cancel this callback, and shutdown
+                            // must still be able to join the owning reader.
+                            let _ = control.send(TerminalControl::Release);
+                            reader.await;
+                            terminals_release.lock().unwrap().remove(&key);
                         }
-                        terminals_release.lock().unwrap().remove(&key);
                         responder.respond(ReleaseTerminalResponse::new())
                     },
                     agent_client_protocol::on_receive_request!(),
@@ -4038,7 +4022,7 @@ fn acp_thread_main(
                                                     // present. Do not clobber a prior
                                                     // turn_completed / UsageUpdate fill
                                                     // with None.
-                                                    if let Some(ref u) = response.usage {
+                                                    if let Some(u) = &response.usage {
                                                         if let Ok(mut usage) =
                                                             last_prompt_usage_loop.lock()
                                                         {
@@ -4199,7 +4183,7 @@ fn acp_thread_main(
                                                         &session_id_for_probe,
                                                         response.modes.as_ref(),
                                                     );
-                                    if let Some(ref opts) = response.config_options {
+                                    if let Some(opts) = &response.config_options {
                                         cache_config_options_model_effort(
                                             &grok_session_models,
                                             &session_efforts,
@@ -4263,7 +4247,7 @@ fn acp_thread_main(
                                         &session_id,
                                         response.modes.as_ref(),
                                     );
-                                    if let Some(ref opts) = response.config_options {
+                                    if let Some(opts) = &response.config_options {
                                         cache_config_options_model_effort(
                                             &grok_session_models,
                                             &session_efforts,
@@ -4433,16 +4417,15 @@ fn acp_thread_main(
             let _ = reply.send(Err(err));
         }
 
-        // Kill any still-running terminals — both the explicit-shutdown path
-        // and the unexpected-disconnect path share this code.
-        for (id, terminal) in terminals.lock().unwrap().iter() {
-            if terminal.exit_rx.borrow().is_none() {
-                tracing::debug!(terminal = %id, "Killing terminal on shutdown");
-                let _ = std::process::Command::new("kill")
-                    .arg("-9")
-                    .arg(terminal.pid.to_string())
-                    .status();
-            }
+        // Signal every reader before joining any of them. Exited commands can
+        // still own descendants and open pipes, so exit_rx is not a cleanup gate.
+        let remaining_terminals: Vec<_> = terminals.lock().unwrap().drain().collect();
+        for (id, terminal) in &remaining_terminals {
+            tracing::debug!(terminal = %id, "Releasing terminal on shutdown");
+            let _ = terminal.control_tx.send(TerminalControl::Release);
+        }
+        for (_, terminal) in remaining_terminals {
+            terminal.reader.await;
         }
 
         // Stdin has already closed (the SDK writer was dropped when the
@@ -4626,7 +4609,18 @@ struct TerminalState {
     output: Arc<Mutex<String>>,
     truncated: Arc<AtomicBool>,
     exit_rx: tokio::sync::watch::Receiver<Option<TerminalExitStatus>>,
-    pid: u32,
+    control_tx: mpsc::UnboundedSender<TerminalControl>,
+    reader: Shared<BoxFuture<'static, ()>>,
+}
+
+enum TerminalControl {
+    Kill,
+    Release,
+}
+
+struct TerminalChannels {
+    exit_tx: tokio::sync::watch::Sender<Option<TerminalExitStatus>>,
+    control_rx: mpsc::UnboundedReceiver<TerminalControl>,
 }
 
 // ─── Diagnostic helpers (streaming probes) ──────────────────────────────────
@@ -4821,18 +4815,65 @@ async fn terminal_reader(
     output: Arc<Mutex<String>>,
     truncated: Arc<AtomicBool>,
     byte_limit: Option<u64>,
-    exit_tx: tokio::sync::watch::Sender<Option<TerminalExitStatus>>,
+    channels: TerminalChannels,
 ) {
+    // Final output normally reaches EOF immediately. A descendant may retain
+    // either pipe indefinitely, so bound only the wait to publish status;
+    // keep collecting late output until EOF or explicit release.
+    const EXIT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+    let TerminalChannels {
+        exit_tx,
+        mut control_rx,
+    } = channels;
+    #[cfg(unix)]
+    let pid = child.id();
     let mut stdout_buf = [0u8; 4096];
     let mut stderr_buf = [0u8; 4096];
     let mut stdout_done = false;
     let mut stderr_done = false;
+    let mut exit_status = None;
+    let mut exit_published = false;
+    let drain_grace = tokio::time::sleep(EXIT_DRAIN_GRACE);
+    tokio::pin!(drain_grace);
 
     loop {
-        if stdout_done && stderr_done {
+        if stdout_done && stderr_done && exit_status.is_some() {
+            if !exit_published {
+                let _ = exit_tx.send(exit_status.clone());
+            }
             break;
         }
         tokio::select! {
+            control = control_rx.recv() => {
+                // This task owns process cleanup. Once it completes, the
+                // channel closes and subsequent controls become no-ops.
+                #[cfg(unix)]
+                if let Some(pid) = pid {
+                    killpg(pid as i32, "KILL");
+                }
+                if exit_status.is_none() {
+                    let _ = child.start_kill();
+                }
+                if !matches!(control, Some(TerminalControl::Kill)) {
+                    // Release/channel closure discards subsequent output and
+                    // reaps directly, without waiting for inherited pipe EOF.
+                    if exit_status.is_none() {
+                        exit_status = Some(terminal_exit_status(child.wait().await));
+                    }
+                    if !exit_published {
+                        let _ = exit_tx.send(exit_status);
+                    }
+                    return;
+                }
+            }
+            result = child.wait(), if exit_status.is_none() => {
+                exit_status = Some(terminal_exit_status(result));
+                drain_grace.as_mut().reset(tokio::time::Instant::now() + EXIT_DRAIN_GRACE);
+            }
+            () = &mut drain_grace, if exit_status.is_some() && !exit_published => {
+                let _ = exit_tx.send(exit_status.clone());
+                exit_published = true;
+            }
             result = AsyncReadExt::read(&mut stdout, &mut stdout_buf), if !stdout_done => {
                 match result {
                     Ok(0) | Err(_) => stdout_done = true,
@@ -4847,8 +4888,10 @@ async fn terminal_reader(
             }
         }
     }
+}
 
-    let exit_status = match child.wait().await {
+fn terminal_exit_status(result: std::io::Result<std::process::ExitStatus>) -> TerminalExitStatus {
+    match result {
         Ok(status) => {
             let mut es = TerminalExitStatus::new();
             if let Some(code) = status.code() {
@@ -4857,8 +4900,7 @@ async fn terminal_reader(
             es
         }
         Err(_) => TerminalExitStatus::new(),
-    };
-    let _ = exit_tx.send(Some(exit_status));
+    }
 }
 
 #[cfg(test)]
@@ -6147,6 +6189,7 @@ mod native_helper_tests {
         let output = Arc::new(Mutex::new(String::new()));
         let truncated = Arc::new(AtomicBool::new(false));
         let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
+        let (_control_tx, control_rx) = mpsc::unbounded_channel();
 
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -6157,7 +6200,10 @@ mod native_helper_tests {
                 output.clone(),
                 truncated.clone(),
                 None,
-                exit_tx,
+                TerminalChannels {
+                    exit_tx,
+                    control_rx,
+                },
             ),
         )
         .await
