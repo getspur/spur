@@ -15,6 +15,25 @@ import time
 from pathlib import Path
 
 
+def stopped(pid):
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        timeout=1,
+    ).stdout.strip()
+    return not state or state.startswith("Z")
+
+
+def wait_until(predicate, timeout=2):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
 class Peer:
     def __init__(self, corpus_path: Path, report_path: Path):
         self.corpus = json.loads(corpus_path.read_text())
@@ -198,6 +217,7 @@ class Peer:
             "import pathlib,time; pathlib.Path('child-ready').touch(); "
             "deadline=time.monotonic()+10\n"
             "while not pathlib.Path('release-child').exists() and time.monotonic()<deadline: time.sleep(0.01)\n"
+            "print('descendant-late',flush=True)\n"
         )
         parent_script = (
             "import os,pathlib,subprocess,sys; "
@@ -243,17 +263,169 @@ class Peer:
             if status is None:
                 status = self.response(wait_id)
             assert status.get("exitCode") == 0, status
+            assert wait_until(
+                lambda: (
+                    "descendant-late"
+                    in self.rpc("terminal/output", terminalId=terminal)["output"]
+                )
+            ), "late output must remain readable after command exit"
+            output = self.rpc("terminal/output", terminalId=terminal)
+            assert "parent-finished" in output["output"], output
+            assert output["exitStatus"] == status, output
             return {
                 "command_form": command_form,
                 "parent_exit_observed": exited,
                 "wait_returned_before_release": returned_before_release,
                 "observation_window_seconds": 0.25,
                 "exit_code": status.get("exitCode"),
+                "late_output_captured": True,
                 "verdict": "pass" if returned_before_release else "fail",
             }
         finally:
             (directory / "release-child").touch()
             self.rpc("terminal/release", terminalId=terminal)
+
+    def cleanup(self, shutdown=False):
+        cases = []
+        self.report["cleanup"] = cases
+        for parent_exits, method in (
+            [(True, "shutdown")]
+            if shutdown
+            else [
+                (exits, method)
+                for exits in (False, True)
+                for method in ("kill", "release")
+            ]
+        ):
+            directory = self.cwd / f"cleanup-{parent_exits}-{method}"
+            directory.mkdir()
+            child_script = (
+                "import os,pathlib,time; pathlib.Path('child-pid').write_text(str(os.getpid())); "
+                "pathlib.Path('child-ready').touch(); "
+                "deadline=time.monotonic()+10\n"
+                "while not pathlib.Path('release-child').exists() and time.monotonic()<deadline: time.sleep(0.01)\n"
+            )
+            parent_script = (
+                "import os,pathlib,subprocess,sys,time; "
+                "pathlib.Path('parent-pid').write_text(str(os.getpid())); "
+                f"subprocess.Popen([sys.executable,'-c',{child_script!r}]); "
+                "print('parent-ready',flush=True); "
+                + ("sys.exit(0)" if parent_exits else "time.sleep(10)")
+            )
+            terminal = self.rpc(
+                "terminal/create",
+                command="/bin/bash",
+                args=["-c", "exec python3 -c " + shlex.quote(parent_script)],
+                cwd=str(directory),
+                env=[{"name": "BASH_ENV", "value": "/dev/null"}],
+            )["terminalId"]
+            try:
+                assert wait_until(lambda: (directory / "child-ready").exists())
+                pids = [
+                    int((directory / name).read_text())
+                    for name in ("parent-pid", "child-pid")
+                ]
+                if parent_exits:
+                    assert wait_until(lambda: stopped(pids[0]))
+                assert wait_until(
+                    lambda: (
+                        "parent-ready"
+                        in self.rpc("terminal/output", terminalId=terminal)["output"]
+                    )
+                )
+                original_status = None
+                if parent_exits:
+                    wait_until(
+                        lambda: (
+                            self.rpc("terminal/output", terminalId=terminal).get(
+                                "exitStatus"
+                            )
+                            is not None
+                        ),
+                        timeout=0.25,
+                    )
+                    original_status = self.rpc(
+                        "terminal/output", terminalId=terminal
+                    ).get("exitStatus")
+                if shutdown:
+                    cases.append(
+                        {
+                            "method": method,
+                            "parent_exits": parent_exits,
+                            "pids": pids,
+                            "release_path": str(directory / "release-child"),
+                            "exit_published_before_cleanup": original_status
+                            is not None,
+                        }
+                    )
+                    return
+                self.rpc("terminal/" + method, terminalId=terminal)
+                cleaned = wait_until(
+                    lambda: all(stopped(pid) for pid in pids), timeout=1
+                )
+                row = {
+                    "method": method,
+                    "parent_exits": parent_exits,
+                    "processes_stopped": cleaned,
+                    "exit_published_before_cleanup": original_status is not None
+                    if parent_exits
+                    else None,
+                }
+                if not cleaned:
+                    # Preserve the failing cleanup verdict, then unblock pipes
+                    # so the pre-fix wait does not obscure it with a timeout.
+                    (directory / "release-child").touch()
+                if method == "kill":
+                    status = self.rpc("terminal/wait_for_exit", terminalId=terminal)
+                    output = self.rpc("terminal/output", terminalId=terminal)
+                    assert output["exitStatus"] == status, output
+                    if original_status is not None:
+                        assert status == original_status, (status, original_status)
+                    row["output_retained"] = "parent-ready" in output["output"]
+                cases.append(row)
+            finally:
+                if not shutdown:
+                    (directory / "release-child").touch()
+                    self.rpc("terminal/release", terminalId=terminal)
+                self.persist()
+
+    def output_stress(self):
+        self.report["output_stress"] = []
+        for limit in (None, 4096):
+            params = {} if limit is None else {"outputByteLimit": limit}
+            terminal = self.rpc(
+                "terminal/create",
+                command="python3",
+                args=[
+                    "-c",
+                    "import sys; sys.stdout.write('O'*262144); sys.stderr.write('E'*262144); sys.exit(11)",
+                ],
+                cwd=str(self.cwd),
+                env=[],
+                **params,
+            )["terminalId"]
+            try:
+                status = self.rpc("terminal/wait_for_exit", terminalId=terminal)
+                output = self.rpc("terminal/output", terminalId=terminal)
+                assert status.get("exitCode") == 11, status
+                assert output["exitStatus"] == status, output
+                assert output["truncated"] == (limit is not None)
+                if limit is None:
+                    assert output["output"].count("O") == 262144
+                    assert output["output"].count("E") == 262144
+                else:
+                    assert len(output["output"]) == limit
+                self.report["output_stress"].append(
+                    {
+                        "limit": limit,
+                        "bytes": len(output["output"]),
+                        "exit_code": status["exitCode"],
+                        "status": "pass",
+                    }
+                )
+            finally:
+                self.rpc("terminal/release", terminalId=terminal)
+                self.persist()
 
     def run(self):
         while (message := self.messages.get()) is not None:
@@ -274,6 +446,12 @@ class Peer:
                         self.evaluate()
                     elif action == "inherited-pipe":
                         self.inherited_pipe()
+                    elif action == "cleanup":
+                        self.cleanup()
+                    elif action == "shutdown-cleanup":
+                        self.cleanup(shutdown=True)
+                    elif action == "output-stress":
+                        self.output_stress()
                     elif action == "continue":
                         result = self.terminal(
                             "/bin/sh", ["-c", "printf continuation-ok"], self.cwd, {}

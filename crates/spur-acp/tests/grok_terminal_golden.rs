@@ -62,9 +62,30 @@ async fn replay(action: &str) -> Value {
     prompt(&mut conn, &session.session_id, action).await;
     prompt(&mut conn, &session.session_id, "continue").await;
     conn.shutdown().await.expect("shutdown fixture peer");
-    let report: Value =
+    let mut report: Value =
         serde_json::from_slice(&std::fs::read(report_path).expect("fixture report"))
             .expect("valid fixture report");
+    if action == "shutdown-cleanup" {
+        let case = &report["cleanup"][0];
+        let pids = case["pids"].as_array().expect("process IDs");
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let stopped = loop {
+            let all_stopped = pids.iter().all(|pid| {
+                let output = std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .expect("inspect fixture process");
+                let state = String::from_utf8_lossy(&output.stdout);
+                state.trim().is_empty() || state.trim().starts_with('Z')
+            });
+            if all_stopped || std::time::Instant::now() >= deadline {
+                break all_stopped;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        std::fs::write(case["release_path"].as_str().unwrap(), "").expect("release fixture child");
+        report["shutdown_processes_stopped"] = stopped.into();
+    }
     println!("GROK_GOLDEN_REPORT={report}");
     assert_eq!(
         report["follow_up"], true,
@@ -95,7 +116,6 @@ async fn grok_golden_scripts_execute_and_continue_via_native_acp() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "bd-3stsw: inherited-pipe delay; run explicitly and retain the failing verdict"]
 async fn grok_golden_inherited_pipe_must_not_delay_command_exit() {
     let report = replay("inherited-pipe").await;
     let cases = report["lifecycle"]["cases"]
@@ -107,4 +127,42 @@ async fn grok_golden_inherited_pipe_must_not_delay_command_exit() {
     }
     assert_eq!(report["lifecycle"]["verdict"], "pass",
         "command has exited, but terminal/wait_for_exit waited for the descendant's output pipe; this is a lifecycle failure, not an argv failure");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grok_golden_kill_and_release_clean_up_descendants() {
+    let report = replay("cleanup").await;
+    let cases = report["cleanup"].as_array().expect("cleanup cases");
+    assert_eq!(cases.len(), 4);
+    for case in cases {
+        assert_eq!(case["processes_stopped"], true, "{case}");
+        if case["parent_exits"] == true {
+            assert_eq!(case["exit_published_before_cleanup"], true, "{case}");
+        }
+        if case["method"] == "kill" {
+            assert_eq!(case["output_retained"], true, "{case}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grok_golden_shutdown_cleans_up_exited_parent_descendants() {
+    let report = replay("shutdown-cleanup").await;
+    assert_eq!(
+        report["cleanup"][0]["exit_published_before_cleanup"], true,
+        "{report}"
+    );
+    assert_eq!(report["shutdown_processes_stopped"], true, "{report}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grok_golden_exit_preserves_final_output_and_truncation() {
+    let report = replay("output-stress").await;
+    let cases = report["output_stress"]
+        .as_array()
+        .expect("output stress cases");
+    assert_eq!(cases.len(), 2);
+    for case in cases {
+        assert_eq!(case["status"], "pass", "{case}");
+    }
 }
