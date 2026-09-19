@@ -3481,20 +3481,11 @@ fn acp_thread_main(
                             .clone()
                             .unwrap_or_else(|| cwd_create_term.lock().unwrap().clone());
                         let byte_limit = req.output_byte_limit.or(Some(10 * 1024 * 1024));
-                        let normalized = normalize_grok_terminal_command(
+                        let normalized = crate::adapter::normalize_terminal_command(
                             terminal_agent_kind,
                             &req.command,
                             &req.args,
                         );
-                        if let Some(normalized) = normalized.as_ref() {
-                            tracing::info!(
-                                agent_kind = "grok",
-                                original_command_len = req.command.len(),
-                                shell_flag = %normalized.args[0],
-                                script_len = normalized.args[1].len(),
-                                "NativeAcpConnection: applied temporary Grok terminal/create argv interop; remove when Grok emits split command/args"
-                            );
-                        }
                         let (program, command_args): (&str, &[String]) = match &normalized {
                             Some(normalized) => (normalized.program, &normalized.args),
                             None => (&req.command, &req.args),
@@ -4685,65 +4676,6 @@ fn cancelled_permission_response() -> RequestPermissionResponse {
 }
 
 // ─── Terminal helpers ────────────────────────────────────────────────────────
-
-#[cfg(all(test, unix))]
-#[path = "grok_terminal_golden_tests.rs"]
-mod grok_terminal_golden_tests;
-
-#[derive(Debug, PartialEq, Eq)]
-struct NormalizedTerminalCommand {
-    program: &'static str,
-    args: [String; 2],
-}
-
-/// Normalize the packed argv shape emitted by Grok Build's ACP client.
-///
-/// This intentionally accepts only a POSIX-lexed `/bin/bash -lc|-c <script>`
-/// command with exactly one script word. Every other request retains ACP's
-/// protocol-correct direct-exec behavior. On non-Unix targets the shim is a
-/// no-op.
-///
-/// Temporary Grok interop: remove this helper and its handler call once Grok
-/// emits `command = "/bin/bash"` and `args = ["-lc", script]`.
-fn normalize_grok_terminal_command(
-    agent_kind: AgentKind,
-    command: &str,
-    args: &[String],
-) -> Option<NormalizedTerminalCommand> {
-    #[cfg(not(unix))]
-    {
-        let _ = (agent_kind, command, args);
-        None
-    }
-
-    #[cfg(unix)]
-    {
-        if agent_kind != AgentKind::Grok || !args.is_empty() {
-            return None;
-        }
-
-        let suffix = command.strip_prefix("/bin/bash")?;
-        if !matches!(
-            suffix.as_bytes().first(),
-            Some(b' ' | b'\t' | b'\n' | b'\r')
-        ) {
-            return None;
-        }
-
-        let words = shell_words::split(command).ok()?;
-        let [program, shell_flag, script] = words.as_slice() else {
-            return None;
-        };
-        if program != "/bin/bash" || !matches!(shell_flag.as_str(), "-lc" | "-c") {
-            return None;
-        }
-
-        Some(NormalizedTerminalCommand {
-            program: "/bin/bash",
-            args: [shell_flag.clone(), script.clone()],
-        })
-    }
-}
 
 /// Prevents ACP terminal tools from inheriting Spur's terminal through fd 0.
 ///
@@ -5937,111 +5869,6 @@ mod native_helper_tests {
 
         assert_eq!(&*output.lock().unwrap(), "456");
         assert!(truncated.load(Ordering::Relaxed));
-    }
-
-    #[cfg(unix)]
-    mod grok_terminal_compat_tests {
-        use super::*;
-
-        fn normalize(command: &str, args: &[String]) -> Option<NormalizedTerminalCommand> {
-            normalize_grok_terminal_command(AgentKind::Grok, command, args)
-        }
-
-        #[test]
-        fn already_split_bash_request_is_unchanged() {
-            let args = vec!["-lc".to_string(), "printf already-split".to_string()];
-
-            assert!(normalize("/bin/bash", &args).is_none());
-        }
-
-        #[test]
-        fn packed_grok_bash_request_normalizes_and_runs() {
-            let normalized = normalize("/bin/bash -lc 'printf grok-ok'", &[])
-                .expect("packed Grok bash request should normalize");
-
-            assert_eq!(normalized.program, "/bin/bash");
-            assert_eq!(normalized.args, ["-lc", "printf grok-ok"]);
-
-            let output = std::process::Command::new(normalized.program)
-                .args(&normalized.args)
-                .output()
-                .expect("normalized argv should spawn");
-            assert!(output.status.success());
-            assert_eq!(output.stdout, b"grok-ok");
-        }
-
-        #[test]
-        fn packed_long_script_spawns_as_an_argument() {
-            let script = format!("true; # {}", "x".repeat(16 * 1024));
-            let command = format!("/bin/bash -lc '{script}'");
-            let normalized =
-                normalize(&command, &[]).expect("long packed Grok bash request should normalize");
-
-            let status = std::process::Command::new(normalized.program)
-                .args(&normalized.args)
-                .status()
-                .expect("long script should not be used as the executable path");
-            assert!(status.success());
-        }
-
-        #[test]
-        fn packed_script_preserves_shell_syntax_newlines_and_unicode() {
-            let script = "printf \"$HOME|quoted;世界\" | cat\nprintf \"\\nsecond line\"";
-            let command = format!("/bin/bash -lc '{script}'");
-            let normalized =
-                normalize(&command, &[]).expect("quoted packed Grok bash request should normalize");
-
-            assert_eq!(normalized.args, ["-lc", script]);
-        }
-
-        #[test]
-        fn packed_double_quoted_payload_is_supported() {
-            let normalized = normalize(r#"/bin/bash -lc "printf double-quoted""#, &[])
-                .expect("double-quoted payload should normalize");
-
-            assert_eq!(normalized.args, ["-lc", "printf double-quoted"]);
-        }
-
-        #[test]
-        fn packed_bash_c_flag_is_supported() {
-            let normalized =
-                normalize("/bin/bash -c 'true'", &[]).expect("bash -c should normalize");
-
-            assert_eq!(normalized.args, ["-c", "true"]);
-        }
-
-        #[test]
-        fn packed_unquoted_payload_is_supported() {
-            let normalized =
-                normalize(r"/bin/bash -lc printf\ ok", &[]).expect("POSIX word should normalize");
-
-            assert_eq!(normalized.args, ["-lc", "printf ok"]);
-        }
-
-        #[test]
-        fn non_grok_packed_request_is_not_normalized() {
-            assert!(normalize_grok_terminal_command(
-                AgentKind::Generic,
-                "/bin/bash -lc 'printf nope'",
-                &[],
-            )
-            .is_none());
-        }
-
-        #[test]
-        fn grok_request_with_existing_args_is_not_normalized() {
-            let args = vec!["unexpected".to_string()];
-
-            assert!(normalize("/bin/bash -lc 'printf nope'", &args).is_none());
-        }
-
-        #[test]
-        fn malformed_or_extra_words_are_not_normalized() {
-            assert!(normalize("/bin/bash -lc 'unterminated", &[]).is_none());
-            assert!(normalize("/bin/bash -lc 'safe' extra", &[]).is_none());
-            assert!(normalize("/bin/sh -lc 'wrong shell'", &[]).is_none());
-            assert!(normalize("/bin/bash -x 'wrong flag'", &[]).is_none());
-        }
     }
 
     #[cfg(unix)]

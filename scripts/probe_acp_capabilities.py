@@ -1932,7 +1932,7 @@ def _split_terminal_shell_words(command: str) -> list[str]:
 
 
 class TerminalHost:
-    """Opt-in ACP terminal host; `grok` mirrors native.rs's narrow workaround."""
+    """Opt-in ACP terminal host; `grok` mirrors adapter/grok.rs's narrow workaround."""
 
     def __init__(self, send: Callable[[JsonObject], None], cwd: Path, mode: str):
         self.send = send

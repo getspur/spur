@@ -196,9 +196,9 @@ class Peer:
             )
             self.persist()
 
-    def inherited_pipe(self):
+    def inherited_pipe(self, include_packed=True):
         cases = []
-        for packed in (False, True):
+        for packed in (False, True) if include_packed else (False,):
             cases.append(self.inherited_pipe_variant(packed))
             self.report["lifecycle"] = {
                 "cases": cases,
@@ -446,6 +446,8 @@ class Peer:
                         self.evaluate()
                     elif action == "inherited-pipe":
                         self.inherited_pipe()
+                    elif action == "inherited-pipe-split":
+                        self.inherited_pipe(include_packed=False)
                     elif action == "cleanup":
                         self.cleanup()
                     elif action == "shutdown-cleanup":

@@ -5,6 +5,7 @@ pub mod config_options;
 pub mod diff;
 pub mod gemini;
 pub mod generic;
+mod grok;
 pub mod grok_session_display;
 pub mod kimi;
 pub mod kiro;
@@ -16,6 +17,37 @@ pub use diff::unified_edit_diff;
 use crate::types::AgentKind;
 use agent_client_protocol::schema::v1::{SessionNotification, ToolCall, ToolKind};
 use serde_json::Value;
+
+/// Replacement argv for an observed agent-specific terminal request shape.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct NormalizedTerminalCommand {
+    pub program: &'static str,
+    pub args: Vec<String>,
+}
+
+/// Apply terminal compatibility for the selected agent; `None` retains ACP's
+/// direct-exec command and args. Process execution and lifecycle stay in the host.
+pub(crate) fn normalize_terminal_command(
+    kind: AgentKind,
+    command: &str,
+    args: &[String],
+) -> Option<NormalizedTerminalCommand> {
+    match kind {
+        AgentKind::Grok => grok::normalize_terminal_command(command, args),
+        AgentKind::ClaudeStreamJson
+        | AgentKind::ClaudeCodeAcp
+        | AgentKind::CodexAcp
+        | AgentKind::Kiro
+        | AgentKind::Kimi
+        | AgentKind::Gemini
+        | AgentKind::OpenCode
+        | AgentKind::Pi
+        | AgentKind::Generic => None,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod grok_terminal_golden_tests;
 
 /// Mirrors ACP `ToolKind` 1:1 with TUI-specific refinements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

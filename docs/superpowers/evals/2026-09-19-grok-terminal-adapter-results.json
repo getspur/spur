@@ -1,0 +1,694 @@
+{
+  "schema": "spur.grok-terminal-adapter-results",
+  "version": 1,
+  "issue": "bd-28jrx",
+  "base_commit": "cb3c16993",
+  "command": "SPUR_NO_LOCAL_FALLBACK=1 scripts/spur-cargo test -p spur-acp -- --nocapture",
+  "exit_code": 0,
+  "platform": "remote Linux",
+  "suite": {
+    "summaries": 36,
+    "passed": 626,
+    "failed": 0,
+    "ignored": 1
+  },
+  "golden_corpus": {
+    "path": "crates/spur-acp/tests/fixtures/grok_terminal_golden.json",
+    "sha256": "8fe99c5c1248428012e36de291123fea991b6dda202c1e34d46e9f670520bc32",
+    "grok_argv_checks": 102,
+    "non_grok_agents": 9,
+    "non_grok_packed_passthrough_checks": 459,
+    "passthrough_cases": 12
+  },
+  "reports": [
+    {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [],
+      "follow_up": true,
+      "lifecycle": null,
+      "output_stress": [
+        {
+          "limit": null,
+          "bytes": 524288,
+          "exit_code": 11,
+          "status": "pass"
+        },
+        {
+          "limit": 4096,
+          "bytes": 4096,
+          "exit_code": 11,
+          "status": "pass"
+        }
+      ],
+      "agent_kind": "Grok"
+    },
+    {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [],
+      "follow_up": true,
+      "lifecycle": null,
+      "output_stress": [
+        {
+          "limit": null,
+          "bytes": 524288,
+          "exit_code": 11,
+          "status": "pass"
+        },
+        {
+          "limit": 4096,
+          "bytes": 4096,
+          "exit_code": 11,
+          "status": "pass"
+        }
+      ],
+      "agent_kind": "Generic"
+    },
+    {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [],
+      "follow_up": true,
+      "lifecycle": {
+        "cases": [
+          {
+            "command_form": "split",
+            "parent_exit_observed": true,
+            "wait_returned_before_release": true,
+            "observation_window_seconds": 0.25,
+            "exit_code": 0,
+            "late_output_captured": true,
+            "verdict": "pass"
+          },
+          {
+            "command_form": "packed",
+            "parent_exit_observed": true,
+            "wait_returned_before_release": true,
+            "observation_window_seconds": 0.25,
+            "exit_code": 0,
+            "late_output_captured": true,
+            "verdict": "pass"
+          }
+        ],
+        "verdict": "pass"
+      },
+      "agent_kind": "Grok"
+    },
+    {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [],
+      "follow_up": true,
+      "lifecycle": null,
+      "cleanup": [
+        {
+          "method": "kill",
+          "parent_exits": false,
+          "processes_stopped": true,
+          "exit_published_before_cleanup": null,
+          "output_retained": true
+        },
+        {
+          "method": "release",
+          "parent_exits": false,
+          "processes_stopped": true,
+          "exit_published_before_cleanup": null
+        },
+        {
+          "method": "kill",
+          "parent_exits": true,
+          "processes_stopped": true,
+          "exit_published_before_cleanup": true,
+          "output_retained": true
+        },
+        {
+          "method": "release",
+          "parent_exits": true,
+          "processes_stopped": true,
+          "exit_published_before_cleanup": true
+        }
+      ],
+      "agent_kind": "Grok"
+    },
+    {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [],
+      "follow_up": true,
+      "lifecycle": null,
+      "cleanup": [
+        {
+          "method": "shutdown",
+          "parent_exits": true,
+          "pids": [
+            27119,
+            27123
+          ],
+          "release_path": "/mnt/cargo/tmp/.tmpNbwuEh/cleanup-True-shutdown/release-child",
+          "exit_published_before_cleanup": true
+        }
+      ],
+      "shutdown_processes_stopped": true,
+      "agent_kind": "Grok"
+    },
+    {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [],
+      "follow_up": true,
+      "lifecycle": {
+        "cases": [
+          {
+            "command_form": "split",
+            "parent_exit_observed": true,
+            "wait_returned_before_release": true,
+            "observation_window_seconds": 0.25,
+            "exit_code": 0,
+            "late_output_captured": true,
+            "verdict": "pass"
+          }
+        ],
+        "verdict": "pass"
+      },
+      "agent_kind": "Generic"
+    },
+    {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [],
+      "follow_up": true,
+      "lifecycle": null,
+      "cleanup": [
+        {
+          "method": "shutdown",
+          "parent_exits": true,
+          "pids": [
+            27155,
+            27160
+          ],
+          "release_path": "/mnt/cargo/tmp/.tmp0EKZfa/cleanup-True-shutdown/release-child",
+          "exit_published_before_cleanup": true
+        }
+      ],
+      "shutdown_processes_stopped": true,
+      "agent_kind": "Generic"
+    },
+    {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [],
+      "follow_up": true,
+      "lifecycle": null,
+      "cleanup": [
+        {
+          "method": "kill",
+          "parent_exits": false,
+          "processes_stopped": true,
+          "exit_published_before_cleanup": null,
+          "output_retained": true
+        },
+        {
+          "method": "release",
+          "parent_exits": false,
+          "processes_stopped": true,
+          "exit_published_before_cleanup": null
+        },
+        {
+          "method": "kill",
+          "parent_exits": true,
+          "processes_stopped": true,
+          "exit_published_before_cleanup": true,
+          "output_retained": true
+        },
+        {
+          "method": "release",
+          "parent_exits": true,
+          "processes_stopped": true,
+          "exit_published_before_cleanup": true
+        }
+      ],
+      "agent_kind": "Generic"
+    },
+    {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [
+        {
+          "id": "bash_printf",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "shell-ok\n",
+              "exit_code": 0
+            },
+            {
+              "output": "shell-ok\n",
+              "exit_code": 0
+            },
+            {
+              "output": "shell-ok\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_pipeline",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "ALPHA\nBETA\n",
+              "exit_code": 0
+            },
+            {
+              "output": "ALPHA\nBETA\n",
+              "exit_code": 0
+            },
+            {
+              "output": "ALPHA\nBETA\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_pipefail",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "",
+              "exit_code": 1
+            },
+            {
+              "output": "",
+              "exit_code": 1
+            },
+            {
+              "output": "",
+              "exit_code": 1
+            }
+          ]
+        },
+        {
+          "id": "bash_pipeline_last_status",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "",
+              "exit_code": 0
+            },
+            {
+              "output": "",
+              "exit_code": 0
+            },
+            {
+              "output": "",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_apostrophe",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "it's quoted\n",
+              "exit_code": 0
+            },
+            {
+              "output": "it's quoted\n",
+              "exit_code": 0
+            },
+            {
+              "output": "it's quoted\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_literal_metacharacters",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "$HOME $(printf BAD) `printf BAD` | ; * \\\\end\n",
+              "exit_code": 0
+            },
+            {
+              "output": "$HOME $(printf BAD) `printf BAD` | ; * \\\\end\n",
+              "exit_code": 0
+            },
+            {
+              "output": "$HOME $(printf BAD) `printf BAD` | ; * \\\\end\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_multiline",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "first\nsecond\n",
+              "exit_code": 0
+            },
+            {
+              "output": "first\nsecond\n",
+              "exit_code": 0
+            },
+            {
+              "output": "first\nsecond\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_redirection",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "stored\n",
+              "exit_code": 0
+            },
+            {
+              "output": "stored\n",
+              "exit_code": 0
+            },
+            {
+              "output": "stored\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_unicode_file",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "Xin chào 世界\n",
+              "exit_code": 0
+            },
+            {
+              "output": "Xin chào 世界\n",
+              "exit_code": 0
+            },
+            {
+              "output": "Xin chào 世界\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_env",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "space $literal 世界\n",
+              "exit_code": 0
+            },
+            {
+              "output": "space $literal 世界\n",
+              "exit_code": 0
+            },
+            {
+              "output": "space $literal 世界\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "sh_script_file",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "sh:quoted arg\n",
+              "exit_code": 0
+            },
+            {
+              "output": "sh:quoted arg\n",
+              "exit_code": 0
+            },
+            {
+              "output": "sh:quoted arg\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_inline",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "{\"pipe\": \"a|b\", \"quote\": \"say \\\"hi\\\"\", \"unicode\": \"世界\"}\n",
+              "exit_code": 0
+            },
+            {
+              "output": "{\"pipe\": \"a|b\", \"quote\": \"say \\\"hi\\\"\", \"unicode\": \"世界\"}\n",
+              "exit_code": 0
+            },
+            {
+              "output": "{\"pipe\": \"a|b\", \"quote\": \"say \\\"hi\\\"\", \"unicode\": \"世界\"}\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_heredoc",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "[\"$HOME\", \"it's quoted\", \"a|b\", \"世界\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"$HOME\", \"it's quoted\", \"a|b\", \"世界\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"$HOME\", \"it's quoted\", \"a|b\", \"世界\"]\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_file_argv",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "[\"arg with spaces\", \"a|b\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"arg with spaces\", \"a|b\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"arg with spaces\", \"a|b\"]\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_module",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "module-ok\n",
+              "exit_code": 0
+            },
+            {
+              "output": "module-ok\n",
+              "exit_code": 0
+            },
+            {
+              "output": "module-ok\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_pipeline_stdin",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "one|two\n",
+              "exit_code": 0
+            },
+            {
+              "output": "one|two\n",
+              "exit_code": 0
+            },
+            {
+              "output": "one|two\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_stdin_eof",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "''\n",
+              "exit_code": 0
+            },
+            {
+              "output": "''\n",
+              "exit_code": 0
+            },
+            {
+              "output": "''\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_stderr_exit",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "expected-error\n",
+              "exit_code": 7
+            },
+            {
+              "output": "expected-error\n",
+              "exit_code": 7
+            },
+            {
+              "output": "expected-error\n",
+              "exit_code": 7
+            }
+          ]
+        },
+        {
+          "id": "python_exception",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nRuntimeError: GOLDEN_ERROR\n",
+              "exit_code": 1
+            },
+            {
+              "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nRuntimeError: GOLDEN_ERROR\n",
+              "exit_code": 1
+            },
+            {
+              "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nRuntimeError: GOLDEN_ERROR\n",
+              "exit_code": 1
+            }
+          ]
+        },
+        {
+          "id": "node_inline",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "[\"a|b\",\"$HOME\",\"世界\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"a|b\",\"$HOME\",\"世界\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"a|b\",\"$HOME\",\"世界\"]\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "node_script_file",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "[\"arg with spaces\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"arg with spaces\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"arg with spaces\"]\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "ruby_inline",
+          "status": "skipped",
+          "missing": [
+            "ruby"
+          ]
+        },
+        {
+          "id": "perl_inline",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "perl: a|b\n",
+              "exit_code": 0
+            },
+            {
+              "output": "perl: a|b\n",
+              "exit_code": 0
+            },
+            {
+              "output": "perl: a|b\n",
+              "exit_code": 0
+            }
+          ]
+        }
+      ],
+      "follow_up": true,
+      "lifecycle": null,
+      "runtimes": {
+        "bash": {
+          "path": "/usr/bin/bash",
+          "version": "GNU bash, version 5.2.15(1)-release (aarch64-unknown-linux-gnu)"
+        },
+        "python3": {
+          "path": "/usr/bin/python3",
+          "version": "Python 3.11.2"
+        },
+        "node": {
+          "path": "/usr/bin/node",
+          "version": "v24.21.0"
+        },
+        "ruby": {
+          "path": null,
+          "version": null
+        },
+        "perl": {
+          "path": "/usr/bin/perl",
+          "version": "This is perl 5, version 36, subversion 0 (v5.36.0) built for aarch64-linux-gnu-thread-multi"
+        }
+      },
+      "agent_kind": "Grok"
+    }
+  ],
+  "review": {
+    "agent": "golden_review",
+    "result": "No blocking findings. Shared terminal lifecycle sections independently compared byte-for-byte with base."
+  },
+  "scope": "Deterministic ACP peer with real subprocesses; no live Grok model call or installed SPUR binary rebuild/restart.",
+  "raw_log": ".spur/logs/grok-adapter-crate-20260919.log",
+  "checks": [
+    {
+      "command": "SPUR_REMOTE=1 SPUR_NO_LOCAL_FALLBACK=1 scripts/spur-cargo clippy -p spur-acp --lib --test grok_terminal_golden -- -D warnings",
+      "exit_code": 0,
+      "log": ".spur/logs/grok-adapter-clippy-20260919.log"
+    },
+    {
+      "command": "scripts/spur-cargo fmt --all -- --check",
+      "exit_code": 0,
+      "log": ".spur/logs/grok-adapter-fmt-20260919.log"
+    },
+    {
+      "command": "ruff check crates/spur-acp/tests/fixtures/grok_terminal_golden_peer.py scripts/probe_acp_capabilities.py",
+      "exit_code": 0
+    },
+    {
+      "command": "ruff format --check crates/spur-acp/tests/fixtures/grok_terminal_golden_peer.py scripts/probe_acp_capabilities.py",
+      "exit_code": 0
+    }
+  ]
+}

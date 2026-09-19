@@ -1,6 +1,6 @@
 //! Byte-level oracle for the workaround, independent of shell execution.
 
-use super::normalize_grok_terminal_command;
+use super::normalize_terminal_command;
 use crate::types::AgentKind;
 use serde::Deserialize;
 
@@ -47,9 +47,8 @@ fn grok_golden_packed_scripts_preserve_exact_argv() {
     for case in corpus.cases.into_iter().chain(corpus.lexical_only) {
         assert!(!case.packed.is_empty(), "{}: no packed variants", case.id);
         for packed in case.packed {
-            let actual =
-                normalize_grok_terminal_command(AgentKind::Grok, &packed.command, &packed.args)
-                    .unwrap_or_else(|| panic!("{}: packed wrapper was not recognized", case.id));
+            let actual = normalize_terminal_command(AgentKind::Grok, &packed.command, &packed.args)
+                .unwrap_or_else(|| panic!("{}: packed wrapper was not recognized", case.id));
             assert_eq!(actual.program, case.canonical.command, "{}", case.id);
             assert_eq!(actual.args.as_slice(), case.canonical.args, "{}", case.id);
 
@@ -57,7 +56,7 @@ fn grok_golden_packed_scripts_preserve_exact_argv() {
             let login = packed
                 .command
                 .replacen("/bin/bash -c ", "/bin/bash -lc ", 1);
-            let actual = normalize_grok_terminal_command(AgentKind::Grok, &login, &[])
+            let actual = normalize_terminal_command(AgentKind::Grok, &login, &[])
                 .expect("login wrapper must normalize");
             assert_eq!(actual.args[0], "-lc", "{}", case.id);
             assert_eq!(actual.args[1], case.canonical.args[1], "{}", case.id);
@@ -76,10 +75,35 @@ fn grok_golden_does_not_expand_the_normalization_boundary() {
             other => panic!("unknown golden agent kind {other}"),
         };
         assert!(
-            normalize_grok_terminal_command(kind, &case.request.command, &case.request.args)
-                .is_none(),
+            normalize_terminal_command(kind, &case.request.command, &case.request.args).is_none(),
             "{} must retain its original command/args",
             case.id
         );
+    }
+}
+
+#[test]
+fn packed_commands_are_unchanged_for_every_other_agent() {
+    for kind in [
+        AgentKind::ClaudeStreamJson,
+        AgentKind::ClaudeCodeAcp,
+        AgentKind::CodexAcp,
+        AgentKind::Kiro,
+        AgentKind::Kimi,
+        AgentKind::Gemini,
+        AgentKind::OpenCode,
+        AgentKind::Pi,
+        AgentKind::Generic,
+    ] {
+        let corpus = corpus();
+        for case in corpus.cases.into_iter().chain(corpus.lexical_only) {
+            for packed in case.packed {
+                assert!(
+                    normalize_terminal_command(kind, &packed.command, &packed.args).is_none(),
+                    "{kind:?} must preserve direct execution for {}",
+                    case.id
+                );
+            }
+        }
     }
 }

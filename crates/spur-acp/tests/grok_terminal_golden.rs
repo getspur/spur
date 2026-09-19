@@ -33,12 +33,12 @@ async fn prompt(conn: &mut NativeAcpConnection, session: &SessionId, text: &str)
     );
 }
 
-async fn replay(action: &str) -> Value {
+async fn replay(kind: AgentKind, action: &str) -> Value {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let temp = tempfile::tempdir().expect("isolated fixture directory");
     let report_path = temp.path().join("report.json");
     let mut conn = NativeAcpConnection::new_with_kind(
-        "grok-golden",
+        "terminal-golden",
         "python3",
         vec![
             root.join("tests/fixtures/grok_terminal_golden_peer.py")
@@ -49,7 +49,7 @@ async fn replay(action: &str) -> Value {
                 .to_string(),
             report_path.display().to_string(),
         ],
-        AgentKind::Grok,
+        kind,
         None,
     );
     tokio::time::timeout(
@@ -90,6 +90,7 @@ async fn replay(action: &str) -> Value {
         std::fs::write(case["release_path"].as_str().unwrap(), "").expect("release fixture child");
         report["shutdown_processes_stopped"] = stopped.into();
     }
+    report["agent_kind"] = format!("{kind:?}").into();
     println!("GROK_GOLDEN_REPORT={report}");
     assert_eq!(
         report["follow_up"], true,
@@ -100,7 +101,7 @@ async fn replay(action: &str) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn grok_golden_scripts_execute_and_continue_via_native_acp() {
-    let report = replay("golden").await;
+    let report = replay(AgentKind::Grok, "golden").await;
     let corpus: Value = serde_json::from_str(include_str!("fixtures/grok_terminal_golden.json"))
         .expect("golden corpus");
     let cases = report["cases"].as_array().expect("case results");
@@ -127,57 +128,71 @@ async fn grok_golden_scripts_execute_and_continue_via_native_acp() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn grok_golden_inherited_pipe_must_not_delay_command_exit() {
-    let report = replay("inherited-pipe").await;
-    let cases = report["lifecycle"]["cases"]
-        .as_array()
-        .expect("lifecycle cases");
-    assert_eq!(cases.len(), 2, "split control and packed wrapper");
-    for case in cases {
-        assert_eq!(case["parent_exit_observed"], true, "{case}");
-    }
-    assert_eq!(report["lifecycle"]["verdict"], "pass",
-        "command has exited, but terminal/wait_for_exit waited for the descendant's output pipe; this is a lifecycle failure, not an argv failure");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn grok_golden_kill_and_release_clean_up_descendants() {
-    let report = replay("cleanup").await;
-    let cases = report["cleanup"].as_array().expect("cleanup cases");
-    assert_eq!(
-        cases.len(),
-        4,
-        "kill/release must cover running and exited parents"
-    );
-    for case in cases {
-        assert_eq!(case["processes_stopped"], true, "{case}");
-        if case["parent_exits"] == true {
-            assert_eq!(case["exit_published_before_cleanup"], true, "{case}");
+async fn native_terminal_inherited_pipe_must_not_delay_command_exit() {
+    for kind in [AgentKind::Grok, AgentKind::Generic] {
+        let action = if kind == AgentKind::Grok {
+            "inherited-pipe"
+        } else {
+            "inherited-pipe-split"
+        };
+        let report = replay(kind, action).await;
+        let cases = report["lifecycle"]["cases"]
+            .as_array()
+            .expect("lifecycle cases");
+        let expected_cases = if kind == AgentKind::Grok { 2 } else { 1 };
+        assert_eq!(cases.len(), expected_cases, "{kind:?}: command forms");
+        for case in cases {
+            assert_eq!(case["parent_exit_observed"], true, "{case}");
         }
-        if case["method"] == "kill" {
-            assert_eq!(case["output_retained"], true, "{case}");
-        }
+        assert_eq!(report["lifecycle"]["verdict"], "pass",
+            "command has exited, but terminal/wait_for_exit waited for the descendant's output pipe; this is a lifecycle failure, not an argv failure");
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn grok_golden_shutdown_cleans_up_exited_parent_descendants() {
-    let report = replay("shutdown-cleanup").await;
-    assert_eq!(
-        report["cleanup"][0]["exit_published_before_cleanup"], true,
-        "{report}"
-    );
-    assert_eq!(report["shutdown_processes_stopped"], true, "{report}");
+async fn native_terminal_kill_and_release_clean_up_descendants() {
+    for kind in [AgentKind::Grok, AgentKind::Generic] {
+        let report = replay(kind, "cleanup").await;
+        let cases = report["cleanup"].as_array().expect("cleanup cases");
+        assert_eq!(
+            cases.len(),
+            4,
+            "kill/release must cover running and exited parents"
+        );
+        for case in cases {
+            assert_eq!(case["processes_stopped"], true, "{case}");
+            if case["parent_exits"] == true {
+                assert_eq!(case["exit_published_before_cleanup"], true, "{case}");
+            }
+            if case["method"] == "kill" {
+                assert_eq!(case["output_retained"], true, "{case}");
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn grok_golden_exit_preserves_final_output_and_truncation() {
-    let report = replay("output-stress").await;
-    let cases = report["output_stress"]
-        .as_array()
-        .expect("output stress cases");
-    assert_eq!(cases.len(), 2, "verify full and byte-limited output");
-    for case in cases {
-        assert_eq!(case["status"], "pass", "{case}");
+async fn native_terminal_shutdown_cleans_up_exited_parent_descendants() {
+    for kind in [AgentKind::Grok, AgentKind::Generic] {
+        let report = replay(kind, "shutdown-cleanup").await;
+        assert_eq!(
+            report["cleanup"][0]["exit_published_before_cleanup"], true,
+            "{report}"
+        );
+        assert_eq!(report["shutdown_processes_stopped"], true, "{report}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_terminal_exit_preserves_final_output_and_truncation() {
+    for kind in [AgentKind::Grok, AgentKind::Generic] {
+        let report = replay(kind, "output-stress").await;
+        let cases = report["output_stress"]
+            .as_array()
+            .expect("output stress cases");
+        assert_eq!(cases.len(), 2, "verify full and byte-limited output");
+        for case in cases {
+            assert_eq!(case["status"], "pass", "{case}");
+        }
     }
 }

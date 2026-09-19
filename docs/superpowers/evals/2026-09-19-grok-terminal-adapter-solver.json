@@ -1,0 +1,391 @@
+{
+  "schema": "spur.grok-terminal-adapter-ownership",
+  "version": 1,
+  "base_commit": "cb3c16993",
+  "issue": "bd-28jrx",
+  "scope": "Finite supplied ownership assignments, checked against the source diff; not a proof of executable parsing, runtime lifecycle, or unbounded liveness.",
+  "before": {
+    "request": {
+      "family": "configuration",
+      "mode": "verify",
+      "persist": true,
+      "facts": {
+        "components": {
+          "terminal_argv_contract": {
+            "selected": true,
+            "attributes": {
+              "scope": "agent_specific"
+            }
+          },
+          "terminal_argv_implementation": {
+            "selected": true,
+            "attributes": {
+              "owner": "connection"
+            }
+          },
+          "compatibility_log_contract": {
+            "selected": true,
+            "attributes": {
+              "scope": "agent_specific"
+            }
+          },
+          "compatibility_log_implementation": {
+            "selected": true,
+            "attributes": {
+              "owner": "connection"
+            }
+          },
+          "terminal_lifecycle_contract": {
+            "selected": true,
+            "attributes": {
+              "scope": "shared"
+            }
+          },
+          "terminal_lifecycle_implementation": {
+            "selected": true,
+            "attributes": {
+              "owner": "connection"
+            }
+          }
+        },
+        "selection_groups": {},
+        "allowed_attribute_pairs": [
+          {
+            "left": {
+              "component": "terminal_argv_contract",
+              "attribute": "scope",
+              "values": [
+                "agent_specific",
+                "shared"
+              ]
+            },
+            "right": {
+              "component": "terminal_argv_implementation",
+              "attribute": "owner",
+              "values": [
+                "adapter",
+                "connection"
+              ]
+            },
+            "allowed": [
+              [
+                "agent_specific",
+                "adapter"
+              ],
+              [
+                "shared",
+                "connection"
+              ]
+            ]
+          },
+          {
+            "left": {
+              "component": "compatibility_log_contract",
+              "attribute": "scope",
+              "values": [
+                "agent_specific",
+                "shared"
+              ]
+            },
+            "right": {
+              "component": "compatibility_log_implementation",
+              "attribute": "owner",
+              "values": [
+                "adapter",
+                "connection"
+              ]
+            },
+            "allowed": [
+              [
+                "agent_specific",
+                "adapter"
+              ],
+              [
+                "shared",
+                "connection"
+              ]
+            ]
+          },
+          {
+            "left": {
+              "component": "terminal_lifecycle_contract",
+              "attribute": "scope",
+              "values": [
+                "agent_specific",
+                "shared"
+              ]
+            },
+            "right": {
+              "component": "terminal_lifecycle_implementation",
+              "attribute": "owner",
+              "values": [
+                "adapter",
+                "connection"
+              ]
+            },
+            "allowed": [
+              [
+                "agent_specific",
+                "adapter"
+              ],
+              [
+                "shared",
+                "connection"
+              ]
+            ]
+          }
+        ],
+        "version_orderings": {}
+      },
+      "rules": [
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "subjects": [
+            "terminal_argv_contract",
+            "terminal_argv_implementation"
+          ]
+        },
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "subjects": [
+            "compatibility_log_contract",
+            "compatibility_log_implementation"
+          ]
+        },
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "subjects": [
+            "terminal_lifecycle_contract",
+            "terminal_lifecycle_implementation"
+          ]
+        }
+      ]
+    },
+    "result": {
+      "family": "configuration",
+      "mode": "verify",
+      "outcome": "fail",
+      "rule_results": [
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "binding_index": 0,
+          "status": "unsat",
+          "outcome": "fail",
+          "diagnostic": "configuration.attribute_allowed_pair.violation"
+        },
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "binding_index": 1,
+          "status": "unsat",
+          "outcome": "fail",
+          "diagnostic": "configuration.attribute_allowed_pair.violation"
+        },
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "binding_index": 2,
+          "status": "sat",
+          "outcome": "pass"
+        }
+      ],
+      "total_duration_ms": 250,
+      "status": "unsat",
+      "duration_ms": 105,
+      "solve_id": "sol_d59e83567e4c49ba",
+      "reason": null,
+      "unsat_core": [
+        "configuration_rule_0_configuration_attribute_allowed_pair"
+      ],
+      "solver_version": "Z3 version 4.16.0 - 64 bit"
+    }
+  },
+  "after": {
+    "request": {
+      "family": "configuration",
+      "mode": "verify",
+      "persist": true,
+      "facts": {
+        "components": {
+          "terminal_argv_contract": {
+            "selected": true,
+            "attributes": {
+              "scope": "agent_specific"
+            }
+          },
+          "terminal_argv_implementation": {
+            "selected": true,
+            "attributes": {
+              "owner": "adapter"
+            }
+          },
+          "compatibility_log_contract": {
+            "selected": true,
+            "attributes": {
+              "scope": "agent_specific"
+            }
+          },
+          "compatibility_log_implementation": {
+            "selected": true,
+            "attributes": {
+              "owner": "adapter"
+            }
+          },
+          "terminal_lifecycle_contract": {
+            "selected": true,
+            "attributes": {
+              "scope": "shared"
+            }
+          },
+          "terminal_lifecycle_implementation": {
+            "selected": true,
+            "attributes": {
+              "owner": "connection"
+            }
+          }
+        },
+        "selection_groups": {},
+        "allowed_attribute_pairs": [
+          {
+            "left": {
+              "component": "terminal_argv_contract",
+              "attribute": "scope",
+              "values": [
+                "agent_specific",
+                "shared"
+              ]
+            },
+            "right": {
+              "component": "terminal_argv_implementation",
+              "attribute": "owner",
+              "values": [
+                "adapter",
+                "connection"
+              ]
+            },
+            "allowed": [
+              [
+                "agent_specific",
+                "adapter"
+              ],
+              [
+                "shared",
+                "connection"
+              ]
+            ]
+          },
+          {
+            "left": {
+              "component": "compatibility_log_contract",
+              "attribute": "scope",
+              "values": [
+                "agent_specific",
+                "shared"
+              ]
+            },
+            "right": {
+              "component": "compatibility_log_implementation",
+              "attribute": "owner",
+              "values": [
+                "adapter",
+                "connection"
+              ]
+            },
+            "allowed": [
+              [
+                "agent_specific",
+                "adapter"
+              ],
+              [
+                "shared",
+                "connection"
+              ]
+            ]
+          },
+          {
+            "left": {
+              "component": "terminal_lifecycle_contract",
+              "attribute": "scope",
+              "values": [
+                "agent_specific",
+                "shared"
+              ]
+            },
+            "right": {
+              "component": "terminal_lifecycle_implementation",
+              "attribute": "owner",
+              "values": [
+                "adapter",
+                "connection"
+              ]
+            },
+            "allowed": [
+              [
+                "agent_specific",
+                "adapter"
+              ],
+              [
+                "shared",
+                "connection"
+              ]
+            ]
+          }
+        ],
+        "version_orderings": {}
+      },
+      "rules": [
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "subjects": [
+            "terminal_argv_contract",
+            "terminal_argv_implementation"
+          ]
+        },
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "subjects": [
+            "compatibility_log_contract",
+            "compatibility_log_implementation"
+          ]
+        },
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "subjects": [
+            "terminal_lifecycle_contract",
+            "terminal_lifecycle_implementation"
+          ]
+        }
+      ]
+    },
+    "result": {
+      "family": "configuration",
+      "mode": "verify",
+      "outcome": "pass",
+      "rule_results": [
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "binding_index": 0,
+          "status": "sat",
+          "outcome": "pass"
+        },
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "binding_index": 1,
+          "status": "sat",
+          "outcome": "pass"
+        },
+        {
+          "rule_id": "configuration.attribute_allowed_pair",
+          "binding_index": 2,
+          "status": "sat",
+          "outcome": "pass"
+        }
+      ],
+      "total_duration_ms": 340,
+      "status": "sat",
+      "model": {},
+      "duration_ms": 250,
+      "solve_id": "sol_471cf27d082e4431",
+      "reason": null,
+      "solver_version": "Z3 version 4.16.0 - 64 bit"
+    }
+  }
+}
