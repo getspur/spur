@@ -766,6 +766,23 @@ impl SpurAgentCaps {
         self.supports_grok_set_model() || self.supports_kiro_set_model()
     }
 
+    /// Apply a `session/update.ConfigOptionUpdate` snapshot to the frozen
+    /// `config_options` catalog.
+    ///
+    /// Agents re-scope dependent selects mid-session (e.g. Grok narrows
+    /// `reasoning_effort` after a model switch to one that lacks `xhigh`),
+    /// so entry synthesis from a session/new-frozen snapshot would serve
+    /// stale `current:` hints and choice lists. Empty snapshots are ignored
+    /// so a meaningless frame cannot wipe the catalog. Returns whether the
+    /// snapshot was applied.
+    pub fn apply_config_option_snapshot(&mut self, options: &[SessionConfigOption]) -> bool {
+        if options.is_empty() {
+            return false;
+        }
+        self.config_options = options.to_vec();
+        true
+    }
+
     /// Apply a proven Grok `model_changed` extension notification.
     ///
     /// Standard ACP capability fields and `config_options` remain untouched.
@@ -2340,6 +2357,41 @@ mod tests {
 
     fn empty_new_session_response() -> NewSessionResponse {
         NewSessionResponse::new(SessionId::new("test-empty"))
+    }
+
+    fn select_option(config_id: &str, current: &str, choices: &[&str]) -> SessionConfigOption {
+        let select_choices: Vec<SessionConfigSelectOption> = choices
+            .iter()
+            .map(|value| SessionConfigSelectOption::new((*value).to_string(), value.to_string()))
+            .collect();
+        SessionConfigOption::select(
+            config_id.to_string(),
+            "label".to_string(),
+            current.to_string(),
+            select_choices,
+        )
+    }
+
+    #[test]
+    fn apply_config_option_snapshot_replaces_catalog_and_ignores_empty() {
+        let init = empty_init_response();
+        let mut new = NewSessionResponse::new(SessionId::new("test-snapshot"));
+        new.config_options = Some(vec![
+            select_option("model", "grok-4.6", &["grok-4.6", "grok-4.5"]),
+            select_option("reasoning_effort", "high", &["xhigh", "high", "medium"]),
+        ]);
+        let mut caps = SpurAgentCaps::new(&init, &new, crate::types::AgentKind::Grok);
+
+        let re_advertised = vec![
+            select_option("model", "grok-4.5", &["grok-4.6", "grok-4.5"]),
+            select_option("reasoning_effort", "high", &["high", "medium"]),
+        ];
+        assert!(caps.apply_config_option_snapshot(&re_advertised));
+        assert_eq!(caps.config_options, re_advertised);
+
+        // An empty snapshot must never wipe the catalog.
+        assert!(!caps.apply_config_option_snapshot(&[]));
+        assert_eq!(caps.config_options, re_advertised);
     }
 
     #[test]

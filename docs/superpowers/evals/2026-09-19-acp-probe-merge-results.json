@@ -1,0 +1,103 @@
+{
+  "issue": "bd-xsxu9",
+  "parents": [
+    "1c1d4643fc9326a233c242a14de5892282f76974",
+    "23e58cdd2ca8390de3f3a3822ccd83fad9e51922"
+  ],
+  "python": {
+    "command": "python3 -m unittest scripts.test_probe_acp_capabilities scripts.test_probe_acp_terminals scripts.test_probe_acp_merge scripts.test_probe_acp_subagents",
+    "version": "3.14.5",
+    "exit_code": 0,
+    "passed": 131,
+    "log": ".spur/logs/acp-merge-python-final-20260919.log"
+  },
+  "rust_acp": {
+    "command": "SPUR_NO_LOCAL_FALLBACK=1 scripts/spur-cargo test -p spur-acp",
+    "exit_code": 0,
+    "suite_summaries": 36,
+    "passed": 632,
+    "failed": 0,
+    "ignored": 1,
+    "log": ".spur/logs/acp-merge-rust-acp-20260919.log",
+    "ignored_test": "kill_9_spur_then_reboot_reaps_orphan"
+  },
+  "red_regressions": [
+    {
+      "source": "HEAD",
+      "log": ".spur/logs/acp-merge-red-20260919.log",
+      "failures": [
+        "closed host allowed late spawn",
+        "wait blocked on descendant pipe EOF",
+        "callbacks without an active request were not serviced"
+      ]
+    },
+    {
+      "source": "origin/main",
+      "log": ".spur/logs/acp-merge-red-20260919.log",
+      "failures": [
+        "filesystem slicing called nonexistent str.lines",
+        "close did not wait for callback workers"
+      ]
+    },
+    {
+      "source": "intermediate merge resolution",
+      "log": ".spur/logs/acp-merge-review-red-20260919.log",
+      "failures": [
+        "fully completed terminal signaled old process group"
+      ]
+    },
+    {
+      "source": "intermediate merge resolution",
+      "log": ".spur/logs/acp-merge-writer-red-20260919.log",
+      "failures": [
+        "unread callback response blocked client close past7second watchdog"
+      ]
+    },
+    {
+      "source": "intermediate merge resolution",
+      "log": ".spur/logs/acp-merge-config-red-20260919.log",
+      "failures": [
+        "config refresh consumed notifications needed by report"
+      ]
+    }
+  ],
+  "review": {
+    "reviewer": "golden_review",
+    "status": "No blocking findings in final source."
+  },
+  "limitations": [
+    "Deterministic protocol peers, no live model calls.",
+    "Not a full-workspace test run.",
+    "No installed SPUR binary rebuild/restart.",
+    "Unix runtime paths tested; optional interpreter cases may skip when unavailable.",
+    "All supported Python versions were not exercised."
+  ],
+  "rust_tui": {
+    "command": "SPUR_NO_LOCAL_FALLBACK=1 scripts/spur-cargo test -p spur-tui --test config_option_update_arm",
+    "exit_code": 0,
+    "passed": 2,
+    "failed": 0,
+    "log": ".spur/logs/acp-merge-rust-tui-20260919.log",
+    "dependency_warnings": "Five pre-existing dead-code warnings from unchanged spur-graph dependency."
+  },
+  "checks": [
+    {
+      "command": "SPUR_REMOTE=1 SPUR_NO_LOCAL_FALLBACK=1 scripts/spur-cargo clippy -p spur-acp --lib --test grok_terminal_golden -- -D warnings",
+      "exit_code": 0,
+      "log": ".spur/logs/acp-merge-clippy-20260919.log"
+    },
+    {
+      "command": "scripts/spur-cargo fmt --all -- --check",
+      "exit_code": 0,
+      "log": ".spur/logs/acp-merge-fmt-20260919.log"
+    },
+    {
+      "command": "ruff check scripts/probe_acp_capabilities.py scripts/test_probe_acp_capabilities.py scripts/test_probe_acp_terminals.py scripts/test_probe_acp_merge.py",
+      "exit_code": 0
+    },
+    {
+      "command": "ruff format --check scripts/probe_acp_capabilities.py scripts/test_probe_acp_capabilities.py scripts/test_probe_acp_terminals.py scripts/test_probe_acp_merge.py",
+      "exit_code": 0
+    }
+  ]
+}

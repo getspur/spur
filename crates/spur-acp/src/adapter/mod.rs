@@ -11,6 +11,7 @@ pub mod kimi;
 pub mod kiro;
 pub mod kiro_session_display;
 pub mod mcp;
+pub mod pi;
 
 pub use diff::unified_edit_diff;
 
@@ -366,6 +367,7 @@ pub fn extract_tool_meta(tc: &ToolCall, kind: AgentKind) -> SpurToolMeta {
 pub enum SessionEventStandardizer {
     Kimi(kimi::SessionStandardizer),
     Gemini(gemini::SessionStandardizer),
+    Pi(pi::SessionStandardizer),
     Passthrough,
 }
 
@@ -380,6 +382,7 @@ impl SessionEventStandardizer {
         match kind {
             AgentKind::Kimi => Self::Kimi(kimi::SessionStandardizer::default()),
             AgentKind::Gemini => Self::Gemini(gemini::SessionStandardizer),
+            AgentKind::Pi => Self::Pi(pi::SessionStandardizer::default()),
             _ => Self::Passthrough,
         }
     }
@@ -388,6 +391,7 @@ impl SessionEventStandardizer {
         match self {
             Self::Kimi(standardizer) => standardizer.standardize(notification),
             Self::Gemini(standardizer) => standardizer.standardize(notification),
+            Self::Pi(standardizer) => standardizer.standardize(notification),
             Self::Passthrough => notification,
         }
     }

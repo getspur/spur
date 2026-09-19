@@ -330,7 +330,8 @@ class ContinuationTests(unittest.TestCase):
                 r["msg"] for r in frames if r["msg"].get("method") == "initialize"
             )
             self.assertTrue(init["params"]["clientCapabilities"]["terminal"])
-            self.assertFalse(init["params"]["clientCapabilities"]["fs"]["readTextFile"])
+            self.assertTrue(init["params"]["clientCapabilities"]["fs"]["readTextFile"])
+            self.assertTrue(init["params"]["clientCapabilities"]["fs"]["writeTextFile"])
 
     def test_terminal_default_is_off(self) -> None:
         args = probe.parse_cli(["--command", "unused"])

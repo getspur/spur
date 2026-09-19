@@ -23,7 +23,7 @@ Use ``--prompt`` only when session/update evidence is worth a billed turn.
 Use ``--terminal-mode strict`` to execute terminal callbacks, or ``grok`` to
 mirror SPUR's packed Bash argv workaround. Both execute commands locally.
 Repeat ``--follow-up-prompt`` to test continuation in the same ACP session.
-Filesystem callbacks are not implemented and are never advertised.
+Filesystem read/write callbacks resolve relative paths against the session cwd.
 
 Exit codes: 0 for a completed probe (tool failures remain report evidence),
 1 for a hard process/handshake failure, 2 for a prompt RPC error or timeout.
@@ -45,6 +45,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -1669,6 +1670,13 @@ class AcpClient:
         self.notifications: list[JsonObject] = []
         self.server_requests: list[JsonObject] = []
         self.protocol_frames: list[JsonObject] = []
+        # When set, server requests (permission, terminal, fs) are answered
+        # immediately on a worker thread instead of waiting for the next
+        # client.request() drain — agents stall if these sit unanswered.
+        self.server_request_handler: Optional[Callable[[JsonObject], None]] = None
+        self._server_request_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="probe-server-request"
+        )
         self._condition = threading.Condition()
         self._log_lock = threading.Lock()
         self._log_file = log_path.open("w", encoding="utf-8")
@@ -1716,14 +1724,25 @@ class AcpClient:
                     )
                 continue
             self._log("recv", message)
+            dispatch = False
             with self._condition:
                 if "method" in message and "id" in message:
-                    self.server_requests.append(message)
+                    handler = self.server_request_handler
+                    if handler is None:
+                        self.server_requests.append(message)
+                    else:
+                        dispatch = True
                 elif "method" in message:
                     self.notifications.append(message)
                 elif "id" in message:
                     self.responses[message["id"]] = message
                 self._condition.notify_all()
+            if dispatch:
+                try:
+                    self._server_request_executor.submit(handler, message)
+                except RuntimeError:  # executor shut down during teardown
+                    with self._condition:
+                        self.server_requests.append(message)
 
     def _stderr_loop(self) -> None:
         for raw_line in self.stderr:
@@ -1738,7 +1757,7 @@ class AcpClient:
             try:
                 self.stdin.write(encoded + "\n")
                 self.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
+            except (OSError, ValueError) as exc:
                 raise ProbeHardFailure(f"agent stdin closed: {exc}") from exc
             self._log_locked("send", message)
         if not self.quiet:
@@ -1755,8 +1774,11 @@ class AcpClient:
         server_request_handler: Callable[[JsonObject], None],
     ) -> Optional[JsonObject]:
         request_id = str(uuid.uuid4())
-        self.send(_make_request(request_id, method, params))
         deadline = time.monotonic() + timeout
+        if not self.send_with_timeout(
+            _make_request(request_id, method, params), timeout
+        ):
+            return None
         while True:
             for request in self.drain_server_requests():
                 server_request_handler(request)
@@ -1774,11 +1796,26 @@ class AcpClient:
                     return None
                 self._condition.wait(timeout=min(remaining, 0.05))
 
+    def send_with_timeout(self, message: JsonObject, timeout: float) -> bool:
+        """Keep a non-reading peer from blocking the probe's deadline thread."""
+        future = self._server_request_executor.submit(self.send, message)
+        try:
+            future.result(timeout=timeout)
+        except FutureTimeoutError:
+            future.cancel()
+            return False
+        return True
+
     def drain_notifications(self) -> list[JsonObject]:
         with self._condition:
             notifications = self.notifications[:]
             self.notifications.clear()
         return notifications
+
+    def snapshot_notifications(self) -> list[JsonObject]:
+        """Inspect live option updates while retaining all report evidence."""
+        with self._condition:
+            return self.notifications[:]
 
     def drain_server_requests(self) -> list[JsonObject]:
         with self._condition:
@@ -1791,11 +1828,21 @@ class AcpClient:
             return redact_json(self.protocol_frames)
 
     def close(self) -> tuple[Optional[int], bool]:
+        self.server_request_handler = None
+        self._server_request_executor.shutdown(wait=False, cancel_futures=True)
         forced = False
-        try:
-            self.stdin.close()
-        except OSError:
-            pass
+
+        def close_stdin() -> None:
+            with self._log_lock:
+                try:
+                    self.stdin.close()
+                except OSError:
+                    pass
+
+        # A callback may hold the writer lock while the peer stops reading.
+        # Closing stdin must not prevent the process timeout/kill below.
+        stdin_closer = threading.Thread(target=close_stdin, daemon=True)
+        stdin_closer.start()
         try:
             self.proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
@@ -1806,8 +1853,10 @@ class AcpClient:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait(timeout=2)
+        stdin_closer.join(timeout=1)
         self._reader.join(timeout=1)
         self._stderr_reader.join(timeout=1)
+        self._server_request_executor.shutdown(wait=True, cancel_futures=True)
         if not self._reader.is_alive():
             self.stdout.close()
         if not self._stderr_reader.is_alive():
@@ -1821,6 +1870,37 @@ def process_close_failure(*, return_code: Optional[int], forced: bool) -> Option
     if forced or return_code in (None, 0):
         return None
     return f"agent exited with status {return_code} during probe cleanup"
+
+
+def _handle_fs_request(
+    method: str, params: JsonObject, session_cwd: Path
+) -> JsonObject:
+    """Back the fs side-channel the probe advertises in clientCapabilities.
+
+    Mirrors spur-acp native: relative paths resolve against the session cwd,
+    reads honor optional ``line``/``limit`` slicing, writes create parents.
+    """
+    raw_path = params.get("path", params.get("file_path"))
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ProbeHardFailure(f"{method} missing path")
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = session_cwd / path
+    if method in ("fs/read_text_file", "fs/readTextFile"):
+        content = path.read_text(encoding="utf-8", errors="replace")
+        line = params.get("line")
+        limit = params.get("limit")
+        if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+            content = "\n".join(content.splitlines()[line - 1 :])
+        if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 0:
+            content = "\n".join(content.splitlines()[:limit])
+        return {"content": content}
+    if method in ("fs/write_text_file", "fs/writeTextFile"):
+        content = params.get("content", "")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(content), encoding="utf-8")
+        return {}
+    raise ProbeHardFailure(f"unsupported fs method {method}")
 
 
 def _permission_option(options: list[JsonObject], approve: bool) -> str:
@@ -1852,8 +1932,11 @@ class _ProbeTerminal:
         self.kill_sent = False
         self.lock = threading.Lock()
         self.done = threading.Event()
+        self.drained = threading.Event()
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
+        self.waiter = threading.Thread(target=self._observe_exit, daemon=True)
+        self.waiter.start()
 
     def _append(self, text: str) -> None:
         with self.lock:
@@ -1875,8 +1958,14 @@ class _ProbeTerminal:
             self._append(decoder.decode(b"", final=True))
         finally:
             self.proc.stdout.close()
-            self.proc.wait()
-            self.done.set()
+            self.drained.set()
+
+    def _observe_exit(self) -> None:
+        self.proc.wait()
+        # Match the native host's bounded final-output drain. A descendant may
+        # retain the pipe after the command exits; continue reading until release.
+        self.drained.wait(timeout=0.05)
+        self.done.set()
 
     def exit_status(self) -> JsonObject:
         code = self.proc.returncode
@@ -1885,20 +1974,23 @@ class _ProbeTerminal:
         return {"exitCode": code, "signal": None}
 
     def kill(self) -> None:
-        if self.done.is_set() or self.kill_sent:
-            return
-        try:
-            if os.name == "posix":
-                os.killpg(self.proc.pid, signal.SIGKILL)
-            else:
-                self.proc.kill()
-            self.kill_sent = True
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            # macOS can report EPERM for an already-exited process group.
-            if self.proc.poll() is None:
-                raise
+        with self.lock:
+            # Once both the command and its output have finished, its process
+            # group may have disappeared and the numeric ID may be reused.
+            if self.kill_sent or (self.done.is_set() and self.drained.is_set()):
+                return
+            try:
+                if os.name == "posix":
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                elif self.proc.poll() is None:
+                    self.proc.kill()
+                self.kill_sent = True
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                # macOS can report EPERM for an already-exited process group.
+                if self.proc.poll() is None:
+                    raise
 
 
 def _split_terminal_shell_words(command: str) -> list[str]:
@@ -1941,6 +2033,8 @@ class TerminalHost:
         self.terminals: dict[str, _ProbeTerminal] = {}
         self._children: list[_ProbeTerminal] = []
         self._waiters: list[threading.Thread] = []
+        self._lock = threading.Lock()
+        self._closed = threading.Event()
 
     def _create(self, params: JsonObject) -> JsonObject:
         command = params["command"]
@@ -1993,12 +2087,28 @@ class TerminalHost:
             pass  # The agent may have exited while the child was running.
 
     def handle(self, request: JsonObject) -> bool:
+        # Requests arrive concurrently from the client's callback executor.
+        # Keep create/release/close atomic with respect to terminal ownership.
+        responses: list[JsonObject] = []
+        with self._lock:
+            handled = self._handle(request, responses.append)
+        # A transport write can block when the agent stops reading. Never hold
+        # terminal ownership while sending; cleanup must still acquire the lock.
+        for response in responses:
+            self.send(response)
+        return handled
+
+    def _handle(
+        self, request: JsonObject, respond: Callable[[JsonObject], None]
+    ) -> bool:
         method = request.get("method", "")
         if self.mode == "off" or not method.startswith("terminal/"):
             return False
         request_id = request["id"]
         params = request.get("params") or {}
         try:
+            if self._closed.is_set():
+                raise ValueError("terminal host is closed")
             if not isinstance(params, dict):
                 raise ValueError("params must be an object")
             if not isinstance(params.get("sessionId"), str):
@@ -2035,7 +2145,7 @@ class TerminalHost:
                         del self.terminals[params["terminalId"]]
                     result = {}
             else:
-                self.send(
+                respond(
                     _make_response(
                         request_id,
                         error={
@@ -2054,24 +2164,35 @@ class TerminalHost:
             response = _make_response(
                 request_id, error={"code": -32602, "message": str(exc)}
             )
-        self.send(response)
+        respond(response)
         return True
 
+    def stop_accepting_requests(self) -> None:
+        self._closed.set()
+
     def close(self) -> None:
-        for terminal in self._children:
+        self.stop_accepting_requests()
+        with self._lock:
+            children = self._children[:]
+            waiters = self._waiters[:]
+            self.terminals.clear()
+        for terminal in children:
             terminal.kill()
-        for terminal in self._children:
+        for terminal in children:
             terminal.reader.join(timeout=5)
-        for waiter in self._waiters:
+            terminal.waiter.join(timeout=1)
+        for waiter in waiters:
             waiter.join(timeout=1)
-        self.terminals.clear()
 
 
 def _server_request_handler(
     client: AcpClient,
     always_approve: bool,
     terminal_host: Optional[TerminalHost] = None,
+    session_cwd: Optional[Path] = None,
 ) -> Callable[[JsonObject], None]:
+    base_cwd = session_cwd if session_cwd is not None else Path.cwd()
+
     def handle(request: JsonObject) -> None:
         request_id = request.get("id")
         method = request.get("method")
@@ -2079,8 +2200,12 @@ def _server_request_handler(
             return
         if terminal_host is not None and terminal_host.handle(request):
             return
+        params = (
+            request.get("params") if isinstance(request.get("params"), dict) else {}
+        )
+        assert isinstance(params, dict)
         if method == "session/request_permission":
-            raw_options = (request.get("params") or {}).get("options", [])
+            raw_options = params.get("options", [])
             options = (
                 [item for item in raw_options if isinstance(item, dict)]
                 if isinstance(raw_options, list)
@@ -2093,6 +2218,19 @@ def _server_request_handler(
                     result={"outcome": {"outcome": "selected", "optionId": selected}},
                 )
             )
+            return
+        if isinstance(method, str) and method.startswith("fs/"):
+            try:
+                result = _handle_fs_request(method, params, base_cwd)
+            except (OSError, ProbeHardFailure) as exc:
+                client.send(
+                    _make_response(
+                        request_id,
+                        error={"code": -32000, "message": str(exc)},
+                    )
+                )
+                return
+            client.send(_make_response(request_id, result=result))
             return
         client.send(
             _make_response(
@@ -2150,6 +2288,43 @@ def _record_result(
     }
 
 
+def _refresh_config_options(
+    config_options: list[JsonObject], notifications: list[JsonObject]
+) -> list[JsonObject]:
+    """Merge ``config_option_update`` frames into the live option snapshot.
+
+    Agents re-advertise dependent selects after a successful set (e.g. Grok
+    drops ``xhigh`` from ``reasoning_effort`` once the current model changes to
+    one that lacks it). Probing later options with choices from the stale
+    session/new snapshot yields false ``-32602`` rejections, so re-derive the
+    choice from the latest advertised state between probes.
+    """
+    merged: dict[str, JsonObject] = {
+        str(option.get("id")): option
+        for option in config_options
+        if isinstance(option.get("id"), str)
+    }
+    order: list[str] = [str(option.get("id")) for option in config_options]
+    for notification in notifications:
+        if notification.get("method") != "session/update":
+            continue
+        update = (notification.get("params") or {}).get("update")
+        if not isinstance(update, dict):
+            continue
+        if update.get("sessionUpdate") != "config_option_update":
+            continue
+        advertised = update.get("configOptions", update.get("config_options", []))
+        if not isinstance(advertised, list):
+            continue
+        for option in advertised:
+            if not isinstance(option, dict) or not isinstance(option.get("id"), str):
+                continue
+            if option["id"] not in merged:
+                order.append(option["id"])
+            merged[option["id"]] = option
+    return [merged[option_id] for option_id in order if option_id in merged]
+
+
 def _probe_config_sets(
     client: AcpClient,
     session_id: str,
@@ -2158,23 +2333,22 @@ def _probe_config_sets(
     handler: Callable[[JsonObject], None],
 ) -> list[JsonObject]:
     results = []
-    targets: list[JsonObject] = []
-    for category, fallback_ids in (
-        ("model", MODEL_FALLBACK_IDS),
-        ("thought_level", THOUGHT_FALLBACK_IDS),
-    ):
-        option = _synthesizer_option(
-            config_options, category=category, fallback_ids=fallback_ids
-        )
-        if option is not None and option not in targets:
-            targets.append(option)
 
     if not config_options:
         params = {"sessionId": session_id, "configId": "model", "value": "spur-probe"}
         response = client.request("session/set_config_option", params, timeout, handler)
         return [_record_result("session/set_config_option", params, response)]
 
-    for option in targets:
+    live_options = list(config_options)
+    for category, fallback_ids in (
+        ("model", MODEL_FALLBACK_IDS),
+        ("thought_level", THOUGHT_FALLBACK_IDS),
+    ):
+        option = _synthesizer_option(
+            live_options, category=category, fallback_ids=fallback_ids
+        )
+        if option is None:
+            continue
         choices = _select_choices(option)
         if not choices:
             continue
@@ -2189,6 +2363,15 @@ def _probe_config_sets(
         }
         response = client.request("session/set_config_option", params, timeout, handler)
         results.append(_record_result("session/set_config_option", params, response))
+        # Re-derive the next category's choices from the freshest advertised
+        # state: earlier sets may have re-scoped later options. The dependent
+        # config_option_update can land milliseconds after the set response,
+        # so give the reader thread a brief settle window before inspection.
+        # Leave notifications available for the report's subsequent drain.
+        time.sleep(0.1)
+        live_options = _refresh_config_options(
+            live_options, client.snapshot_notifications()
+        )
     return results
 
 
@@ -2323,7 +2506,10 @@ def run_probe(args: argparse.Namespace) -> int:
         )
         client = AcpClient(proc, out_path, args.quiet)
         terminal_host = TerminalHost(client.send, cwd, args.terminal_mode)
-        handler = _server_request_handler(client, args.always_approve, terminal_host)
+        handler = _server_request_handler(
+            client, args.always_approve, terminal_host, cwd
+        )
+        client.server_request_handler = handler
 
         init_response = client.request(
             "initialize",
@@ -2334,7 +2520,7 @@ def run_probe(args: argparse.Namespace) -> int:
                     "version": "0.1.0",
                 },
                 "clientCapabilities": {
-                    "fs": {"readTextFile": False, "writeTextFile": False},
+                    "fs": {"readTextFile": True, "writeTextFile": True},
                     "terminal": args.terminal_mode != "off",
                     "session": {"configOptions": {}},
                 },
@@ -2469,12 +2655,13 @@ def run_probe(args: argparse.Namespace) -> int:
             )
             if response is None:
                 # A timeout does not complete a turn. Never overlap a follow-up.
-                client.send(
+                client.send_with_timeout(
                     {
                         "jsonrpc": "2.0",
                         "method": "session/cancel",
                         "params": {"sessionId": session_id},
-                    }
+                    },
+                    timeout=0.2,
                 )
                 break
         if return_code := client.proc.poll():
@@ -2487,10 +2674,17 @@ def run_probe(args: argparse.Namespace) -> int:
     except (OSError, ValueError, ProbeHardFailure) as exc:
         hard_failure = str(exc)
     finally:
-        if terminal_host is not None:
-            terminal_host.close()
         if client is not None:
-            return_code, forced = client.close()
+            client.server_request_handler = None
+        if terminal_host is not None:
+            terminal_host.stop_accepting_requests()
+        try:
+            if client is not None:
+                return_code, forced = client.close()
+        finally:
+            if terminal_host is not None:
+                terminal_host.close()
+        if client is not None:
             protocol_frames = client.protocol_frame_ledger()
             if hard_failure is None and not handshake_complete:
                 hard_failure = process_close_failure(

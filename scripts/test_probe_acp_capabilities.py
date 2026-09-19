@@ -977,13 +977,9 @@ class EvidenceContractTests(unittest.TestCase):
                     )
                 ],
                 "modes": {"availableModes": [{"id": "standard-mode-id"}]},
-                "models": {
-                    "availableModels": [{"modelId": "kiro-model-id"}]
-                },
+                "models": {"availableModels": [{"modelId": "kiro-model-id"}]},
                 "_meta": {
-                    "modelState": {
-                        "availableModels": [{"modelId": "meta-model-id"}]
-                    }
+                    "modelState": {"availableModels": [{"modelId": "meta-model-id"}]}
                 },
             }
         )
@@ -1001,12 +997,8 @@ class EvidenceContractTests(unittest.TestCase):
         self.assertEqual(
             provenance[("mode", "standard-mode-id")], "standard_advertisement"
         )
-        self.assertEqual(
-            provenance[("model", "kiro-model-id")], "vendor_advertisement"
-        )
-        self.assertEqual(
-            provenance[("model", "meta-model-id")], "vendor_advertisement"
-        )
+        self.assertEqual(provenance[("model", "kiro-model-id")], "vendor_advertisement")
+        self.assertEqual(provenance[("model", "meta-model-id")], "vendor_advertisement")
 
     def test_recipe_existence_alone_does_not_claim_method_support(self) -> None:
         options_method = "_vendor/commands/future-model/options"
@@ -1185,8 +1177,7 @@ class EvidenceContractTests(unittest.TestCase):
         response_digest = next(
             frame["digest"]
             for frame in raw_frames
-            if frame["direction"] == "recv"
-            and frame["message"].get("id") == request_id
+            if frame["direction"] == "recv" and frame["message"].get("id") == request_id
         )
         self.assertEqual(semantic[0]["raw_digest"], response_digest)
         self.assertEqual(semantic[0]["session_scope"], "<session-1>")
@@ -1274,8 +1265,7 @@ class EvidenceContractTests(unittest.TestCase):
         method_claim = next(
             claim
             for claim in self.artifact(report)["claims"]
-            if claim["capability"]
-            == {"kind": "method", "id": "session/set_model"}
+            if claim["capability"] == {"kind": "method", "id": "session/set_model"}
         )
         self.assertEqual(method_claim["claim"], "inconclusive")
         self.assertEqual(method_claim["provenance"], "inconclusive_failure")
@@ -1302,8 +1292,7 @@ class EvidenceContractTests(unittest.TestCase):
 
         self.assertFalse(
             any(
-                claim["capability"]["kind"] == "model"
-                and claim["claim"] == "rejected"
+                claim["capability"]["kind"] == "model" and claim["claim"] == "rejected"
                 for claim in self.artifact(report)["claims"]
             )
         )
@@ -1388,9 +1377,7 @@ class EvidenceContractTests(unittest.TestCase):
         self.assertIn("<redacted>", logged)
         self.assertEqual(client.protocol_frames[0]["sequence"], 0)
         self.assertEqual(client.protocol_frames[0]["direction"], "recv")
-        self.assertNotIn(
-            "raw-frame-secret", probe.json.dumps(client.protocol_frames)
-        )
+        self.assertNotIn("raw-frame-secret", probe.json.dumps(client.protocol_frames))
 
     def test_fixture_material_is_independent_of_probe_timestamp(self) -> None:
         first = self.build_contract_report(probed_at="2026-09-01T10:00:00+00:00")
@@ -1534,6 +1521,145 @@ class EvidenceContractTests(unittest.TestCase):
             )
         for claim in first["claims"]:
             self.assertIn(claim["raw_digest"], raw["payloads_by_digest"])
+
+
+class LiveConfigOptionRefreshTests(unittest.TestCase):
+    """Config-set probing must re-derive choices from re-advertised options."""
+
+    @staticmethod
+    def _config_option_update(options: list[dict]) -> dict:
+        return {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": options,
+                }
+            },
+        }
+
+    def test_refresh_overlays_re_advertised_options_by_id(self) -> None:
+        snapshot = [
+            select_option("model", category="model", values=("m1", "m2")),
+            select_option(
+                "reasoning_effort",
+                category="thought_level",
+                values=("xhigh", "high", "medium"),
+            ),
+        ]
+        # Grok-style dependency: after switching to m2 the agent re-advertises
+        # reasoning_effort without the model-2-incompatible xhigh choice.
+        re_advertised = [
+            select_option("model", category="model", values=("m1", "m2")),
+            select_option(
+                "reasoning_effort",
+                category="thought_level",
+                values=("high", "medium"),
+            ),
+        ]
+
+        refreshed = probe._refresh_config_options(
+            snapshot, [self._config_option_update(re_advertised)]
+        )
+
+        effort = probe._synthesizer_option(
+            refreshed, category="thought_level", fallback_ids=("reasoning_effort",)
+        )
+        assert effort is not None
+        self.assertEqual(
+            [c["value"] for c in probe._select_choices(effort)],
+            ["high", "medium"],
+        )
+
+    def test_refresh_without_updates_keeps_snapshot(self) -> None:
+        snapshot = [select_option("model", category="model", values=("m1", "m2"))]
+
+        refreshed = probe._refresh_config_options(
+            snapshot,
+            [
+                {
+                    "method": "session/update",
+                    "params": {"update": {"sessionUpdate": "agent_message_chunk"}},
+                }
+            ],
+        )
+
+        self.assertEqual(refreshed, snapshot)
+
+    def test_config_set_refresh_preserves_notifications_for_the_report(self) -> None:
+        model = select_option("model", category="model", values=("m1", "m2"))
+        effort = select_option(
+            "reasoning_effort", category="thought_level", values=("xhigh", "high")
+        )
+        fresh = select_option(
+            "reasoning_effort", category="thought_level", values=("medium", "low")
+        )
+        update = self._config_option_update([fresh])
+        evidence = {"method": "vendor/status", "params": {"value": "retained"}}
+
+        class Client:
+            def __init__(self):
+                self.notifications = []
+                self.sent = []
+
+            def request(self, method, params, timeout, handler):
+                self.sent.append(params)
+                if params["configId"] == "model":
+                    self.notifications.extend([update, evidence])
+                return {"result": {}}
+
+            def snapshot_notifications(self):
+                return self.notifications[:]
+
+            def drain_notifications(self):
+                result, self.notifications = self.notifications, []
+                return result
+
+        client = Client()
+        probe._probe_config_sets(client, "s", [model, effort], 1, lambda _: None)
+        self.assertEqual(client.sent[1]["value"], "low")
+        self.assertEqual(client.drain_notifications(), [update, evidence])
+
+    def test_refresh_appends_newly_advertised_option_ids(self) -> None:
+        snapshot = [select_option("model", category="model", values=("m1",))]
+        new_option = select_option("mode", category="mode", values=("a", "b"))
+
+        refreshed = probe._refresh_config_options(
+            snapshot, [self._config_option_update([new_option])]
+        )
+
+        self.assertEqual([option["id"] for option in refreshed], ["model", "mode"])
+
+
+class TerminalStatusTests(unittest.TestCase):
+    """The retained terminal host reports spec-shaped process statuses."""
+
+    def test_exit_status_maps_signal_death_to_signal_name(self) -> None:
+        class FakeProc:
+            returncode = -9
+
+            def poll(self):
+                return self.returncode
+
+        terminal = object.__new__(probe._ProbeTerminal)
+        terminal.proc = FakeProc()
+        status = terminal.exit_status()
+
+        self.assertEqual(status, {"exitCode": None, "signal": "SIGKILL"})
+
+    def test_exit_status_reports_clean_exit_code(self) -> None:
+        class FakeProc:
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+        terminal = object.__new__(probe._ProbeTerminal)
+        terminal.proc = FakeProc()
+        status = terminal.exit_status()
+
+        self.assertEqual(status, {"exitCode": 0, "signal": None})
 
 
 if __name__ == "__main__":
