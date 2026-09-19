@@ -36,6 +36,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -1660,6 +1661,13 @@ class AcpClient:
         self.notifications: list[JsonObject] = []
         self.server_requests: list[JsonObject] = []
         self.protocol_frames: list[JsonObject] = []
+        # When set, server requests (permission, terminal, fs) are answered
+        # immediately on a worker thread instead of waiting for the next
+        # client.request() drain — agents stall if these sit unanswered.
+        self.server_request_handler: Optional[Callable[[JsonObject], None]] = None
+        self._server_request_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="probe-server-request"
+        )
         self._condition = threading.Condition()
         self._log_lock = threading.Lock()
         self._log_file = log_path.open("w", encoding="utf-8")
@@ -1707,14 +1715,25 @@ class AcpClient:
                     )
                 continue
             self._log("recv", message)
+            dispatch = False
             with self._condition:
                 if "method" in message and "id" in message:
-                    self.server_requests.append(message)
+                    handler = self.server_request_handler
+                    if handler is None:
+                        self.server_requests.append(message)
+                    else:
+                        dispatch = True
                 elif "method" in message:
                     self.notifications.append(message)
                 elif "id" in message:
                     self.responses[message["id"]] = message
                 self._condition.notify_all()
+            if dispatch:
+                try:
+                    self._server_request_executor.submit(handler, message)
+                except RuntimeError:  # executor shut down during teardown
+                    with self._condition:
+                        self.server_requests.append(message)
 
     def _stderr_loop(self) -> None:
         for raw_line in self.stderr:
@@ -1799,6 +1818,10 @@ class AcpClient:
                 self.proc.wait(timeout=2)
         self._reader.join(timeout=1)
         self._stderr_reader.join(timeout=1)
+        try:
+            self._server_request_executor.shutdown(wait=False, cancel_futures=True)
+        except RuntimeError:
+            pass
         self._log_file.close()
         return self.proc.returncode, forced
 
@@ -1808,6 +1831,235 @@ def process_close_failure(*, return_code: Optional[int], forced: bool) -> Option
     if forced or return_code in (None, 0):
         return None
     return f"agent exited with status {return_code} during probe cleanup"
+
+
+class _TerminalRegistry:
+    """Minimal backing store for the ACP terminal side-channel.
+
+    Agents that see ``clientCapabilities.terminal == true`` may execute shell
+    tools through ``terminal/create`` instead of ``session/request_permission``.
+    Each terminal runs a real subprocess with reader threads capturing output so
+    ``terminal/output`` and ``terminal/wait_for_exit`` can report progress.
+    """
+
+    _DEFAULT_BYTE_LIMIT = 10 * 1024 * 1024  # mirrors spur-acp native default
+
+    def __init__(self) -> None:
+        self._terminals: dict[str, subprocess.Popen[str]] = {}
+        self._buffers: dict[str, list[str]] = {}
+        self._truncated: dict[str, bool] = {}
+        self._limits: dict[str, int] = {}
+        self._lock = threading.Lock()
+        self._counter = 0
+        self._closed = threading.Event()
+
+    def create(self, params: JsonObject) -> JsonObject:
+        command = params.get("command")
+        if not isinstance(command, str) or not command:
+            raise ProbeHardFailure("terminal/create missing command")
+        args = params.get("args")
+        if isinstance(args, list) and args:
+            argv = [command, *[str(a) for a in args]]
+        else:
+            # Mirror spur-acp ``normalize_grok_terminal_command``: Grok packs
+            # "/bin/bash -lc '<script>'" into a single command string with
+            # empty args. Re-split into real argv; anything else falls back to
+            # a generic shell line.
+            argv = self._normalize_packed_bash_command(command) or [
+                "/bin/sh",
+                "-c",
+                command,
+            ]
+        cwd = params.get("cwd") if isinstance(params.get("cwd"), str) else None
+        env = None
+        raw_env = params.get("env")
+        if isinstance(raw_env, list):
+            env = dict(os.environ)
+            for item in raw_env:
+                if isinstance(item, dict) and isinstance(item.get("name"), str):
+                    if item.get("value") is None:
+                        env.pop(item["name"], None)
+                    else:
+                        env[item["name"]] = str(item["value"])
+        with self._lock:
+            self._counter += 1
+            terminal_id = f"probe-terminal-{self._counter}"
+            try:
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                )
+            except OSError as exc:
+                raise ProbeHardFailure(f"terminal/create failed to spawn: {exc}") from exc
+            self._terminals[terminal_id] = proc
+            self._buffers[terminal_id] = []
+            self._truncated[terminal_id] = False
+            self._limits[terminal_id] = self._byte_limit(params)
+        threading.Thread(target=self._pump, args=(terminal_id,), daemon=True).start()
+        return {"terminalId": terminal_id}
+
+    @classmethod
+    def _byte_limit(cls, params: JsonObject) -> int:
+        raw = params.get("outputByteLimit", params.get("output_byte_limit"))
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            return raw
+        return cls._DEFAULT_BYTE_LIMIT
+
+    def _pump(self, terminal_id: str) -> None:
+        proc = self._terminals.get(terminal_id)
+        if proc is None or proc.stdout is None:
+            return
+        for chunk in proc.stdout:
+            with self._lock:
+                buffer = self._buffers.get(terminal_id)
+                if buffer is None:  # released underneath us; stop pumping
+                    return
+                buffer.append(chunk)
+                limit = self._limits.get(terminal_id, self._DEFAULT_BYTE_LIMIT)
+                if sum(len(item) for item in buffer) > limit:
+                    merged = "".join(buffer)
+                    self._buffers[terminal_id] = [merged[-limit:]]
+                    self._truncated[terminal_id] = True
+
+    @staticmethod
+    def _normalize_packed_bash_command(command: str) -> Optional[list[str]]:
+        """Split a packed "/bin/bash -lc '<script>'" command into real argv.
+
+        Mirrors ``normalize_grok_terminal_command`` in
+        ``crates/spur-acp/src/connection/native.rs``: only the exact three-word
+        ``/bin/bash -lc|-c <script>`` form normalizes; anything else returns
+        ``None`` so the caller can use its generic fallback.
+        """
+        if not command.startswith("/bin/bash"):
+            return None
+        suffix = command[len("/bin/bash") :]
+        if not suffix or suffix[0] not in (" ", "\t", "\n", "\r"):
+            return None
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            return None
+        if (
+            len(words) != 3
+            or words[0] != "/bin/bash"
+            or words[1] not in ("-lc", "-c")
+        ):
+            return None
+        return words
+
+    @staticmethod
+    def _exit_status(proc: subprocess.Popen[str]) -> Optional[JsonObject]:
+        code = proc.poll()
+        if code is None:
+            return None
+        if code >= 0:
+            return {"exitCode": code, "signal": None}
+        # Negative returncode means the child died from a signal; the ACP
+        # schema types exitCode as uint, so report the signal by name instead
+        # (mirrors native's TerminalExitStatus handling).
+        try:
+            import signal as signal_module
+
+            signal_name: Optional[str] = signal_module.Signals(-code).name
+        except (ValueError, ImportError):
+            signal_name = None
+        return {"exitCode": None, "signal": signal_name}
+
+    def output(self, terminal_id: str) -> JsonObject:
+        with self._lock:
+            proc = self._terminals.get(terminal_id)
+            if proc is None:
+                raise ProbeHardFailure(f"terminal/output unknown terminalId {terminal_id}")
+            text = "".join(self._buffers.get(terminal_id, []))
+            truncated = self._truncated.get(terminal_id, False)
+            return {
+                "output": text,
+                "truncated": truncated,
+                "exitStatus": self._exit_status(proc),
+            }
+
+    def wait_for_exit(self, terminal_id: str, timeout: float = 120.0) -> JsonObject:
+        proc = self._terminals.get(terminal_id)
+        if proc is None:
+            raise ProbeHardFailure(
+                f"terminal/wait_for_exit unknown terminalId {terminal_id}"
+            )
+        deadline = time.monotonic() + timeout
+        # Poll instead of blocking wait so probe teardown can interrupt us.
+        while proc.poll() is None:
+            if self._closed.is_set() or time.monotonic() >= deadline:
+                proc.kill()
+                break
+            time.sleep(0.02)
+        return self._exit_status(proc) or {"exitCode": None, "signal": None}
+
+    def kill(self, terminal_id: str) -> None:
+        proc = self._terminals.get(terminal_id)
+        if proc is None:
+            return
+        if proc.poll() is None:
+            proc.kill()
+
+    def release(self, terminal_id: str) -> None:
+        self.kill(terminal_id)
+        with self._lock:
+            self._terminals.pop(terminal_id, None)
+            self._buffers.pop(terminal_id, None)
+            self._truncated.pop(terminal_id, None)
+            self._limits.pop(terminal_id, None)
+
+    def close(self) -> None:
+        """Interrupt all waiters and kill every live terminal (probe teardown)."""
+        self._closed.set()
+        with self._lock:
+            procs = list(self._terminals.values())
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+
+
+_TERMINAL_METHODS = {
+    "terminal/create",
+    "terminal/output",
+    "terminal/wait_for_exit",
+    "terminal/kill",
+    "terminal/release",
+}
+
+
+def _handle_fs_request(method: str, params: JsonObject, session_cwd: Path) -> JsonObject:
+    """Back the fs side-channel the probe advertises in clientCapabilities.
+
+    Mirrors spur-acp native: relative paths resolve against the session cwd,
+    reads honor optional ``line``/``limit`` slicing, writes create parents.
+    """
+    raw_path = params.get("path", params.get("file_path"))
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ProbeHardFailure(f"{method} missing path")
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = session_cwd / path
+    if method in ("fs/read_text_file", "fs/readTextFile"):
+        content = path.read_text(encoding="utf-8", errors="replace")
+        line = params.get("line")
+        limit = params.get("limit")
+        if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+            content = "\n".join(content.lines()[line - 1 :])
+        if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 0:
+            content = "\n".join(content.lines()[:limit])
+        return {"content": content}
+    if method in ("fs/write_text_file", "fs/writeTextFile"):
+        content = params.get("content", "")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(content), encoding="utf-8")
+        return {}
+    raise ProbeHardFailure(f"unsupported fs method {method}")
 
 
 def _permission_option(options: list[JsonObject], approve: bool) -> str:
@@ -1828,15 +2080,23 @@ def _permission_option(options: list[JsonObject], approve: bool) -> str:
 
 
 def _server_request_handler(
-    client: AcpClient, always_approve: bool
+    client: AcpClient,
+    always_approve: bool,
+    terminals: Optional[_TerminalRegistry] = None,
+    session_cwd: Optional[Path] = None,
 ) -> Callable[[JsonObject], None]:
+    registry = terminals if terminals is not None else _TerminalRegistry()
+    base_cwd = session_cwd if session_cwd is not None else Path.cwd()
+
     def handle(request: JsonObject) -> None:
         request_id = request.get("id")
         method = request.get("method")
         if request_id is None:
             return
+        params = request.get("params") if isinstance(request.get("params"), dict) else {}
+        assert isinstance(params, dict)
         if method == "session/request_permission":
-            raw_options = (request.get("params") or {}).get("options", [])
+            raw_options = params.get("options", [])
             options = (
                 [item for item in raw_options if isinstance(item, dict)]
                 if isinstance(raw_options, list)
@@ -1849,6 +2109,48 @@ def _server_request_handler(
                     result={"outcome": {"outcome": "selected", "optionId": selected}},
                 )
             )
+            return
+        # Agents (e.g. Grok) route shell tools through the terminal side-channel
+        # advertised in clientCapabilities instead of permission prompts.
+        if isinstance(method, str) and method in _TERMINAL_METHODS:
+            terminal_id = params.get("terminalId") or params.get("sessionId")
+            try:
+                if method == "terminal/create":
+                    result: JsonObject = registry.create(params)
+                else:
+                    assert isinstance(terminal_id, str)
+                    if method == "terminal/output":
+                        result = registry.output(terminal_id)
+                    elif method == "terminal/wait_for_exit":
+                        result = registry.wait_for_exit(terminal_id)
+                    elif method == "terminal/kill":
+                        registry.kill(terminal_id)
+                        result = {}
+                    else:  # terminal/release
+                        registry.release(terminal_id)
+                        result = {}
+            except ProbeHardFailure as exc:
+                client.send(
+                    _make_response(
+                        request_id,
+                        error={"code": -32000, "message": str(exc)},
+                    )
+                )
+                return
+            client.send(_make_response(request_id, result=result))
+            return
+        if isinstance(method, str) and method.startswith("fs/"):
+            try:
+                result = _handle_fs_request(method, params, base_cwd)
+            except (OSError, ProbeHardFailure) as exc:
+                client.send(
+                    _make_response(
+                        request_id,
+                        error={"code": -32000, "message": str(exc)},
+                    )
+                )
+                return
+            client.send(_make_response(request_id, result=result))
             return
         client.send(
             _make_response(
@@ -1906,6 +2208,43 @@ def _record_result(
     }
 
 
+def _refresh_config_options(
+    config_options: list[JsonObject], notifications: list[JsonObject]
+) -> list[JsonObject]:
+    """Merge ``config_option_update`` frames into the live option snapshot.
+
+    Agents re-advertise dependent selects after a successful set (e.g. Grok
+    drops ``xhigh`` from ``reasoning_effort`` once the current model changes to
+    one that lacks it). Probing later options with choices from the stale
+    session/new snapshot yields false ``-32602`` rejections, so re-derive the
+    choice from the latest advertised state between probes.
+    """
+    merged: dict[str, JsonObject] = {
+        str(option.get("id")): option
+        for option in config_options
+        if isinstance(option.get("id"), str)
+    }
+    order: list[str] = [str(option.get("id")) for option in config_options]
+    for notification in notifications:
+        if notification.get("method") != "session/update":
+            continue
+        update = (notification.get("params") or {}).get("update")
+        if not isinstance(update, dict):
+            continue
+        if update.get("sessionUpdate") != "config_option_update":
+            continue
+        advertised = update.get("configOptions", update.get("config_options", []))
+        if not isinstance(advertised, list):
+            continue
+        for option in advertised:
+            if not isinstance(option, dict) or not isinstance(option.get("id"), str):
+                continue
+            if option["id"] not in merged:
+                order.append(option["id"])
+            merged[option["id"]] = option
+    return [merged[option_id] for option_id in order if option_id in merged]
+
+
 def _probe_config_sets(
     client: AcpClient,
     session_id: str,
@@ -1914,23 +2253,22 @@ def _probe_config_sets(
     handler: Callable[[JsonObject], None],
 ) -> list[JsonObject]:
     results = []
-    targets: list[JsonObject] = []
-    for category, fallback_ids in (
-        ("model", MODEL_FALLBACK_IDS),
-        ("thought_level", THOUGHT_FALLBACK_IDS),
-    ):
-        option = _synthesizer_option(
-            config_options, category=category, fallback_ids=fallback_ids
-        )
-        if option is not None and option not in targets:
-            targets.append(option)
 
     if not config_options:
         params = {"sessionId": session_id, "configId": "model", "value": "spur-probe"}
         response = client.request("session/set_config_option", params, timeout, handler)
         return [_record_result("session/set_config_option", params, response)]
 
-    for option in targets:
+    live_options = list(config_options)
+    for category, fallback_ids in (
+        ("model", MODEL_FALLBACK_IDS),
+        ("thought_level", THOUGHT_FALLBACK_IDS),
+    ):
+        option = _synthesizer_option(
+            live_options, category=category, fallback_ids=fallback_ids
+        )
+        if option is None:
+            continue
         choices = _select_choices(option)
         if not choices:
             continue
@@ -1945,6 +2283,14 @@ def _probe_config_sets(
         }
         response = client.request("session/set_config_option", params, timeout, handler)
         results.append(_record_result("session/set_config_option", params, response))
+        # Re-derive the next category's choices from the freshest advertised
+        # state: earlier sets may have re-scoped later options. The dependent
+        # config_option_update can land milliseconds after the set response,
+        # so give the reader thread a brief settle window before draining.
+        time.sleep(0.1)
+        live_options = _refresh_config_options(
+            live_options, client.drain_notifications()
+        )
     return results
 
 
@@ -2063,6 +2409,7 @@ def run_probe(args: argparse.Namespace) -> int:
     hard_failure: Optional[str] = None
     handshake_complete = False
     client: Optional[AcpClient] = None
+    terminals: Optional[_TerminalRegistry] = None
 
     try:
         proc = subprocess.Popen(
@@ -2076,7 +2423,11 @@ def run_probe(args: argparse.Namespace) -> int:
             bufsize=1,
         )
         client = AcpClient(proc, out_path, args.quiet)
-        handler = _server_request_handler(client, args.always_approve)
+        terminals = _TerminalRegistry()
+        handler = _server_request_handler(
+            client, args.always_approve, terminals, cwd
+        )
+        client.server_request_handler = handler
 
         init_response = client.request(
             "initialize",
@@ -2207,7 +2558,10 @@ def run_probe(args: argparse.Namespace) -> int:
         hard_failure = str(exc)
     finally:
         if client is not None:
+            client.server_request_handler = None
             return_code, forced = client.close()
+            if terminals is not None:
+                terminals.close()
             protocol_frames = client.protocol_frame_ledger()
             if hard_failure is None and not handshake_complete:
                 hard_failure = process_close_failure(

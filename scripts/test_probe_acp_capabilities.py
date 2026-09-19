@@ -1536,5 +1536,124 @@ class EvidenceContractTests(unittest.TestCase):
             self.assertIn(claim["raw_digest"], raw["payloads_by_digest"])
 
 
+class LiveConfigOptionRefreshTests(unittest.TestCase):
+    """Config-set probing must re-derive choices from re-advertised options."""
+
+    @staticmethod
+    def _config_option_update(options: list[dict]) -> dict:
+        return {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": options,
+                }
+            },
+        }
+
+    def test_refresh_overlays_re_advertised_options_by_id(self) -> None:
+        snapshot = [
+            select_option("model", category="model", values=("m1", "m2")),
+            select_option(
+                "reasoning_effort",
+                category="thought_level",
+                values=("xhigh", "high", "medium"),
+            ),
+        ]
+        # Grok-style dependency: after switching to m2 the agent re-advertises
+        # reasoning_effort without the model-2-incompatible xhigh choice.
+        re_advertised = [
+            select_option("model", category="model", values=("m1", "m2")),
+            select_option(
+                "reasoning_effort",
+                category="thought_level",
+                values=("high", "medium"),
+            ),
+        ]
+
+        refreshed = probe._refresh_config_options(
+            snapshot, [self._config_option_update(re_advertised)]
+        )
+
+        effort = probe._synthesizer_option(
+            refreshed, category="thought_level", fallback_ids=("reasoning_effort",)
+        )
+        assert effort is not None
+        self.assertEqual(
+            [c["value"] for c in probe._select_choices(effort)],
+            ["high", "medium"],
+        )
+
+    def test_refresh_without_updates_keeps_snapshot(self) -> None:
+        snapshot = [
+            select_option("model", category="model", values=("m1", "m2"))
+        ]
+
+        refreshed = probe._refresh_config_options(
+            snapshot, [{"method": "session/update", "params": {"update": {"sessionUpdate": "agent_message_chunk"}}}]
+        )
+
+        self.assertEqual(refreshed, snapshot)
+
+    def test_refresh_appends_newly_advertised_option_ids(self) -> None:
+        snapshot = [select_option("model", category="model", values=("m1",))]
+        new_option = select_option("mode", category="mode", values=("a", "b"))
+
+        refreshed = probe._refresh_config_options(
+            snapshot, [self._config_option_update([new_option])]
+        )
+
+        self.assertEqual(
+            [option["id"] for option in refreshed], ["model", "mode"]
+        )
+
+
+class TerminalRegistryTests(unittest.TestCase):
+    """The terminal side-channel backing store must be spec-shaped."""
+
+    def test_packed_grok_bash_command_normalizes_to_real_argv(self) -> None:
+        argv = probe._TerminalRegistry._normalize_packed_bash_command(
+            "/bin/bash -lc 'echo ok'"
+        )
+
+        self.assertEqual(argv, ["/bin/bash", "-lc", "echo ok"])
+
+    def test_packed_bash_command_rejects_malformed_forms(self) -> None:
+        for bad in (
+            "/bin/bash -lc 'unterminated",
+            "/bin/bash -lc 'safe' extra",
+            "/bin/sh -lc 'wrong shell'",
+            "/bin/bash -x 'wrong flag'",
+            "/bin/bashX -lc 'wrong program'",
+            "echo no-prefix",
+        ):
+            self.assertIsNone(
+                probe._TerminalRegistry._normalize_packed_bash_command(bad), bad
+            )
+
+    def test_exit_status_maps_signal_death_to_signal_name(self) -> None:
+        class FakeProc:
+            returncode = -9
+
+            def poll(self):
+                return self.returncode
+
+        status = probe._TerminalRegistry._exit_status(FakeProc())
+
+        self.assertEqual(status, {"exitCode": None, "signal": "SIGKILL"})
+
+    def test_exit_status_reports_clean_exit_code(self) -> None:
+        class FakeProc:
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+        status = probe._TerminalRegistry._exit_status(FakeProc())
+
+        self.assertEqual(status, {"exitCode": 0, "signal": None})
+
+
 if __name__ == "__main__":
     unittest.main()
