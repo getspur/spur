@@ -1,0 +1,6 @@
+(set-logic QF_S)
+(define-fun CAP () Int 65536)
+(declare-const d String)
+(assert (> (str.len d) CAP))
+(assert (> (str.len (str.substr d (- (str.len d) CAP) CAP)) CAP))
+(check-sat)

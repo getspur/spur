@@ -1,0 +1,7 @@
+(set-logic QF_SLIA)
+(declare-const e Int)
+(declare-const acc String)
+(assert (and (>= e 1) (<= e 2147483647)))
+(assert (>= (str.len acc) 0))
+(assert (not (> (+ (str.len acc) (str.len (int.to.str e)) 13) (str.len acc))))
+(check-sat)
