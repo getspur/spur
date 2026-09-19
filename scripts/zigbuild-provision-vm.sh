@@ -20,9 +20,8 @@
 #      generate them (see the POC doc, "libproc" section).
 #
 # Run from a Mac with the Xcode Command Line Tools installed. Idempotent —
-# safe to re-run; REQUIRED again after a spot preemption replaces the VM
-# (zig/SDK/bindings live on instance-store /mnt/cargo, which does not
-# survive).
+# safe to re-run. AWS keeps SDK/Zig/bindings on EBS for stop/resume; publish
+# the bundle so replacement VMs can restore them from S3.
 #
 # See: docs/superpowers/specs/2026-07-07-zigbuild-macos-cross-poc.md
 set -euo pipefail
@@ -317,7 +316,7 @@ echo "== lance dist_table AVX-512 kernel (x86_64) =="
 # the (feature-skipped) f16 kernel probes still set the avx512 cfg that
 # enables the Rust caller. The kernel is runtime-gated behind AVX-512
 # detection, so building it for the x86-64-v4 baseline is safe on every Mac.
-LANCE_LINALG_SRC=$(ls -d "$CARGO_HOME"/registry/src/index.crates.io-*/lance-linalg-*/src/simd/dist_table.c 2>/dev/null | sort | tail -1)
+LANCE_LINALG_SRC=$(ls -d "$CARGO_HOME"/registry/src/index.crates.io-*/lance-linalg-*/src/simd/dist_table.c 2>/dev/null | sort | tail -1 || true)
 if [ -n "$LANCE_LINALG_SRC" ]; then
     /mnt/cargo/zig/zig cc -target x86_64-macos -std=c17 -O3 -funroll-loops \
         -mcpu=x86_64_v4 -c "$LANCE_LINALG_SRC" \
@@ -371,6 +370,28 @@ done
 PLANT
 chmod +x /mnt/cargo/macsdk/plant-libproc-bindings.sh
 wc -c /mnt/cargo/macsdk/osx_libproc_bindings.*.rs
+# GCP has a different disk lifecycle. AWS records this switch for stop/resume.
+SPUR_AWS_EBS_TOOL_ROOT=0
+if [[ -f /etc/default/spur-cargo-cache ]]; then
+    source /etc/default/spur-cargo-cache
+fi
+# BEGIN persist macOS cross assets
+# The cache is erased on stop/start. Keep a durable copy for the boot mount
+# helper, including VMs provisioned after their initial cloud-init run.
+if [[ "${SPUR_AWS_EBS_TOOL_ROOT:-1}" == "1" && -d /mnt/cargo/macsdk && -x /mnt/cargo/zig/zig ]]; then
+    sudo mkdir -p /opt/spur-cross
+    for asset in macsdk zig-dist; do
+        if [[ ! /mnt/cargo/$asset -ef /opt/spur-cross/$asset ]]; then
+            sudo mkdir -p "/opt/spur-cross/$asset"
+            sudo cp -a "/mnt/cargo/$asset/." "/opt/spur-cross/$asset/"
+        fi
+    done
+    # Resolve the executable, not just the link: after resume zig may point
+    # through /opt/spur-cross/zig rather than directly at the version directory.
+    zig_dir=$(dirname "$(readlink -f /mnt/cargo/zig/zig)")
+    sudo ln -sfn "zig-dist/$(basename "$zig_dir")" /opt/spur-cross/zig
+fi
+# END persist macOS cross assets
 echo "PROVISION_DONE"
 REMOTE_EOF
 rsync -az -e "$TRANSPORT" "$PROVISION_LOCAL" "$REMOTE_HOST:$REMOTE_PROVISION"
@@ -388,18 +409,22 @@ if [[ $PUBLISH_BUNDLE -eq 1 ]]; then
     log "Publishing macOS cross bundle to $BUNDLE_S3 ..."
     remote_ssh --command="bash -lc 'set -euo pipefail
         cd /mnt/cargo
-        zigdir=zig-dist/\$(basename \"\$(readlink /mnt/cargo/zig)\")
-        tar -czf /mnt/cargo/tmp/macos-cross-bundle.tar.gz \
-            macsdk zig \"\$zigdir\" \
+        zigdir=zig-dist/\$(basename \"\$(dirname \"\$(readlink -f /mnt/cargo/zig/zig)\")\")
+        packdir=\$(mktemp -d /mnt/cargo/tmp/macos-cross-pack.XXXXXX)
+        cleanup_pack() { rm -rf \"\$packdir\"; }
+        trap cleanup_pack EXIT
+        # Materialize EBS-backed directories; preserve a portable Zig symlink.
+        tar -chf \"\$packdir/bundle.tar\" \\
+            macsdk \"\$zigdir\" \\
             cargo-home/bin/cargo-zigbuild cargo-home/bin/bindgen
-        aws s3 cp --region ${SCCACHE_S3_REGION} \
-            /mnt/cargo/tmp/macos-cross-bundle.tar.gz \"$BUNDLE_S3\"
-        rm -f /mnt/cargo/tmp/macos-cross-bundle.tar.gz'"
+        ln -s \"\$zigdir\" \"\$packdir/zig\"
+        tar -rf \"\$packdir/bundle.tar\" -C \"\$packdir\" zig
+        gzip \"\$packdir/bundle.tar\"
+        aws s3 cp --region ${SCCACHE_S3_REGION} \\
+            \"\$packdir/bundle.tar.gz\" \"$BUNDLE_S3\"'"
     log "Bundle published; fresh VMs restore it at boot via startup-aws.sh."
 fi
 
 log "Done. Build with: scripts/spur-cargo zigbuild --release -p spur-cli"
 log "(add --target universal2-apple-darwin for a fat arm64+x86_64 binary)"
-log "If the build fails on libproc's missing osx_libproc_bindings.rs, run the"
-log "plant helper on the VM (bash /mnt/cargo/macsdk/plant-libproc-bindings.sh)"
-log "and rebuild — see the POC doc for why."
+log "Darwin builds check libproc bindings before Cargo and supply them before rustc."
