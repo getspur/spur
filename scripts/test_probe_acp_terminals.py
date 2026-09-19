@@ -100,6 +100,60 @@ class TerminalTests(unittest.TestCase):
             "quoted; 世界",
         )
 
+    def test_grok_probe_matches_shared_script_goldens(self) -> None:
+        import shutil
+
+        corpus_path = (
+            Path(__file__).resolve().parents[1]
+            / "crates/spur-acp/tests/fixtures/grok_terminal_golden.json"
+        )
+        corpus = json.loads(corpus_path.read_text())
+        self.host.mode = "grok"
+        for case in corpus["cases"]:
+            missing = [
+                runtime for runtime in case["requires"] if not shutil.which(runtime)
+            ]
+            if missing:
+                with self.subTest(case=case["id"]):
+                    if any(
+                        runtime in corpus["required_runtimes"] for runtime in missing
+                    ):
+                        self.fail(f"required runtimes missing: {missing}")
+                    self.skipTest(
+                        f"optional runtimes missing for {case['id']}: {missing}"
+                    )
+                continue
+            for index, request in enumerate(case["packed"]):
+                with self.subTest(case=case["id"], wrapper=index):
+                    root = Path(self.tmp.name) / f"{case['id']}-{index}"
+                    root.mkdir()
+                    for name, content in case["files"].items():
+                        path = root / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(content)
+                    env = {"BASH_ENV": "/dev/null", "ENV": "/dev/null", **case["env"]}
+                    terminal = self.create(
+                        request["command"],
+                        request["args"],
+                        cwd=str(root),
+                        env=[{"name": k, "value": v} for k, v in env.items()],
+                    )
+                    status = self.call("terminal/wait_for_exit", terminalId=terminal)[
+                        "result"
+                    ]
+                    result = self.call("terminal/output", terminalId=terminal)["result"]
+                    self.call("terminal/release", terminalId=terminal)
+                    expected = case["expected"]
+                    self.assertEqual(status["exitCode"], expected["exit_code"])
+                    if "stderr_suffix" in expected:
+                        self.assertTrue(
+                            result["output"].endswith(expected["stderr_suffix"]), result
+                        )
+                    else:
+                        self.assertEqual(
+                            result["output"], expected["stdout"] + expected["stderr"]
+                        )
+
     def test_compat_does_not_interpret_arbitrary_shell_strings(self) -> None:
         self.host.mode = "grok"
         result = self.call("terminal/create", command="printf unsafe; exit 0")

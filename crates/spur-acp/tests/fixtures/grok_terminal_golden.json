@@ -1,0 +1,780 @@
+{
+  "schema": "spur.grok-terminal-golden",
+  "version": 1,
+  "required_runtimes": [
+    "python3"
+  ],
+  "optional_runtimes": [
+    "node",
+    "ruby",
+    "perl"
+  ],
+  "cases": [
+    {
+      "id": "bash_printf",
+      "requires": [],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf 'shell-ok\\n'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'printf '\"'\"'shell-ok\\n'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"printf 'shell-ok\\\\n'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "shell-ok\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "bash_pipeline",
+      "requires": [],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf 'alpha\\nbeta\\n' | tr '[:lower:]' '[:upper:]'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'printf '\"'\"'alpha\\nbeta\\n'\"'\"' | tr '\"'\"'[:lower:]'\"'\"' '\"'\"'[:upper:]'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"printf 'alpha\\\\nbeta\\\\n' | tr '[:lower:]' '[:upper:]'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "ALPHA\nBETA\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "bash_pipefail",
+      "requires": [],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "set -o pipefail; false | cat"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'set -o pipefail; false | cat'",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"set -o pipefail; false | cat\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "",
+        "exit_code": 1,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "bash_pipeline_last_status",
+      "requires": [],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "false | cat"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'false | cat'",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"false | cat\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "bash_apostrophe",
+      "requires": [],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf '%s\\n' \"it's quoted\""
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'printf '\"'\"'%s\\n'\"'\"' \"it'\"'\"'s quoted\"'",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"printf '%s\\\\n' \\\"it's quoted\\\"\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "it's quoted\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "bash_literal_metacharacters",
+      "requires": [],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf '%s\\n' '$HOME $(printf BAD) `printf BAD` | ; * \\\\end'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'printf '\"'\"'%s\\n'\"'\"' '\"'\"'$HOME $(printf BAD) `printf BAD` | ; * \\\\end'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"printf '%s\\\\n' '\\$HOME \\$(printf BAD) \\`printf BAD\\` | ; * \\\\\\\\end'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "$HOME $(printf BAD) `printf BAD` | ; * \\\\end\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "bash_multiline",
+      "requires": [],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "value=first\nprintf \"%s\\n\" \"$value\"\nprintf \"second\\n\""
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'value=first\nprintf \"%s\\n\" \"$value\"\nprintf \"second\\n\"'",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"value=first\nprintf \\\"%s\\\\n\\\" \\\"\\$value\\\"\nprintf \\\"second\\\\n\\\"\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "first\nsecond\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "bash_redirection",
+      "requires": [],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf 'stored\\n' > 'file with spaces.txt'; cat < 'file with spaces.txt'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'printf '\"'\"'stored\\n'\"'\"' > '\"'\"'file with spaces.txt'\"'\"'; cat < '\"'\"'file with spaces.txt'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"printf 'stored\\\\n' > 'file with spaces.txt'; cat < 'file with spaces.txt'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "stored\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "bash_unicode_file",
+      "requires": [],
+      "files": {
+        "dir with spaces/世界.txt": "Xin chào 世界\n"
+      },
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "cat 'dir with spaces/世界.txt'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'cat '\"'\"'dir with spaces/世界.txt'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"cat 'dir with spaces/世界.txt'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "Xin chào 世界\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "bash_env",
+      "requires": [],
+      "files": {},
+      "env": {
+        "GOLDEN_VALUE": "space $literal 世界"
+      },
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf '%s\\n' \"$GOLDEN_VALUE\""
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'printf '\"'\"'%s\\n'\"'\"' \"$GOLDEN_VALUE\"'",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"printf '%s\\\\n' \\\"\\$GOLDEN_VALUE\\\"\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "space $literal 世界\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "sh_script_file",
+      "requires": [],
+      "files": {
+        "script with spaces.sh": "printf \"sh:%s\\n\" \"$1\"\n"
+      },
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "sh 'script with spaces.sh' 'quoted arg'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'sh '\"'\"'script with spaces.sh'\"'\"' '\"'\"'quoted arg'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"sh 'script with spaces.sh' 'quoted arg'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "sh:quoted arg\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "python_inline",
+      "requires": [
+        "python3"
+      ],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "python3 -c 'import json; print(json.dumps({\"pipe\": \"a|b\", \"quote\": \"say \\\"hi\\\"\", \"unicode\": \"世界\"}, ensure_ascii=False, sort_keys=True))'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'python3 -c '\"'\"'import json; print(json.dumps({\"pipe\": \"a|b\", \"quote\": \"say \\\"hi\\\"\", \"unicode\": \"世界\"}, ensure_ascii=False, sort_keys=True))'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"python3 -c 'import json; print(json.dumps({\\\"pipe\\\": \\\"a|b\\\", \\\"quote\\\": \\\"say \\\\\\\"hi\\\\\\\"\\\", \\\"unicode\\\": \\\"世界\\\"}, ensure_ascii=False, sort_keys=True))'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "{\"pipe\": \"a|b\", \"quote\": \"say \\\"hi\\\"\", \"unicode\": \"世界\"}\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "python_heredoc",
+      "requires": [
+        "python3"
+      ],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "python3 - <<'PY'\nimport json\nprint(json.dumps([\"$HOME\", \"it's quoted\", \"a|b\", \"世界\"], ensure_ascii=False))\nPY"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'python3 - <<'\"'\"'PY'\"'\"'\nimport json\nprint(json.dumps([\"$HOME\", \"it'\"'\"'s quoted\", \"a|b\", \"世界\"], ensure_ascii=False))\nPY'",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"python3 - <<'PY'\nimport json\nprint(json.dumps([\\\"\\$HOME\\\", \\\"it's quoted\\\", \\\"a|b\\\", \\\"世界\\\"], ensure_ascii=False))\nPY\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "[\"$HOME\", \"it's quoted\", \"a|b\", \"世界\"]\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "python_file_argv",
+      "requires": [
+        "python3"
+      ],
+      "files": {
+        "python script.py": "import json, sys\nprint(json.dumps(sys.argv[1:]))\n"
+      },
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "python3 'python script.py' 'arg with spaces' 'a|b'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'python3 '\"'\"'python script.py'\"'\"' '\"'\"'arg with spaces'\"'\"' '\"'\"'a|b'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"python3 'python script.py' 'arg with spaces' 'a|b'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "[\"arg with spaces\", \"a|b\"]\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "python_module",
+      "requires": [
+        "python3"
+      ],
+      "files": {
+        "goldenpkg/__init__.py": "",
+        "goldenpkg/__main__.py": "print(\"module-ok\")\n"
+      },
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "python3 -m goldenpkg"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'python3 -m goldenpkg'",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"python3 -m goldenpkg\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "module-ok\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "python_pipeline_stdin",
+      "requires": [
+        "python3"
+      ],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf 'one\\ntwo\\n' | python3 -c 'import sys; print(\"|\".join(sys.stdin.read().splitlines()))'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'printf '\"'\"'one\\ntwo\\n'\"'\"' | python3 -c '\"'\"'import sys; print(\"|\".join(sys.stdin.read().splitlines()))'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"printf 'one\\\\ntwo\\\\n' | python3 -c 'import sys; print(\\\"|\\\".join(sys.stdin.read().splitlines()))'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "one|two\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "python_stdin_eof",
+      "requires": [
+        "python3"
+      ],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "python3 -c 'import sys; print(repr(sys.stdin.read()))'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'python3 -c '\"'\"'import sys; print(repr(sys.stdin.read()))'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"python3 -c 'import sys; print(repr(sys.stdin.read()))'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "''\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "python_stderr_exit",
+      "requires": [
+        "python3"
+      ],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "python3 -c 'import sys; sys.stderr.write(\"expected-error\\n\"); sys.exit(7)'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'python3 -c '\"'\"'import sys; sys.stderr.write(\"expected-error\\n\"); sys.exit(7)'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"python3 -c 'import sys; sys.stderr.write(\\\"expected-error\\\\n\\\"); sys.exit(7)'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "",
+        "exit_code": 7,
+        "stderr": "expected-error\n"
+      }
+    },
+    {
+      "id": "python_exception",
+      "requires": [
+        "python3"
+      ],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "python3 -c 'raise RuntimeError(\"GOLDEN_ERROR\")'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'python3 -c '\"'\"'raise RuntimeError(\"GOLDEN_ERROR\")'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"python3 -c 'raise RuntimeError(\\\"GOLDEN_ERROR\\\")'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "",
+        "exit_code": 1,
+        "stderr_suffix": "RuntimeError: GOLDEN_ERROR\n"
+      }
+    },
+    {
+      "id": "node_inline",
+      "requires": [
+        "node"
+      ],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "node -e 'console.log(JSON.stringify([\"a|b\", \"$HOME\", \"世界\"]))'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'node -e '\"'\"'console.log(JSON.stringify([\"a|b\", \"$HOME\", \"世界\"]))'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"node -e 'console.log(JSON.stringify([\\\"a|b\\\", \\\"\\$HOME\\\", \\\"世界\\\"]))'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "[\"a|b\",\"$HOME\",\"世界\"]\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "node_script_file",
+      "requires": [
+        "node"
+      ],
+      "files": {
+        "node script.js": "console.log(JSON.stringify(process.argv.slice(2)));\n"
+      },
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "node 'node script.js' 'arg with spaces'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'node '\"'\"'node script.js'\"'\"' '\"'\"'arg with spaces'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"node 'node script.js' 'arg with spaces'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "[\"arg with spaces\"]\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "ruby_inline",
+      "requires": [
+        "ruby"
+      ],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "ruby -e 'puts [\"a|b\", \"$HOME\", \"世界\"].join(\":\")'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'ruby -e '\"'\"'puts [\"a|b\", \"$HOME\", \"世界\"].join(\":\")'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"ruby -e 'puts [\\\"a|b\\\", \\\"\\$HOME\\\", \\\"世界\\\"].join(\\\":\\\")'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "a|b:$HOME:世界\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "perl_inline",
+      "requires": [
+        "perl"
+      ],
+      "files": {},
+      "env": {},
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "perl -e 'print \"perl: a|b\\n\"'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'perl -e '\"'\"'print \"perl: a|b\\n\"'\"'\"''",
+          "args": []
+        },
+        {
+          "command": "/bin/bash -c \"perl -e 'print \\\"perl: a|b\\\\n\\\"'\"",
+          "args": []
+        }
+      ],
+      "expected": {
+        "stdout": "perl: a|b\n",
+        "exit_code": 0,
+        "stderr": ""
+      }
+    }
+  ],
+  "passthrough": [
+    {
+      "id": "already_split",
+      "agent": "grok",
+      "command": "/bin/bash",
+      "args": [
+        "-c",
+        "printf ok"
+      ]
+    },
+    {
+      "id": "python_direct",
+      "agent": "grok",
+      "command": "python3",
+      "args": [
+        "-c",
+        "print(\"ok\")"
+      ]
+    },
+    {
+      "id": "node_direct",
+      "agent": "grok",
+      "command": "node",
+      "args": [
+        "-e",
+        "console.log(\"ok\")"
+      ]
+    },
+    {
+      "id": "other_agent",
+      "agent": "generic",
+      "command": "/bin/bash -c 'printf ok'",
+      "args": []
+    },
+    {
+      "id": "existing_args",
+      "agent": "grok",
+      "command": "/bin/bash -c 'printf ok'",
+      "args": [
+        "extra"
+      ]
+    },
+    {
+      "id": "other_shell",
+      "agent": "grok",
+      "command": "/bin/sh -c 'printf ok'",
+      "args": []
+    },
+    {
+      "id": "packed_python",
+      "agent": "grok",
+      "command": "python3 -c 'print(42)'",
+      "args": []
+    },
+    {
+      "id": "unsupported_flag",
+      "agent": "grok",
+      "command": "/bin/bash -xc 'printf ok'",
+      "args": []
+    },
+    {
+      "id": "unterminated",
+      "agent": "grok",
+      "command": "/bin/bash -c 'printf ok",
+      "args": []
+    },
+    {
+      "id": "extra_word",
+      "agent": "grok",
+      "command": "/bin/bash -c 'printf ok' extra",
+      "args": []
+    },
+    {
+      "id": "executable_suffix",
+      "agent": "grok",
+      "command": "/bin/bash-other -c 'printf ok'",
+      "args": []
+    },
+    {
+      "id": "arbitrary_shell_string",
+      "agent": "grok",
+      "command": "printf ok | cat",
+      "args": []
+    }
+  ]
+}
