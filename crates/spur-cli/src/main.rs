@@ -388,6 +388,11 @@ enum Commands {
         #[command(subcommand)]
         command: AnalystCommands,
     },
+    /// Run the constraint-solver MCP server (Z3-backed solve_* tools).
+    Solver {
+        #[command(subcommand)]
+        command: SolverCommands,
+    },
     /// Shared embedding sidecar server
     Embed {
         #[command(subcommand)]
@@ -654,6 +659,19 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn cli_accepts_solver_mcp_subcommand() {
+        let root = PathBuf::from(".");
+        let matches = Cli::command()
+            .try_get_matches_from(["spur", "solver", "mcp", "--root", "."])
+            .expect("solver mcp should parse");
+        assert_eq!(matches.subcommand_name(), Some("solver"));
+        let (_, sub) = matches.subcommand().expect("solver subcommand");
+        assert_eq!(sub.subcommand_name(), Some("mcp"));
+        let (_, mcp) = sub.subcommand().expect("solver mcp subcommand");
+        assert_eq!(mcp.get_one::<PathBuf>("root"), Some(&root));
+    }
+
+    #[test]
     fn cli_accepts_embed_serve_subcommand() {
         let socket = PathBuf::from("/tmp/spur-embed.sock");
         let matches = Cli::command()
@@ -859,6 +877,25 @@ enum ConfigCommands {
         /// Write to ~/.spur/config.toml instead of repo-local config.
         #[arg(long)]
         global: bool,
+    },
+}
+
+/// Run the solver MCP server over stdio, exposing the 7 `solve_*` tools
+/// (`solve_rule_spec`, `solve_rules`, `solve_constraint_spec`,
+/// `solve_constraint_check`, `solve_constraints`, `solve_smt`,
+/// `get_solve_result`) against a Z3-backed constraint service. Wire directly
+/// into an MCP client via `command: "spur", args: ["solver", "mcp"]`.
+/// Pass `--root <path>` to bind persisted solve artifacts (.spur/solver/) to a
+/// worktree; when omitted, SPUR_WORKTREE is used before falling back to the
+/// client launch directory. All logging goes to stderr; stdout carries the
+/// JSON-RPC stream.
+#[derive(Debug, Subcommand)]
+enum SolverCommands {
+    Mcp {
+        /// Worktree root for tool calls and persisted solve artifacts.
+        /// Defaults to SPUR_WORKTREE, then the MCP client launch directory.
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
     },
 }
 
@@ -1518,6 +1555,9 @@ async fn run() -> Result<()> {
                 )
             }
             AnalystCommands::Mcp { root } => commands::mcp::run_analyst_server(root).await,
+        },
+        Commands::Solver { command } => match command {
+            SolverCommands::Mcp { root } => commands::mcp::run_solver_server(root).await,
         },
         Commands::Embed { command } => match command {
             EmbedCommands::Serve { socket } => commands::embed::serve(socket).await,

@@ -52,6 +52,7 @@ spur-context = { workspace = true }
 spur-context-auth = { path = "../spur-context-auth" }
 spur-graph = { workspace = true, default-features = false }
 spur-mcp = { workspace = true }
+spur-solver = { workspace = true }
 spur-pm = { workspace = true }
 spur-license = { workspace = true }
 spur-tui = { workspace = true, default-features = false }

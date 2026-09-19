@@ -1,5 +1,6 @@
-//! `spur mcp`, `spur graph mcp`, `spur analyst mcp`, and `spur context mcp` —
-//! standalone MCP servers launched directly from the `spur` CLI.
+//! `spur mcp`, `spur graph mcp`, `spur analyst mcp`, `spur solver mcp`, and
+//! `spur context mcp` — standalone MCP servers launched directly from the
+//! `spur` CLI.
 //!
 //! Each builds a [`spur_mcp::ToolRegistry`] from one or more domain
 //! `ToolModule`s, wraps it in a [`RegistryServerHandler`], and serves it over
@@ -10,6 +11,7 @@
 //! { "mcpServers": {
 //!     "spur-graph":   { "command": "spur", "args": ["graph", "mcp"] },
 //!     "spur-analyst": { "command": "spur", "args": ["analyst", "mcp"] },
+//!     "spur-solver":  { "command": "spur", "args": ["solver", "mcp"] },
 //!     "spur-context": { "command": "spur", "args": ["context", "mcp", "--url", "..."] },
 //!     "spur":         { "command": "spur", "args": ["mcp"] }
 //! }}
@@ -30,6 +32,7 @@
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
@@ -37,6 +40,7 @@ use spur_analyst::mcp::AnalystMcpModule;
 use spur_core::mcp::{ContextServiceAuth, ContextServiceClient, LocalProjectMcpComposition};
 use spur_graph::mcp::{GraphMcpDeps, GraphMcpModule};
 use spur_mcp::{serve_stdio_server, RegistryServerHandler, ToolRegistry};
+use spur_solver::{mcp::SolverMcpModule, service::SolverService};
 
 const SPUR_WORKTREE_ENV: &str = "SPUR_WORKTREE";
 
@@ -55,6 +59,14 @@ const ANALYST_INSTRUCTIONS: &str =
      are read-only; local_project_add and local_project_remove mutate only user catalog configuration. \
      Register an already-indexed local Git project once and pass its name as project; registration \
      validates but does not index. external_* tools are the separate hosted package/revision surface.";
+
+const SOLVER_INSTRUCTIONS: &str =
+    "Z3-backed constraint workbench: navigate the mathematical rule catalog with solve_rule_spec, \
+     verify or synthesize catalog models with solve_rules, preflight and execute generic typed \
+     constraints with solve_constraint_spec / solve_constraint_check / solve_constraints, escape to \
+     raw SMT with solve_smt only when the typed surface cannot express the theory, and reload \
+     persisted results with get_solve_result. Preserve raw solver statuses — unknown and timeout \
+     are never proof outcomes.";
 
 const CONTEXT_INSTRUCTIONS: &str =
     "Cloud-backed external code-context tools (external_*): search/read indexed packages, inspect \
@@ -170,6 +182,30 @@ fn legacy_context_server_registry(url: String, token: String) -> Result<ToolRegi
         .build())
 }
 
+/// `spur solver mcp` — standalone solver MCP server (the 7 `solve_*` tools).
+///
+/// `root` is the optional `--root <path>` override. When absent, `SPUR_WORKTREE`
+/// is honored before falling back to the MCP client launch directory. The
+/// resolved root scopes persisted solve artifacts (`.spur/solver/`), mirroring
+/// the worker MCP's per-repo-root solver services. The Z3 process is lazy: it
+/// spawns on first tool use, so an idle server costs only the stdio process.
+pub async fn run_solver_server(root: Option<PathBuf>) -> Result<()> {
+    let resolved = resolve_mcp_worktree_root(root)?;
+    let registry = solver_server_registry(resolved.as_deref())?;
+    let handler = RegistryServerHandler::new(registry, "spur-solver-mcp", SOLVER_INSTRUCTIONS);
+    serve_stdio_server(handler).await
+}
+
+fn solver_server_registry(root: Option<&std::path::Path>) -> Result<ToolRegistry> {
+    let service = match root {
+        Some(root) => SolverService::new().with_repo_root(root),
+        None => SolverService::new(),
+    };
+    Ok(ToolRegistry::builder()
+        .with(SolverMcpModule::new(Arc::new(service)))?
+        .build())
+}
+
 /// `spur context mcp` — standalone external code-context MCP server.
 ///
 /// Exposes the 7 `external_*` tools (external_code_search, external_code_read,
@@ -224,6 +260,29 @@ mod tests {
             .filter(|offset| *offset > 0)
             .unwrap_or(tail.len());
         &tail[..next_fn]
+    }
+
+    #[test]
+    fn solver_registry_exposes_the_seven_solve_tools() {
+        let registry = super::solver_server_registry(None).expect("solver registry");
+        let mut names: Vec<String> = registry
+            .list_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "get_solve_result",
+                "solve_constraint_check",
+                "solve_constraint_spec",
+                "solve_constraints",
+                "solve_rule_spec",
+                "solve_rules",
+                "solve_smt",
+            ]
+        );
     }
 
     #[test]

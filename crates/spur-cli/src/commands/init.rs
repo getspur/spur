@@ -244,6 +244,7 @@ pub async fn run(
 const PI_MCP_SERVERS: &[(&str, &str, &[&str])] = &[
     ("spur-graph", "spur", &["graph", "mcp"]),
     ("spur-analyst", "spur", &["analyst", "mcp"]),
+    ("spur-solver", "spur", &["solver", "mcp"]),
     ("spur", "spur", &["mcp"]),
 ];
 
@@ -981,11 +982,15 @@ mod tests {
         )
         .unwrap();
         let servers = written["mcpServers"].as_object().unwrap();
-        assert_eq!(servers.len(), 3);
+        assert_eq!(servers.len(), 4);
         assert_eq!(servers["spur-graph"]["command"], "spur");
         assert_eq!(
             servers["spur-graph"]["args"],
             serde_json::json!(["graph", "mcp"])
+        );
+        assert_eq!(
+            servers["spur-solver"]["args"],
+            serde_json::json!(["solver", "mcp"])
         );
         assert_eq!(servers["spur"]["args"], serde_json::json!(["mcp"]));
     }
@@ -1011,7 +1016,7 @@ mod tests {
         )
         .unwrap();
         let servers = after["mcpServers"].as_object().unwrap();
-        assert_eq!(servers.len(), 4, "chrome + 3 SPUR servers");
+        assert_eq!(servers.len(), 5, "chrome + 4 SPUR servers");
         assert_eq!(servers["chrome"]["command"], "npx");
         assert_eq!(
             servers["spur-graph"]["disabled"], true,
