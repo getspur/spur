@@ -16,6 +16,22 @@ from pathlib import Path
 from scripts import probe_acp_capabilities as probe
 
 
+class GoldenLexingTests(unittest.TestCase):
+    def test_probe_preserves_exact_shared_canonical_argv(self) -> None:
+        corpus_path = (
+            Path(__file__).resolve().parents[1]
+            / "crates/spur-acp/tests/fixtures/grok_terminal_golden.json"
+        )
+        corpus = json.loads(corpus_path.read_text())
+        for case in corpus["cases"] + corpus["lexical_only"]:
+            expected = [case["canonical"]["command"], *case["canonical"]["args"]]
+            for index, packed in enumerate(case["packed"]):
+                with self.subTest(case=case["id"], wrapper=index):
+                    self.assertEqual(
+                        probe._split_terminal_shell_words(packed["command"]), expected
+                    )
+
+
 @unittest.skipUnless(os.name == "posix", "shell lifecycle requires POSIX")
 class TerminalTests(unittest.TestCase):
     def setUp(self) -> None:

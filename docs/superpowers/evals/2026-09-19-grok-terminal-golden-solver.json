@@ -1,0 +1,436 @@
+{
+  "scope": "Finite traces transcribed from the native inherited-pipe diagnostic. Solver checks this mapping, not executable Rust or unbounded liveness. The 250 ms observation is a sampled window; it does not prove an infinite hang.",
+  "pre_implementation_solve_id": "sol_112f5c19d73f493c",
+  "evaluations": [
+    {
+      "name": "desired_contract",
+      "request": {
+        "family": "workflow",
+        "mode": "verify",
+        "persist": true,
+        "facts": {
+          "horizon": 3,
+          "state_domain": [
+            "Running",
+            "ExitedPipesOpen",
+            "ExitReported",
+            "Continued"
+          ],
+          "event_domain": [
+            "parent_exit_observed",
+            "wait_response",
+            "next_prompt"
+          ],
+          "initial_states": [
+            "Running"
+          ],
+          "target_states": [
+            "ExitReported"
+          ],
+          "enabled_transitions": [
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "parent_exit_observed",
+              "to": "ExitedPipesOpen"
+            },
+            {
+              "step": 1,
+              "from": "ExitedPipesOpen",
+              "event": "wait_response",
+              "to": "ExitReported"
+            },
+            {
+              "step": 2,
+              "from": "ExitReported",
+              "event": "next_prompt",
+              "to": "Continued"
+            }
+          ],
+          "traces": {
+            "desired_contract": {
+              "states": [
+                "Running",
+                "ExitedPipesOpen",
+                "ExitReported",
+                "Continued"
+              ],
+              "events": [
+                "parent_exit_observed",
+                "wait_response",
+                "next_prompt"
+              ]
+            }
+          },
+          "safe_states": [
+            "Running",
+            "ExitedPipesOpen",
+            "ExitReported",
+            "Continued"
+          ]
+        },
+        "rules": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "subjects": [
+              "desired_contract"
+            ]
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "subjects": [
+              "desired_contract"
+            ]
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "subjects": [
+              "desired_contract"
+            ],
+            "parameters": {
+              "bound": 2
+            }
+          }
+        ]
+      },
+      "result": {
+        "family": "workflow",
+        "mode": "verify",
+        "outcome": "pass",
+        "rule_results": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "binding_index": 0,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "binding_index": 1,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "binding_index": 2,
+            "status": "sat",
+            "outcome": "pass"
+          }
+        ],
+        "evaluation_scope": {
+          "kind": "bounded_trace",
+          "horizon": 3,
+          "reachability": [
+            {
+              "rule_id": "workflow.bounded_reachability",
+              "binding_index": 2,
+              "effective_bound": 2
+            }
+          ]
+        },
+        "total_duration_ms": 13,
+        "status": "sat",
+        "model": {},
+        "duration_ms": 4,
+        "solve_id": "sol_0ada6a3619d74963",
+        "reason": null,
+        "solver_version": "Z3 version 4.16.0 - 64 bit"
+      }
+    },
+    {
+      "name": "observed_before_release",
+      "request": {
+        "family": "workflow",
+        "mode": "verify",
+        "persist": true,
+        "facts": {
+          "horizon": 4,
+          "state_domain": [
+            "Running",
+            "ExitedPipesOpen",
+            "WaitPending",
+            "ExitReported",
+            "Continued"
+          ],
+          "event_domain": [
+            "parent_exit_observed",
+            "wait_pending_250ms",
+            "release_descendant",
+            "next_prompt"
+          ],
+          "initial_states": [
+            "Running"
+          ],
+          "target_states": [
+            "ExitReported"
+          ],
+          "enabled_transitions": [
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "parent_exit_observed",
+              "to": "ExitedPipesOpen"
+            },
+            {
+              "step": 1,
+              "from": "ExitedPipesOpen",
+              "event": "wait_pending_250ms",
+              "to": "WaitPending"
+            },
+            {
+              "step": 2,
+              "from": "WaitPending",
+              "event": "release_descendant",
+              "to": "ExitReported"
+            },
+            {
+              "step": 3,
+              "from": "ExitReported",
+              "event": "next_prompt",
+              "to": "Continued"
+            }
+          ],
+          "traces": {
+            "observed_before_release": {
+              "states": [
+                "Running",
+                "ExitedPipesOpen",
+                "WaitPending",
+                "ExitReported",
+                "Continued"
+              ],
+              "events": [
+                "parent_exit_observed",
+                "wait_pending_250ms",
+                "release_descendant",
+                "next_prompt"
+              ]
+            }
+          },
+          "safe_states": [
+            "Running",
+            "ExitedPipesOpen",
+            "WaitPending",
+            "ExitReported",
+            "Continued"
+          ]
+        },
+        "rules": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "subjects": [
+              "observed_before_release"
+            ]
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "subjects": [
+              "observed_before_release"
+            ]
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "subjects": [
+              "observed_before_release"
+            ],
+            "parameters": {
+              "bound": 2
+            }
+          }
+        ]
+      },
+      "result": {
+        "family": "workflow",
+        "mode": "verify",
+        "outcome": "fail",
+        "rule_results": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "binding_index": 0,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "binding_index": 1,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "binding_index": 2,
+            "status": "unsat",
+            "outcome": "fail",
+            "diagnostic": "workflow.bounded_reachability.violation"
+          }
+        ],
+        "evaluation_scope": {
+          "kind": "bounded_trace",
+          "horizon": 4,
+          "reachability": [
+            {
+              "rule_id": "workflow.bounded_reachability",
+              "binding_index": 2,
+              "effective_bound": 2
+            }
+          ]
+        },
+        "total_duration_ms": 106,
+        "status": "unsat",
+        "duration_ms": 67,
+        "solve_id": "sol_b84005435f7845ee",
+        "reason": null,
+        "unsat_core": [
+          "workflow_rule_2_workflow_bounded_reachability"
+        ],
+        "solver_version": "Z3 version 4.16.0 - 64 bit"
+      }
+    },
+    {
+      "name": "observed_recovery",
+      "request": {
+        "family": "workflow",
+        "mode": "verify",
+        "persist": true,
+        "facts": {
+          "horizon": 4,
+          "state_domain": [
+            "Running",
+            "ExitedPipesOpen",
+            "WaitPending",
+            "ExitReported",
+            "Continued"
+          ],
+          "event_domain": [
+            "parent_exit_observed",
+            "wait_pending_250ms",
+            "release_descendant",
+            "next_prompt"
+          ],
+          "initial_states": [
+            "Running"
+          ],
+          "target_states": [
+            "Continued"
+          ],
+          "enabled_transitions": [
+            {
+              "step": 0,
+              "from": "Running",
+              "event": "parent_exit_observed",
+              "to": "ExitedPipesOpen"
+            },
+            {
+              "step": 1,
+              "from": "ExitedPipesOpen",
+              "event": "wait_pending_250ms",
+              "to": "WaitPending"
+            },
+            {
+              "step": 2,
+              "from": "WaitPending",
+              "event": "release_descendant",
+              "to": "ExitReported"
+            },
+            {
+              "step": 3,
+              "from": "ExitReported",
+              "event": "next_prompt",
+              "to": "Continued"
+            }
+          ],
+          "traces": {
+            "observed_recovery": {
+              "states": [
+                "Running",
+                "ExitedPipesOpen",
+                "WaitPending",
+                "ExitReported",
+                "Continued"
+              ],
+              "events": [
+                "parent_exit_observed",
+                "wait_pending_250ms",
+                "release_descendant",
+                "next_prompt"
+              ]
+            }
+          },
+          "safe_states": [
+            "Running",
+            "ExitedPipesOpen",
+            "WaitPending",
+            "ExitReported",
+            "Continued"
+          ]
+        },
+        "rules": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "subjects": [
+              "observed_recovery"
+            ]
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "subjects": [
+              "observed_recovery"
+            ]
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "subjects": [
+              "observed_recovery"
+            ],
+            "parameters": {
+              "bound": 4
+            }
+          }
+        ]
+      },
+      "result": {
+        "family": "workflow",
+        "mode": "verify",
+        "outcome": "pass",
+        "rule_results": [
+          {
+            "rule_id": "workflow.initial_state_allowed",
+            "binding_index": 0,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.transition_allowed",
+            "binding_index": 1,
+            "status": "sat",
+            "outcome": "pass"
+          },
+          {
+            "rule_id": "workflow.bounded_reachability",
+            "binding_index": 2,
+            "status": "sat",
+            "outcome": "pass"
+          }
+        ],
+        "evaluation_scope": {
+          "kind": "bounded_trace",
+          "horizon": 4,
+          "reachability": [
+            {
+              "rule_id": "workflow.bounded_reachability",
+              "binding_index": 2,
+              "effective_bound": 4
+            }
+          ]
+        },
+        "total_duration_ms": 13,
+        "status": "sat",
+        "model": {},
+        "duration_ms": 4,
+        "solve_id": "sol_c3d76f622fc1439b",
+        "reason": null,
+        "solver_version": "Z3 version 4.16.0 - 64 bit"
+      }
+    }
+  ]
+}

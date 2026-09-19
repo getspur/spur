@@ -1901,6 +1901,36 @@ class _ProbeTerminal:
                 raise
 
 
+def _split_terminal_shell_words(command: str) -> list[str]:
+    """Align shlex with POSIX/shell-words escapes without expanding the shell.
+
+    Python shlex preserves backslashes before $ and ` inside double quotes,
+    unlike the Rust shell-words parser used by SPUR. It also keeps escaped
+    newlines. Adjust only those lexical cases before its normal word splitting;
+    escaped backslashes/quotes and single-quoted text retain their meaning.
+    """
+    adjusted: list[str] = []
+    quote: Optional[str] = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'" and index + 1 < len(command):
+            following = command[index + 1]
+            if following == "\n":
+                pass
+            elif quote == '"' and following in "$`":
+                adjusted.append(following)
+            else:
+                adjusted.extend((char, following))
+            index += 2
+            continue
+        if char in "'\"" and quote in (None, char):
+            quote = char if quote is None else None
+        adjusted.append(char)
+        index += 1
+    return shlex.split("".join(adjusted))
+
+
 class TerminalHost:
     """Opt-in ACP terminal host; `grok` mirrors native.rs's narrow workaround."""
 
@@ -1923,7 +1953,7 @@ class TerminalHost:
         if self.mode == "grok" and os.name == "posix" and not args:
             if re.match(r"^/bin/bash[ \t\r\n]", command):
                 try:
-                    words = shlex.split(command)
+                    words = _split_terminal_shell_words(command)
                 except ValueError:
                     words = []
                 if (

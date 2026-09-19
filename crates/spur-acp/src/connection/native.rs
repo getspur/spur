@@ -4692,6 +4692,10 @@ fn cancelled_permission_response() -> RequestPermissionResponse {
 
 // ─── Terminal helpers ────────────────────────────────────────────────────────
 
+#[cfg(all(test, unix))]
+#[path = "grok_terminal_golden_tests.rs"]
+mod grok_terminal_golden_tests;
+
 #[derive(Debug, PartialEq, Eq)]
 struct NormalizedTerminalCommand {
     program: &'static str,

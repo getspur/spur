@@ -1,0 +1,525 @@
+{
+  "schema": "spur.grok-terminal-golden-evaluation",
+  "version": 1,
+  "date": "2026-09-19",
+  "issue": "bd-1mp6c",
+  "open_lifecycle_bug": "bd-3stsw",
+  "corpus": {
+    "path": "crates/spur-acp/tests/fixtures/grok_terminal_golden.json",
+    "sha256": "8fe99c5c1248428012e36de291123fea991b6dda202c1e34d46e9f670520bc32",
+    "execution_cases": 23,
+    "lexical_cases": 5,
+    "passthrough_cases": 12
+  },
+  "rust_normalization": {
+    "platform": "remote Linux aarch64",
+    "tests_passed": 2,
+    "packed_requests_checked": 102,
+    "passthrough_requests_checked": 12
+  },
+  "python_probe": {
+    "platform": "Darwin-25.1.0-arm64-arm-64bit-Mach-O",
+    "runtimes": {
+      "bash": {
+        "path": "/bin/bash",
+        "version": "GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)"
+      },
+      "python3": {
+        "path": "/opt/homebrew/bin/python3",
+        "version": "Python 3.14.5"
+      },
+      "node": {
+        "path": "/opt/homebrew/bin/node",
+        "version": "v25.9.0"
+      },
+      "ruby": {
+        "path": "/usr/bin/ruby",
+        "version": "ruby 2.6.10p210 (2022-04-12 revision 67958) [universal.arm64e-darwin25]"
+      },
+      "perl": {
+        "path": "/usr/bin/perl",
+        "version": "This is perl 5, version 34, subversion 1 (v5.34.1) built for darwin-thread-multi-2level"
+      }
+    },
+    "tests_passed": 116,
+    "packed_execution_requests_checked": 46,
+    "lexical_requests_checked": 51,
+    "skips": []
+  },
+  "native": {
+    "source_log": ".spur/logs/grok-terminal-golden-final-20260919.log",
+    "suite_exit_code": 101,
+    "test_outcome": "pass",
+    "report": {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [
+        {
+          "id": "bash_printf",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "shell-ok\n",
+              "exit_code": 0
+            },
+            {
+              "output": "shell-ok\n",
+              "exit_code": 0
+            },
+            {
+              "output": "shell-ok\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_pipeline",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "ALPHA\nBETA\n",
+              "exit_code": 0
+            },
+            {
+              "output": "ALPHA\nBETA\n",
+              "exit_code": 0
+            },
+            {
+              "output": "ALPHA\nBETA\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_pipefail",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "",
+              "exit_code": 1
+            },
+            {
+              "output": "",
+              "exit_code": 1
+            },
+            {
+              "output": "",
+              "exit_code": 1
+            }
+          ]
+        },
+        {
+          "id": "bash_pipeline_last_status",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "",
+              "exit_code": 0
+            },
+            {
+              "output": "",
+              "exit_code": 0
+            },
+            {
+              "output": "",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_apostrophe",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "it's quoted\n",
+              "exit_code": 0
+            },
+            {
+              "output": "it's quoted\n",
+              "exit_code": 0
+            },
+            {
+              "output": "it's quoted\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_literal_metacharacters",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "$HOME $(printf BAD) `printf BAD` | ; * \\\\end\n",
+              "exit_code": 0
+            },
+            {
+              "output": "$HOME $(printf BAD) `printf BAD` | ; * \\\\end\n",
+              "exit_code": 0
+            },
+            {
+              "output": "$HOME $(printf BAD) `printf BAD` | ; * \\\\end\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_multiline",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "first\nsecond\n",
+              "exit_code": 0
+            },
+            {
+              "output": "first\nsecond\n",
+              "exit_code": 0
+            },
+            {
+              "output": "first\nsecond\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_redirection",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "stored\n",
+              "exit_code": 0
+            },
+            {
+              "output": "stored\n",
+              "exit_code": 0
+            },
+            {
+              "output": "stored\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_unicode_file",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "Xin chào 世界\n",
+              "exit_code": 0
+            },
+            {
+              "output": "Xin chào 世界\n",
+              "exit_code": 0
+            },
+            {
+              "output": "Xin chào 世界\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "bash_env",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "space $literal 世界\n",
+              "exit_code": 0
+            },
+            {
+              "output": "space $literal 世界\n",
+              "exit_code": 0
+            },
+            {
+              "output": "space $literal 世界\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "sh_script_file",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "sh:quoted arg\n",
+              "exit_code": 0
+            },
+            {
+              "output": "sh:quoted arg\n",
+              "exit_code": 0
+            },
+            {
+              "output": "sh:quoted arg\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_inline",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "{\"pipe\": \"a|b\", \"quote\": \"say \\\"hi\\\"\", \"unicode\": \"世界\"}\n",
+              "exit_code": 0
+            },
+            {
+              "output": "{\"pipe\": \"a|b\", \"quote\": \"say \\\"hi\\\"\", \"unicode\": \"世界\"}\n",
+              "exit_code": 0
+            },
+            {
+              "output": "{\"pipe\": \"a|b\", \"quote\": \"say \\\"hi\\\"\", \"unicode\": \"世界\"}\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_heredoc",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "[\"$HOME\", \"it's quoted\", \"a|b\", \"世界\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"$HOME\", \"it's quoted\", \"a|b\", \"世界\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"$HOME\", \"it's quoted\", \"a|b\", \"世界\"]\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_file_argv",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "[\"arg with spaces\", \"a|b\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"arg with spaces\", \"a|b\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"arg with spaces\", \"a|b\"]\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_module",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "module-ok\n",
+              "exit_code": 0
+            },
+            {
+              "output": "module-ok\n",
+              "exit_code": 0
+            },
+            {
+              "output": "module-ok\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_pipeline_stdin",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "one|two\n",
+              "exit_code": 0
+            },
+            {
+              "output": "one|two\n",
+              "exit_code": 0
+            },
+            {
+              "output": "one|two\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_stdin_eof",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "''\n",
+              "exit_code": 0
+            },
+            {
+              "output": "''\n",
+              "exit_code": 0
+            },
+            {
+              "output": "''\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "python_stderr_exit",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "expected-error\n",
+              "exit_code": 7
+            },
+            {
+              "output": "expected-error\n",
+              "exit_code": 7
+            },
+            {
+              "output": "expected-error\n",
+              "exit_code": 7
+            }
+          ]
+        },
+        {
+          "id": "python_exception",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nRuntimeError: GOLDEN_ERROR\n",
+              "exit_code": 1
+            },
+            {
+              "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nRuntimeError: GOLDEN_ERROR\n",
+              "exit_code": 1
+            },
+            {
+              "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nRuntimeError: GOLDEN_ERROR\n",
+              "exit_code": 1
+            }
+          ]
+        },
+        {
+          "id": "node_inline",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "[\"a|b\",\"$HOME\",\"世界\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"a|b\",\"$HOME\",\"世界\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"a|b\",\"$HOME\",\"世界\"]\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "node_script_file",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "[\"arg with spaces\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"arg with spaces\"]\n",
+              "exit_code": 0
+            },
+            {
+              "output": "[\"arg with spaces\"]\n",
+              "exit_code": 0
+            }
+          ]
+        },
+        {
+          "id": "ruby_inline",
+          "status": "skipped",
+          "missing": [
+            "ruby"
+          ]
+        },
+        {
+          "id": "perl_inline",
+          "status": "pass",
+          "runs": [
+            {
+              "output": "perl: a|b\n",
+              "exit_code": 0
+            },
+            {
+              "output": "perl: a|b\n",
+              "exit_code": 0
+            },
+            {
+              "output": "perl: a|b\n",
+              "exit_code": 0
+            }
+          ]
+        }
+      ],
+      "follow_up": true,
+      "lifecycle": null,
+      "runtimes": {
+        "bash": {
+          "path": "/usr/bin/bash",
+          "version": "GNU bash, version 5.2.15(1)-release (aarch64-unknown-linux-gnu)"
+        },
+        "python3": {
+          "path": "/usr/bin/python3",
+          "version": "Python 3.11.2"
+        },
+        "node": {
+          "path": "/usr/bin/node",
+          "version": "v24.21.0"
+        },
+        "ruby": {
+          "path": null,
+          "version": null
+        },
+        "perl": {
+          "path": "/usr/bin/perl",
+          "version": "This is perl 5, version 36, subversion 0 (v5.36.0) built for aarch64-linux-gnu-thread-multi"
+        }
+      }
+    }
+  },
+  "inherited_pipe": {
+    "source_log": ".spur/logs/grok-terminal-golden-final-20260919.log",
+    "suite_exit_code": 101,
+    "test_outcome": "fail",
+    "report": {
+      "schema": "spur.grok-terminal-golden-result",
+      "version": 1,
+      "cases": [],
+      "follow_up": true,
+      "lifecycle": {
+        "cases": [
+          {
+            "command_form": "split",
+            "parent_exit_observed": true,
+            "wait_returned_before_release": false,
+            "observation_window_seconds": 0.25,
+            "exit_code": 0,
+            "verdict": "fail"
+          },
+          {
+            "command_form": "packed",
+            "parent_exit_observed": true,
+            "wait_returned_before_release": false,
+            "observation_window_seconds": 0.25,
+            "exit_code": 0,
+            "verdict": "fail"
+          }
+        ],
+        "verdict": "fail"
+      }
+    }
+  },
+  "combined_native_run": {
+    "exit_code": 101,
+    "tests_passed": 1,
+    "tests_failed": 1,
+    "reason": "Explicitly included known failing inherited-pipe diagnostic; ordinary script replay passed."
+  }
+}

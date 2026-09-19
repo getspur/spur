@@ -776,5 +776,87 @@
       "command": "printf ok | cat",
       "args": []
     }
+  ],
+  "lexical_only": [
+    {
+      "id": "double_quote_line_continuation",
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf joined"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c \"printf jo\\\nined\"",
+          "args": []
+        }
+      ]
+    },
+    {
+      "id": "unquoted_line_continuation",
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c pri\\\nntf",
+          "args": []
+        }
+      ]
+    },
+    {
+      "id": "single_quote_preserves_backslash_newline",
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf first\\\nsecond"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c 'printf first\\\nsecond'",
+          "args": []
+        }
+      ]
+    },
+    {
+      "id": "intentional_script_escapes",
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf '%s' '\\$HOME \\`literal\\`'"
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c \"printf '%s' '\\\\\\$HOME \\\\\\`literal\\\\\\`'\"",
+          "args": []
+        }
+      ]
+    },
+    {
+      "id": "nonspecial_double_quote_escape",
+      "canonical": {
+        "command": "/bin/bash",
+        "args": [
+          "-c",
+          "printf \"\\q\""
+        ]
+      },
+      "packed": [
+        {
+          "command": "/bin/bash -c \"printf \\\"\\q\\\"\"",
+          "args": []
+        }
+      ]
+    }
   ]
 }

@@ -15,7 +15,7 @@ Use a static JSON corpus with IDs, requirements, script files, explicit argv,
 literal packed requests, and independent expected output and exit status.
 Include real Grok double-quoted wrapping, POSIX single quotes, apostrophes,
 backslashes, Unicode, heredocs, pipelines, redirection, stderr, nonzero exits,
-stdin EOF, environment values, executable/script paths with spaces, and
+stdin EOF, environment values, script/data paths with spaces, and
 multi-line scripts. Use Bash `-c` for hermetic execution; parse-test `-lc`
 without loading the user's startup profile.
 
@@ -27,7 +27,8 @@ without loading the user's startup profile.
    plus a second prompt in the same session. Missing optional interpreters are
    explicit skips; Python and shell are required.
 3. Add an inherited-output-pipe diagnostic with a child held by an explicit
-   release sentinel. Record command exit and terminal completion separately.
+   release sentinel. Compare split and packed requests, recording command exit
+   and terminal completion separately.
    A detected delay is a known lifecycle finding, not a successful golden
    expectation or proof of the user's original stall.
 4. Run crate tests through scripts/spur-cargo, retain a machine-readable report
