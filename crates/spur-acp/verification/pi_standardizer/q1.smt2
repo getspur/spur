@@ -1,0 +1,12 @@
+(set-logic QF_S)
+(define-fun CAP () Int 65536)
+(define-fun step ((a String) (d String)) String
+  (let ((s (str.++ a d)))
+    (ite (> (str.len s) CAP)
+         (str.substr s (- (str.len s) CAP) CAP)
+         s)))
+(declare-const c1 String) (declare-const c2 String) (declare-const c3 String)
+(assert (<= (+ (str.len c1) (str.len c2) (str.len c3)) CAP))
+(assert (or (not (= (step (step (step "" c1) c2) c3) (str.++ c1 c2 c3)))
+            (> (str.len (step (step (step "" c1) c2) c3)) CAP)))
+(check-sat)
