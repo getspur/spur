@@ -38,6 +38,14 @@ fn native_extensions_preserve_graph_queries_and_error_recovery() -> anyhow::Resu
     )?;
     assert_eq!(edge, (1, 2));
 
+    let ranked: i64 = conn.query_row(
+        "SELECT count(*) FROM onager_ctr_pagerank(\
+           (SELECT src::BIGINT, dst::BIGINT FROM edges))",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(ranked, 2);
+
     // This exercises a C++ exception across the engine/extension boundary.
     // A mismatched C++ runtime can abort the process instead of returning Err.
     let error = conn
@@ -49,5 +57,37 @@ fn native_extensions_preserve_graph_queries_and_error_recovery() -> anyhow::Resu
     assert!(error.to_string().contains("missing_graph"));
     let answer: i32 = conn.query_row("SELECT 42", [], |row| row.get(0))?;
     assert_eq!(answer, 42);
+    Ok(())
+}
+
+#[test]
+#[ignore = "run explicitly against the selected native DuckDB artifact"]
+fn native_json_parquet_and_transactions_round_trip() -> anyhow::Result<()> {
+    let conn = duckdb::Connection::open_in_memory()?;
+    let answer: i32 = conn.query_row(
+        "SELECT json_extract('{\"answer\":42}', '$.answer')::INTEGER",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(answer, 42);
+    conn.execute_batch(
+        "CREATE TABLE values_test AS SELECT 42 AS answer; \
+         BEGIN; INSERT INTO values_test VALUES (100); ROLLBACK;",
+    )?;
+    let temporary = tempfile::tempdir()?;
+    let path = temporary.path().join("round-trip.parquet");
+    let sql_path = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace('\'', "''");
+    conn.execute_batch(&format!(
+        "COPY values_test TO '{sql_path}' (FORMAT PARQUET)"
+    ))?;
+    let total: i64 = conn.query_row(
+        &format!("SELECT sum(answer)::BIGINT FROM read_parquet('{sql_path}')"),
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(total, 42);
     Ok(())
 }

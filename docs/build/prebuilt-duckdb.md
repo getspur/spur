@@ -3,7 +3,7 @@
 DuckDB remains pinned to **1.4.4** for the analyst extension ABI. Default builds
 still enable `duckdb-bundled` and compile DuckDB from source. The analyst, core,
 and CLI expose that feature explicitly so application builds can instead link
-verified prebuilt static libraries.
+verified prebuilt libraries (static on Linux/macOS, a DLL on Windows MSVC).
 
 The shared `spur-notebook/scripts/cloud-build` pipeline supports this mode:
 
@@ -22,7 +22,7 @@ selected package, including its test dependencies, must agree on linkage.
 The shared build pipeline must include `_ensure-duckdb.py`; it is transferred
 explicitly to the VM because `scripts/cloud-build` can be a sibling-repository
 symlink. The mode is currently supported through remote `scripts/spur-cargo`
-commands, not through the remote pnpm/Tauri command route.
+commands. SpurLab also supports Windows x64 pnpm/Tauri installer packaging.
 
 ## Artifacts and platforms
 
@@ -39,10 +39,19 @@ Rust bindings and application code still compile normally.
 | aarch64-apple-darwin | static-libs-osx-arm64.zip | system libc++ |
 | x86_64-apple-darwin | static-libs-osx-amd64.zip | system libc++ |
 
-Windows MSVC and musl targets are rejected in prebuilt mode. Use the default
-bundled build for those targets; the official MinGW static archive is not an
-MSVC artifact. macOS cross builds continue to use `scripts/spur-cargo zigbuild`
-and its explicit system-libc++ linker setup.
+Windows MSVC uses `libduckdb-windows-amd64.zip` or
+`libduckdb-windows-arm64.zip`, with pinned checksums and `DUCKDB_STATIC=0`.
+The helper stages `duckdb.dll` beside application and test executables; ship
+the DLL with the executable. The `.lib` file is an import library, not a static
+engine. Musl and Windows GNU remain unsupported. macOS cross builds continue
+to use `scripts/spur-cargo zigbuild` and its system-libc++ linker setup.
+
+For Windows x64, use `SPUR_BUILD_ARCH=x86_64` and
+`scripts/spur-cargo xwin test --locked --release -p spur-analyst
+--target x86_64-pc-windows-msvc --no-default-features
+--test duckdb_linkage --no-run` with the same prebuilt/remote environment above.
+Run the resulting test executable with its adjacent DLL on native Windows,
+passing `--ignored --nocapture`. Cross compilation alone is not runtime evidence.
 
 Pass a single explicit `--target` for cross builds. If a target is selected in
 Cargo configuration, repeat it on the command line; the provisioner deliberately
@@ -65,7 +74,8 @@ SPUR_DUCKDB_PREBUILT=1 SPUR_REMOTE=1 SPUR_NO_LOCAL_FALLBACK=1 \
 
 The integration test requires signed DuckPGQ/Onager extensions in the existing
 cache, the configured vendored directory, or accessible extension repositories.
-It asserts both extensions load, a property-graph edge query succeeds, and a
-DuckPGQ error returns without aborting the process. Ordinary SQL success alone
-is insufficient: production query paths can fall back to recursive SQL when
+It asserts both extensions load, a property-graph edge query and Onager PageRank
+succeed, and a DuckPGQ error returns without aborting the process. A second
+test covers JSON extraction, transaction rollback, and a Parquet round trip.
+Ordinary SQL success alone is insufficient: production query paths can fall back to recursive SQL when
 DuckPGQ is unavailable.
