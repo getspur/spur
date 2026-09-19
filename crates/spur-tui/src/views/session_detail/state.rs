@@ -648,8 +648,19 @@ impl SessionDetailView {
         caps: Option<&spur_acp::SpurAgentCaps>,
         options: &[spur_acp::SessionConfigOption],
     ) {
+        // Agents re-scope dependent selects mid-session (e.g. Grok narrows
+        // reasoning_effort after a model switch). Refresh the frozen caps
+        // snapshot from the live options before synthesizing entries so
+        // caps-derived hints and choice lists never serve stale values.
+        if let Some(cached) = self.spur_agent_caps.as_mut() {
+            std::sync::Arc::make_mut(cached).apply_config_option_snapshot(options);
+        }
+        let refreshed_caps = self.spur_agent_caps.clone();
         let handle = self.agent_handle_for_commands();
-        let entries = match caps {
+        // Prefer the refreshed view-owned snapshot over the event's frozen
+        // caps so mid-session re-advertisements win; fall back to the event
+        // caps for views that never stored one (resumed pre-M9 sessions).
+        let entries = match refreshed_caps.as_deref().or(caps) {
             Some(caps) => {
                 crate::commands::advertised::AdvertisedSource::entries_from_caps(&handle, caps)
             }
