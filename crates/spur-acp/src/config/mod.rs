@@ -1915,7 +1915,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_template_grok_uses_global_always_approve_before_agent_stdio() {
+    fn seed_template_grok_uses_agent_scoped_always_approve() {
         let seeds = load_seed_template();
         let grok = seeds
             .entries
@@ -1928,11 +1928,11 @@ mod tests {
             grok.effective_args(),
             vec![
                 "--no-auto-update".to_string(),
-                "--always-approve".to_string(),
                 "agent".to_string(),
+                "--always-approve".to_string(),
                 "stdio".to_string(),
             ],
-            "Grok global flags must precede the `agent stdio` subcommands"
+            "Grok auto-approve must be scoped to the `agent` subcommand"
         );
         assert!(
             !grok.effective_permissions().skip,
