@@ -1915,6 +1915,32 @@ mod tests {
     }
 
     #[test]
+    fn seed_template_grok_uses_agent_scoped_always_approve() {
+        let seeds = load_seed_template();
+        let grok = seeds
+            .entries
+            .iter()
+            .find(|a| a.name == "grok")
+            .expect("grok should be in seed template");
+
+        assert_eq!(grok.kind, crate::types::AgentKind::Grok);
+        assert_eq!(
+            grok.effective_args(),
+            vec![
+                "--no-auto-update".to_string(),
+                "agent".to_string(),
+                "--always-approve".to_string(),
+                "stdio".to_string(),
+            ],
+            "Grok auto-approve must be scoped to the `agent` subcommand"
+        );
+        assert!(
+            !grok.effective_permissions().skip,
+            "Grok must retain Spur's interactive permission channel as a fallback"
+        );
+    }
+
+    #[test]
     fn seed_template_gemini_uses_gemini_kind() {
         let seeds = load_seed_template();
         let gemini = seeds
