@@ -1915,6 +1915,32 @@ mod tests {
     }
 
     #[test]
+    fn seed_template_grok_uses_global_always_approve_before_agent_stdio() {
+        let seeds = load_seed_template();
+        let grok = seeds
+            .entries
+            .iter()
+            .find(|a| a.name == "grok")
+            .expect("grok should be in seed template");
+
+        assert_eq!(grok.kind, crate::types::AgentKind::Grok);
+        assert_eq!(
+            grok.effective_args(),
+            vec![
+                "--no-auto-update".to_string(),
+                "--always-approve".to_string(),
+                "agent".to_string(),
+                "stdio".to_string(),
+            ],
+            "Grok global flags must precede the `agent stdio` subcommands"
+        );
+        assert!(
+            !grok.effective_permissions().skip,
+            "Grok must retain Spur's interactive permission channel as a fallback"
+        );
+    }
+
+    #[test]
     fn seed_template_gemini_uses_gemini_kind() {
         let seeds = load_seed_template();
         let gemini = seeds
