@@ -184,8 +184,12 @@ dispatch = "prompt_text"
 skip = true
 
 # ── grok ──────────────────────────────────────────────────────────
-# xAI Grok Build CLI. `--no-auto-update` (global) precedes the `agent stdio`
-# subcommand which speaks ACP over stdio. Pin auto_update=false in ~/.grok/config.toml for reproducibility.
+# xAI Grok Build CLI. Global flags must precede the `agent stdio` subcommand
+# which speaks ACP over stdio. Grok 1.0.34 advertises no ACP session modes, so
+# `session_mode = "always-approve"` cannot activate its permission bypass;
+# launch with `--always-approve` instead. Keep Spur's interactive permission
+# channel enabled as a fail-closed fallback. Pin auto_update=false in
+# ~/.grok/config.toml for reproducibility.
 #
 # ACP model / effort surface (SPUR synthesizer):
 #   SPUR only synthesizes mid-session `/model` and `/effort` from
@@ -202,7 +206,7 @@ skip = true
 [[agents.entries]]
 name = "grok"
 command = "grok"
-args = ["--no-auto-update", "agent", "stdio"]
+args = ["--no-auto-update", "--always-approve", "agent", "stdio"]
 transport = "acp"
 kind = "grok"
 role = "both"
