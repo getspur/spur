@@ -38,7 +38,7 @@ pub mod category {
 /// [`NeutralMentionKind::Custom`] categories so `spur-mentions` never names a
 /// frontend's kinds. The inverse direction is not a function (foreign
 /// categories have no TUI kind), which is why [`TuiMentionMetadata`] carries
-/// the TUI kind itself.
+/// the TUI kind itself; see [`tui_kind`] for the partial inverse.
 pub fn neutral_kind(kind: &MentionKind) -> NeutralMentionKind {
     match kind {
         MentionKind::File => NeutralMentionKind::File,
@@ -51,9 +51,28 @@ pub fn neutral_kind(kind: &MentionKind) -> NeutralMentionKind {
     }
 }
 
+/// Partial inverse of [`neutral_kind`]: maps the TUI's own neutral
+/// categories back onto the TUI kind. Returns `None` for foreign
+/// caller-defined categories (their rows cannot be labeled with a TUI
+/// kind and are skipped by [`rejoin_snapshot`]).
+pub fn tui_kind(kind: &NeutralMentionKind) -> Option<MentionKind> {
+    match kind {
+        NeutralMentionKind::File => Some(MentionKind::File),
+        NeutralMentionKind::Directory => Some(MentionKind::Directory),
+        NeutralMentionKind::CodeFile => Some(MentionKind::CodeFile),
+        NeutralMentionKind::CodeSymbol => Some(MentionKind::CodeSymbol),
+        NeutralMentionKind::Custom(category) => match category.as_ref() {
+            category::WORKER => Some(MentionKind::Worker),
+            category::ISSUE => Some(MentionKind::Issue),
+            category::DATASOURCE => Some(MentionKind::Datasource),
+            _ => None,
+        },
+    }
+}
+
 /// TUI-only metadata for one mention row, retained when the row is mapped
 /// onto a neutral `spur_mentions::MentionEntry`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TuiMentionMetadata {
     /// The TUI row kind (the neutral kind only classifies it).
     pub kind: MentionKind,
@@ -149,6 +168,53 @@ impl TuiMentionMetadata {
             issue_preview: metadata.issue_preview.clone(),
         }
     }
+}
+
+/// Split a batch of TUI rows into (neutral entries, sidecar records),
+/// minting sequential ids `0..n` (sud-m3: the session sources' neutral
+/// `build` writes both halves of this mapping).
+pub fn split_rows(rows: &[MentionEntry]) -> (Vec<NeutralMentionEntry>, TuiMentionSidecar) {
+    let mut entries = Vec::with_capacity(rows.len());
+    let mut sidecar = TuiMentionSidecar::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let id = MentionId::new(index as u64);
+        let (neutral, metadata) = TuiMentionMetadata::split(id, row);
+        entries.push(neutral);
+        sidecar.insert(id, metadata);
+    }
+    (entries, sidecar)
+}
+
+/// Rejoin a whole neutral snapshot with its sidecar into TUI rows: the
+/// batch counterpart of [`TuiMentionMetadata::rejoin`]. Total and
+/// panic-free; a row whose id has no sidecar record (unreachable by
+/// construction — the sidecar is written by the same build that produced
+/// the entries) degrades to the neutral-kind view, and foreign categories
+/// are skipped with a diagnostic rather than mislabeled.
+pub fn rejoin_snapshot(
+    entries: &[NeutralMentionEntry],
+    sidecar: &TuiMentionSidecar,
+) -> Vec<MentionEntry> {
+    entries
+        .iter()
+        .filter_map(|entry| match sidecar.get(&entry.id) {
+            Some(metadata) => Some(TuiMentionMetadata::rejoin(entry, metadata)),
+            None => {
+                let kind = tui_kind(&entry.kind)?;
+                tracing::warn!(
+                    uri = %entry.uri,
+                    "mention row without a sidecar record; rejoining from the neutral kind"
+                );
+                Some(TuiMentionMetadata::rejoin(
+                    entry,
+                    &TuiMentionMetadata {
+                        kind,
+                        ..TuiMentionMetadata::default()
+                    },
+                ))
+            }
+        })
+        .collect()
 }
 
 /// Sidecar store keyed by the neutral row's [`MentionId`]: one metadata

@@ -1,8 +1,12 @@
 //! TUI mention registry — the public `spur_tui::mentions` facade.
 //!
 //! Snapshot resolution (filesystem traversal, TTL caching, source-swap
-//! and root invalidation) is delegated to [`spur_mentions::MentionEngine`]
-//! through per-source adapters; this module keeps the TUI surface the app
+//! and root invalidation) is delegated to [`spur_mentions::MentionEngine`]:
+//! the session sources (`worker`, `issue`, `datasource`) implement the
+//! neutral [`spur_mentions::MentionSource`] themselves with their TUI-only
+//! row state in the sidecar each build writes (sud-m3), while the
+//! filesystem/code-graph sources go through thin engine adapters that
+//! park their TUI rows + extras. This module keeps the TUI surface the app
 //! and pickers consume (`query`, `prepare_query_work`/`run_query_work`,
 //! snapshot setters, code-payload retention, worker-slot composition and
 //! agent-model-catalog probing — decoupling spec §4.1). Ranking reuses the
@@ -35,6 +39,7 @@ use super::datasource_source::DatasourceMentionSource;
 use super::entry::{CodeMentionCandidate, MentionEntry, MentionKind, MentionSource};
 use super::file_source::FileMentionSource;
 use super::issue_source::{IssueMentionDescriptor, IssueMentionSource};
+use super::session::SessionMentionSource;
 use super::worker_source::{WorkerMentionDescriptor, WorkerMentionSource};
 use spur_graph::{CodeMentionPayload, CODE_SYMBOL_URI_PREFIX};
 
@@ -72,11 +77,30 @@ struct CodeQueryIndex {
 #[derive(Clone)]
 struct MentionSourceSlot {
     name: &'static str,
-    source: Arc<Mutex<Box<dyn MentionSource>>>,
-    /// Build output parked by the engine-side adapter (see
-    /// [`EngineSourceAdapter`]) for the facade to adopt when the engine
-    /// reports a freshly built snapshot.
-    built: Arc<Mutex<Option<SourceSnapshotData>>>,
+    kind: SourceSlotKind,
+}
+
+/// Which flavor of source a slot holds (decoupling spec §5 Phase M3).
+#[derive(Clone)]
+enum SourceSlotKind {
+    /// TUI-trait source (`file`, `code_graph`): builds run through
+    /// [`TuiEngineSourceAdapter`], which parks the TUI rows + extras for
+    /// the facade to adopt. Code payloads/candidates and payload
+    /// hydration stay reachable through the TUI trait handle.
+    Tui {
+        source: Arc<Mutex<Box<dyn MentionSource>>>,
+        /// Build output parked by the engine-side adapter for the facade
+        /// to adopt when the engine reports a freshly built snapshot.
+        built: Arc<Mutex<Option<SourceSnapshotData>>>,
+    },
+    /// Session source (`worker`, `issue`, `datasource`): implements the
+    /// neutral `spur_mentions::MentionSource` directly, so the engine
+    /// builds it without a wrapper. Each build refreshes the source's
+    /// sidecar (+ adapter-owned extras); the facade adopts the engine's
+    /// snapshot by rejoining it with that sidecar.
+    Session {
+        source: Arc<Mutex<Box<dyn SessionMentionSource>>>,
+    },
 }
 
 impl MentionSourceSlot {
@@ -84,35 +108,110 @@ impl MentionSourceSlot {
         let name = source.name();
         Self {
             name,
-            source: Arc::new(Mutex::new(source)),
-            built: Arc::new(Mutex::new(None)),
+            kind: SourceSlotKind::Tui {
+                source: Arc::new(Mutex::new(source)),
+                built: Arc::new(Mutex::new(None)),
+            },
         }
     }
 
-    /// The engine-facing registration for this slot: a neutral source
-    /// whose builds run the TUI source, park the TUI-side snapshot data,
-    /// and return the neutral entry view for the engine's cache.
-    fn engine_adapter(&self) -> EngineSourceAdapter {
-        EngineSourceAdapter {
-            name: self.name,
-            source: Arc::clone(&self.source),
-            built: Arc::clone(&self.built),
+    fn session(source: Box<dyn SessionMentionSource>) -> Self {
+        let name = source.slot_name();
+        Self {
+            name,
+            kind: SourceSlotKind::Session {
+                source: Arc::new(Mutex::new(source)),
+            },
+        }
+    }
+
+    /// The engine-facing registration for this slot.
+    fn engine_adapter(&self) -> Box<dyn NeutralMentionSource> {
+        match &self.kind {
+            SourceSlotKind::Tui { source, built } => Box::new(TuiEngineSourceAdapter {
+                name: self.name,
+                source: Arc::clone(source),
+                built: Arc::clone(built),
+            }),
+            SourceSlotKind::Session { source } => Box::new(SessionEngineSourceAdapter {
+                name: self.name,
+                source: Arc::clone(source),
+            }),
+        }
+    }
+
+    /// Facade-side materialization of a snapshot the engine just built
+    /// through this slot. TUI-flavor slots read the data their adapter
+    /// parked; session-flavor slots rejoin the neutral entries with the
+    /// sidecar their source retained and collect the adapter-owned extras.
+    fn adopt_built(&self, snapshot: &SourceSnapshot) -> Option<SourceSnapshotData> {
+        match &self.kind {
+            SourceSlotKind::Tui { built, .. } => built
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
+            SourceSlotKind::Session { source } => {
+                let guard = source.lock().unwrap_or_else(|error| error.into_inner());
+                let entries = Arc::new(super::sidecar::rejoin_snapshot(
+                    &snapshot.entries,
+                    guard.sidecar(),
+                ));
+                let datasource_hints = guard.datasource_hints().cloned().unwrap_or_default();
+                Some(SourceSnapshotData {
+                    entries,
+                    code_payloads: HashMap::new(),
+                    code_index: None,
+                    datasource_hints,
+                })
+            }
+        }
+    }
+
+    /// Whether `other` is the same slot instance (name + shared source
+    /// identity) — the staleness check deferred builds apply before
+    /// publishing their results.
+    fn same_identity(&self, other: &Self) -> bool {
+        self.name == other.name
+            && match (&self.kind, &other.kind) {
+                (
+                    SourceSlotKind::Tui { source: left, .. },
+                    SourceSlotKind::Tui { source: right, .. },
+                ) => Arc::ptr_eq(left, right),
+                (
+                    SourceSlotKind::Session { source: left },
+                    SourceSlotKind::Session { source: right },
+                ) => Arc::ptr_eq(left, right),
+                _ => false,
+            }
+    }
+
+    /// Current data-revision token of a session-flavor slot (the value the
+    /// engine folds into its cache key); `None` for TUI-flavor slots.
+    fn session_source_token(&self) -> Option<u64> {
+        match &self.kind {
+            SourceSlotKind::Session { source } => Some(
+                source
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .source_token(),
+            ),
+            SourceSlotKind::Tui { .. } => None,
         }
     }
 }
 
-/// Neutral [`spur_mentions::MentionSource`] view of one facade source
-/// slot. Registered in the registry's [`MentionEngine`] so snapshot
-/// builds, TTL accounting, and cache identity live engine-side; the TUI
-/// rows and extras produced by each build are parked on the shared
-/// `built` cell for the facade to adopt.
-struct EngineSourceAdapter {
+/// Neutral [`spur_mentions::MentionSource`] view of one TUI-flavor source
+/// slot (file / code graph). Registered in the registry's
+/// [`MentionEngine`] so snapshot builds, TTL accounting, and cache
+/// identity live engine-side; the TUI rows and extras produced by each
+/// build are parked on the shared `built` cell for the facade to adopt.
+struct TuiEngineSourceAdapter {
     name: &'static str,
     source: Arc<Mutex<Box<dyn MentionSource>>>,
     built: Arc<Mutex<Option<SourceSnapshotData>>>,
 }
 
-impl NeutralMentionSource for EngineSourceAdapter {
+impl NeutralMentionSource for TuiEngineSourceAdapter {
     fn key(&self) -> &str {
         self.name
     }
@@ -126,6 +225,39 @@ impl NeutralMentionSource for EngineSourceAdapter {
         let snapshot = SourceSnapshot::new(neutral_entries_of(&data.entries), 0);
         *self.built.lock().unwrap_or_else(|error| error.into_inner()) = Some(data);
         Ok(snapshot)
+    }
+}
+
+/// Neutral engine view of one session-flavor slot (worker / issue /
+/// datasource). The source itself implements the neutral trait; this shim
+/// only shares it with the engine (and forwards the data-revision token
+/// so snapshot swaps invalidate cache identity immediately).
+struct SessionEngineSourceAdapter {
+    name: &'static str,
+    source: Arc<Mutex<Box<dyn SessionMentionSource>>>,
+}
+
+impl NeutralMentionSource for SessionEngineSourceAdapter {
+    fn key(&self) -> &str {
+        self.name
+    }
+
+    fn source_token(&self) -> u64 {
+        self.source
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .source_token()
+    }
+
+    fn build(
+        &mut self,
+        root: &Path,
+        context: &SourceContext,
+    ) -> Result<SourceSnapshot, SourceBuildError> {
+        self.source
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .build(root, context)
     }
 }
 
@@ -290,7 +422,7 @@ impl MentionRegistry {
     fn with_source_slots(slots: Vec<MentionSourceSlot>) -> Self {
         let mut engine = MentionEngine::new(Arc::new(SystemClock));
         for slot in &slots {
-            engine.register_source(Box::new(slot.engine_adapter()), false);
+            engine.register_source(slot.engine_adapter(), false);
         }
         Self {
             sources: slots,
@@ -324,7 +456,7 @@ impl MentionRegistry {
     pub fn for_brain_session(workers: Vec<super::WorkerMentionDescriptor>) -> Self {
         Self::with_source_slots(vec![
             MentionSourceSlot::new(Box::new(FileMentionSource::new())),
-            MentionSourceSlot::new(Box::new(WorkerMentionSource::new(workers))),
+            MentionSourceSlot::session(Box::new(WorkerMentionSource::new(workers))),
         ])
     }
 
@@ -399,8 +531,7 @@ impl MentionRegistry {
         });
         // One engine registration per source key: the new adapter replaces
         // the previous registration (its generation counter carries over).
-        self.engine
-            .register_source(Box::new(source.engine_adapter()), false);
+        self.engine.register_source(source.engine_adapter(), false);
         if let Some(index) = self
             .sources
             .iter()
@@ -572,28 +703,41 @@ impl MentionRegistry {
     pub fn set_issue_snapshot(&mut self, issues: Vec<IssueMentionDescriptor>) {
         // Ordering invariant: callers must pass issues newest-first.
         // Empty-query `@` preserves that order within the ISSUE_CAP slice.
-        self.replace_session_source("issue", Box::new(IssueMentionSource::new(issues)));
+        self.update_session_source("issue", |token| {
+            Box::new(IssueMentionSource::with_token(issues, token))
+        });
     }
 
     pub fn set_worker_snapshot_in_place(&mut self, workers: Vec<WorkerMentionDescriptor>) {
-        self.replace_session_source("worker", Box::new(WorkerMentionSource::new(workers)));
+        self.update_session_source("worker", |token| {
+            Box::new(WorkerMentionSource::with_token(workers, token))
+        });
     }
 
     pub fn set_datasource_snapshot(&mut self, entries: Vec<DatasourceEntry>) {
-        self.replace_session_source(
-            "datasource",
-            Box::new(DatasourceMentionSource::new(entries)),
-        );
+        self.update_session_source("datasource", |token| {
+            Box::new(DatasourceMentionSource::with_token(entries, token))
+        });
     }
 
-    /// Swap (or append) one snapshot-backed source: replaces the slot,
-    /// re-registers its engine adapter under the same key, and drops both
-    /// the engine-side snapshots and the facade materialization so the
-    /// next query rebuilds from the fresh data.
-    fn replace_session_source(&mut self, name: &'static str, source: Box<dyn MentionSource>) {
-        let slot = MentionSourceSlot::new(source);
-        self.engine
-            .register_source(Box::new(slot.engine_adapter()), false);
+    /// Swap (or append) one session source. The replacement source is
+    /// stamped with `previous token + 1`, so the engine cache key changes
+    /// on every swap (data-driven invalidation); both the engine-side
+    /// snapshots and the facade materialization are dropped so the next
+    /// query rebuilds from the fresh data.
+    fn update_session_source(
+        &mut self,
+        name: &'static str,
+        make_source: impl FnOnce(u64) -> Box<dyn SessionMentionSource>,
+    ) {
+        let next_token = self
+            .sources
+            .iter()
+            .find(|slot| slot.name == name)
+            .and_then(|slot| slot.session_source_token())
+            .map_or(0, |token| token.wrapping_add(1));
+        let slot = MentionSourceSlot::session(make_source(next_token));
+        self.engine.register_source(slot.engine_adapter(), false);
         if let Some(existing) = self.sources.iter_mut().find(|slot| slot.name == name) {
             *existing = slot;
         } else {
@@ -684,18 +828,15 @@ impl MentionRegistry {
             .partition(|source| defer_code_graph_build && source.name == "code_graph");
         for source in inline_sources {
             match self.engine.resolve_snapshot(cwd, source.name, &options) {
-                // The engine built through this slot's adapter: adopt the
-                // parked TUI-side rows and extras. Fresh hits, retained
+                // The engine built through this slot: adopt the facade-side
+                // materialization (TUI-flavor slots read the adapter-parked
+                // rows; session-flavor slots rejoin the neutral entries with
+                // the sidecar their source wrote). Fresh hits, retained
                 // snapshots after a failed optional rebuild, and hard
                 // failures all keep whatever the facade already holds —
                 // the same degradation policy as the fused query path.
-                SnapshotResolution::Built(_) => {
-                    let parked = source
-                        .built
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .take();
-                    if let Some(data) = parked {
+                SnapshotResolution::Built(snapshot) => {
+                    if let Some(data) = source.adopt_built(&snapshot) {
                         self.snapshots.insert(source.name, data);
                     }
                 }
@@ -764,10 +905,10 @@ impl MentionRegistry {
         let options = engine_query_options();
         let MentionCacheBuildResult { cwd, updates } = result;
         for update in updates {
-            let is_current = self.sources.iter().any(|source| {
-                source.name == update.source.name
-                    && Arc::ptr_eq(&source.source, &update.source.source)
-            });
+            let is_current = self
+                .sources
+                .iter()
+                .any(|source| source.same_identity(&update.source));
             if !is_current {
                 continue;
             }
@@ -809,6 +950,17 @@ impl MentionRegistry {
     #[cfg(test)]
     pub(crate) fn set_agent_model_catalog_path_for_test(&mut self, path: PathBuf) {
         self.agent_model_catalog_path = Some(path);
+    }
+
+    /// Engine cache token currently exposed by a session source (`None`
+    /// when the named source is absent or not session-backed). Test
+    /// observation for the snapshot-replacement token pins.
+    #[cfg(test)]
+    pub(crate) fn session_source_token(&self, name: &str) -> Option<u64> {
+        self.sources
+            .iter()
+            .find(|slot| slot.name == name)
+            .and_then(|slot| slot.session_source_token())
     }
 
     fn compose_worker_mention(
@@ -1520,9 +1672,15 @@ pub(crate) fn build_mention_caches(work: MentionCacheBuildWork) -> MentionCacheB
     let updates = work
         .sources
         .into_iter()
-        .filter_map(|source| {
-            let data = build_source_snapshot_data(&source.source, &work.cwd).ok()?;
-            Some(MentionCacheBuildUpdate { source, data })
+        .filter_map(|slot| {
+            // Deferred builds are a code-graph concern (the only source
+            // whose traversal is too heavy for the UI thread); session
+            // sources never defer and are skipped defensively.
+            let SourceSlotKind::Tui { source, .. } = &slot.kind else {
+                return None;
+            };
+            let data = build_source_snapshot_data(source, &work.cwd).ok()?;
+            Some(MentionCacheBuildUpdate { source: slot, data })
         })
         .collect();
 
@@ -2362,11 +2520,12 @@ mod tests {
 
     #[test]
     fn query_matches_issue_search_text_not_just_display() {
-        let mut registry = test_registry(vec![Box::new(IssueMentionSource::new(vec![issue(
-            "bd-1",
-            "Picker rows",
-            Some("alice"),
-        )]))]);
+        let mut registry =
+            test_session_registry(vec![Box::new(IssueMentionSource::new(vec![issue(
+                "bd-1",
+                "Picker rows",
+                Some("alice"),
+            )]))]);
 
         let results = registry.query(CompletionScope::PreSession, Path::new("."), "alice", 10);
 
@@ -3159,12 +3318,70 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_replacement_changes_the_engine_source_token() {
+        // sud-m3 RED-first pin: worker/issue/datasource sources implement the
+        // neutral `spur_mentions::MentionSource` directly, and their
+        // data-revision token must change whenever the snapshot is replaced
+        // so the engine cache key (root + key + profile + token) invalidates
+        // immediately instead of waiting out the TTL.
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        let before = registry
+            .session_source_token("worker")
+            .expect("worker session source registered");
+        registry.set_worker_snapshot_in_place(vec![worker("gemini", AgentKind::Gemini)]);
+        let after = registry
+            .session_source_token("worker")
+            .expect("worker session source still registered");
+        assert_ne!(
+            before, after,
+            "replacing a snapshot must change the engine cache token"
+        );
+        // Monotonic across repeated swaps: no aliasing back to an old token.
+        registry.set_worker_snapshot_in_place(vec![worker("codex", AgentKind::CodexAcp)]);
+        let again = registry
+            .session_source_token("worker")
+            .expect("worker session source registered");
+        assert_ne!(after, again);
+    }
+
+    #[test]
+    fn issue_and_datasource_snapshot_replacements_change_their_source_tokens() {
+        let mut registry = MentionRegistry::for_brain_session(Vec::new());
+        registry.set_issue_snapshot(vec![issue("bd-1", "Old title", None)]);
+        let issue_before = registry
+            .session_source_token("issue")
+            .expect("issue session source registered");
+        registry.set_datasource_snapshot(vec![]);
+        let datasource_before = registry
+            .session_source_token("datasource")
+            .expect("datasource session source registered");
+
+        registry.set_issue_snapshot(vec![issue("bd-2", "New title", None)]);
+        registry.set_datasource_snapshot(vec![]);
+
+        assert_ne!(
+            issue_before,
+            registry
+                .session_source_token("issue")
+                .expect("issue session source registered")
+        );
+        assert_ne!(
+            datasource_before,
+            registry
+                .session_source_token("datasource")
+                .expect("datasource session source registered")
+        );
+    }
+
+    #[test]
     fn set_issue_snapshot_clears_cache_for_next_query() {
-        let mut registry = test_registry(vec![Box::new(IssueMentionSource::new(vec![issue(
-            "bd-1",
-            "Old title",
-            None,
-        )]))]);
+        let mut registry =
+            test_session_registry(vec![Box::new(IssueMentionSource::new(vec![issue(
+                "bd-1",
+                "Old title",
+                None,
+            )]))]);
 
         let first = registry.query(CompletionScope::PreSession, Path::new("."), "old", 10);
         assert_eq!(first[0].display, "bd-1 Old title");
@@ -3181,17 +3398,17 @@ mod tests {
     #[test]
     fn set_issue_snapshot_does_not_invalidate_file_cache() {
         let file_build_count = Arc::new(AtomicUsize::new(0));
-        let mut registry = test_registry(vec![
-            Box::new(CountingSource {
+        let mut registry = test_slots(vec![
+            MentionSourceSlot::new(Box::new(CountingSource {
                 name: "file",
                 entries: vec![mention(MentionKind::File, 1, "src/main.rs".into())],
                 build_count: Arc::clone(&file_build_count),
-            }),
-            Box::new(IssueMentionSource::new(vec![issue(
+            })),
+            MentionSourceSlot::session(Box::new(IssueMentionSource::new(vec![issue(
                 "bd-1",
                 "Old title",
                 None,
-            )])),
+            )]))),
         ]);
 
         let _ = registry.query(CompletionScope::PreSession, Path::new("."), "", 16);
@@ -3208,24 +3425,26 @@ mod tests {
         let file_build_count = Arc::new(AtomicUsize::new(0));
         let code_build_count = Arc::new(AtomicUsize::new(0));
         let session_id = SessionId("session-1".to_string());
-        let mut registry = test_registry(vec![
-            Box::new(CountingSource {
+        let mut registry = test_slots(vec![
+            MentionSourceSlot::new(Box::new(CountingSource {
                 name: "file",
                 entries: vec![mention(MentionKind::File, 1, "src/lib.rs".into())],
                 build_count: Arc::clone(&file_build_count),
-            }),
-            Box::new(CountingSource {
+            })),
+            MentionSourceSlot::new(Box::new(CountingSource {
                 name: "code",
                 entries: vec![mention(MentionKind::CodeFile, 2, "src/code.rs".into())],
                 build_count: Arc::clone(&code_build_count),
-            }),
-            Box::new(WorkerMentionSource::new(vec![WorkerMentionDescriptor {
-                name: "alpha".into(),
-                kind: AgentKind::Generic,
-                cli_identity: "alpha".into(),
-                description: None,
-                tier: None,
-            }])),
+            })),
+            MentionSourceSlot::session(Box::new(WorkerMentionSource::new(vec![
+                WorkerMentionDescriptor {
+                    name: "alpha".into(),
+                    kind: AgentKind::Generic,
+                    cli_identity: "alpha".into(),
+                    description: None,
+                    tier: None,
+                },
+            ]))),
         ]);
 
         let _ = registry.query(CompletionScope::PreSession, Path::new("."), "", 16);
@@ -3242,7 +3461,7 @@ mod tests {
 
     #[test]
     fn query_uses_smart_case_matching() {
-        let mut registry = test_registry(vec![Box::new(IssueMentionSource::new(vec![
+        let mut registry = test_session_registry(vec![Box::new(IssueMentionSource::new(vec![
             issue("bd-1", "deploy prod", None),
             issue("bd-2", "Deploy Prod", None),
         ]))]);
@@ -3446,6 +3665,19 @@ mod tests {
         )
     }
 
+    fn test_session_registry(sources: Vec<Box<dyn SessionMentionSource>>) -> MentionRegistry {
+        MentionRegistry::with_source_slots(
+            sources
+                .into_iter()
+                .map(MentionSourceSlot::session)
+                .collect(),
+        )
+    }
+
+    fn test_slots(slots: Vec<MentionSourceSlot>) -> MentionRegistry {
+        MentionRegistry::with_source_slots(slots)
+    }
+
     #[test]
     #[ignore = "manual large-symbol performance benchmark"]
     fn benchmark_large_symbol_query_core() {
@@ -3638,17 +3870,17 @@ mod tests {
             .map(|i| mention(MentionKind::CodeSymbol, 200 + i, format!("symbol_{i}")))
             .collect::<Vec<_>>();
 
-        let mut registry = test_registry(vec![
-            Box::new(WorkerMentionSource::new(workers)),
-            Box::new(StaticSource {
+        let mut registry = test_slots(vec![
+            MentionSourceSlot::session(Box::new(WorkerMentionSource::new(workers))),
+            MentionSourceSlot::new(Box::new(StaticSource {
                 name: "file",
                 entries: files,
-            }),
-            Box::new(IssueMentionSource::new(issues)),
-            Box::new(StaticSource {
+            })),
+            MentionSourceSlot::session(Box::new(IssueMentionSource::new(issues))),
+            MentionSourceSlot::new(Box::new(StaticSource {
                 name: "code",
                 entries: code_files.into_iter().chain(code_symbols).collect(),
-            }),
+            })),
         ]);
 
         let results = registry.query(CompletionScope::PreSession, Path::new("."), "", 128);
@@ -3724,23 +3956,27 @@ mod tests {
 
     #[test]
     fn empty_query_emits_section_headers_in_order() {
-        let mut registry = test_registry(vec![
-            Box::new(WorkerMentionSource::new(vec![WorkerMentionDescriptor {
-                name: "alpha".into(),
-                kind: AgentKind::Generic,
-                cli_identity: "alpha".into(),
-                description: None,
-                tier: None,
-            }])),
-            Box::new(StaticSource {
+        let mut registry = test_slots(vec![
+            MentionSourceSlot::session(Box::new(WorkerMentionSource::new(vec![
+                WorkerMentionDescriptor {
+                    name: "alpha".into(),
+                    kind: AgentKind::Generic,
+                    cli_identity: "alpha".into(),
+                    description: None,
+                    tier: None,
+                },
+            ]))),
+            MentionSourceSlot::new(Box::new(StaticSource {
                 name: "file",
                 entries: vec![mention(MentionKind::File, 1, "src/main.rs".into())],
-            }),
-            Box::new(IssueMentionSource::new(vec![issue("bd-1", "Issue", None)])),
-            Box::new(StaticSource {
+            })),
+            MentionSourceSlot::session(Box::new(IssueMentionSource::new(vec![issue(
+                "bd-1", "Issue", None,
+            )]))),
+            MentionSourceSlot::new(Box::new(StaticSource {
                 name: "code",
                 entries: vec![mention(MentionKind::CodeFile, 2, "src/lib.rs".into())],
-            }),
+            })),
         ]);
 
         let results = registry.query(CompletionScope::PreSession, Path::new("."), "", 128);
@@ -3750,15 +3986,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(headers, vec!["Workers", "Files", "Issues", "Code"]);
 
-        let mut workers_only = test_registry(vec![Box::new(WorkerMentionSource::new(vec![
-            WorkerMentionDescriptor {
-                name: "alpha".into(),
-                kind: AgentKind::Generic,
-                cli_identity: "alpha".into(),
-                description: None,
-                tier: None,
-            },
-        ]))]);
+        let mut workers_only =
+            test_session_registry(vec![Box::new(WorkerMentionSource::new(vec![
+                WorkerMentionDescriptor {
+                    name: "alpha".into(),
+                    kind: AgentKind::Generic,
+                    cli_identity: "alpha".into(),
+                    description: None,
+                    tier: None,
+                },
+            ]))]);
         let workers_only_results =
             workers_only.query(CompletionScope::PreSession, Path::new("."), "", 128);
         let workers_only_headers = workers_only_results
@@ -3953,7 +4190,7 @@ mod tests {
 
     #[test]
     fn empty_query_keeps_most_recent_issues_first() {
-        let mut registry = test_registry(vec![Box::new(IssueMentionSource::new(vec![
+        let mut registry = test_session_registry(vec![Box::new(IssueMentionSource::new(vec![
             issue("bd-5", "Issue 5", None),
             issue("bd-4", "Issue 4", None),
             issue("bd-3", "Issue 3", None),

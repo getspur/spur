@@ -427,6 +427,12 @@ impl MentionQueryWorker {
 /// QuerySource backed by a shared `MentionRegistry` handle. Each `refresh`
 /// call re-queries the registry with the current query, so the source
 /// sees fresh filesystem cache contents. Cheap handle clones; no moves.
+///
+/// sud-m3 invariant: this scheduling layer stays in the TUI (decoupling
+/// spec §4.4) and drives every mention query *only through the facade*
+/// (`MentionRegistry::{prepare_query_work_nonblocking, run_query_work,
+/// apply_cache_build}` and its registry-owned free functions) — never
+/// through a source or the engine directly.
 pub struct MentionQuerySource {
     registry: Rc<RefCell<crate::mentions::MentionRegistry>>,
     scope: MentionSourceScope,

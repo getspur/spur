@@ -15,8 +15,9 @@ pub struct CodeMentionCandidate {
     pub(crate) enclosing_scope: Option<Arc<str>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum MentionKind {
+    #[default]
     File,
     Directory,
     CodeFile,

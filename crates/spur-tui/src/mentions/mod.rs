@@ -5,6 +5,7 @@ pub mod file_source;
 pub mod issue_search;
 pub mod issue_source;
 pub mod registry;
+pub(crate) mod session;
 pub mod sidecar;
 pub mod worker_source;
 
