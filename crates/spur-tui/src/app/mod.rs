@@ -383,7 +383,10 @@ pub struct App {
     brain_status: BrainStatus,
     brain_name: Option<String>,
     pending_first_user_message: Option<String>,
-    pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
+    pending_permission: Option<(
+        spur_acp::types::PermissionRequest,
+        Option<std::time::Instant>,
+    )>,
     notebook_socket_nonce: Option<String>,
     /// Event-sourced projection of brain → executor lineage.
     pub(super) lineage: ExecutorLineage,
@@ -516,7 +519,7 @@ impl App {
         #[cfg(feature = "analytics")]
         self.drain_insights_init();
 
-        if let Some((_, deadline)) = &self.pending_permission {
+        if let Some((_, Some(deadline))) = &self.pending_permission {
             if now >= *deadline {
                 self.pending_permission.take(); // drops reply_tx → auto-deny
                 self.clear_pending_permission_trace();

@@ -1,6 +1,14 @@
 use super::*;
 use crate::action::PermissionChoice;
 
+/// Wall-clock cap on an unanswered interactive permission prompt.
+///
+/// `None` waits for the user's reply (fail-closed paths — channel drop,
+/// session exit — still deny). A fixed cap silently denies users who step
+/// away from the terminal mid-prompt.
+const PENDING_PERMISSION_DEADLINE: Option<std::time::Duration> =
+    Some(std::time::Duration::from_secs(30));
+
 impl App {
     pub(super) fn process_permission(&mut self, choice: PermissionChoice) -> Option<Action> {
         if let Some((perm, deadline)) = self.pending_permission.take() {
@@ -43,7 +51,7 @@ impl App {
             detail.push_permission_with_details(&title, &details, 30, option_count);
         }
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = PENDING_PERMISSION_DEADLINE.map(|limit| std::time::Instant::now() + limit);
         self.pending_permission = Some((request, deadline));
         self.dirty = true;
     }
@@ -108,6 +116,16 @@ fn permission_presentation(args: &spur_acp::RequestPermissionRequest) -> (String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_permission_deadline_is_unbounded() {
+        // The prompt must wait for the user's reply; a fixed cap silently
+        // denies users who step away from the terminal mid-prompt.
+        assert!(
+            PENDING_PERMISSION_DEADLINE.is_none(),
+            "interactive permission prompts must wait for the user's reply"
+        );
+    }
     use spur_acp::{PermissionOption, PermissionOptionId, PermissionOptionKind};
 
     #[test]
