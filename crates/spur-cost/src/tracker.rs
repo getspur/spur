@@ -12,6 +12,19 @@ use crate::pricing::TokenUsage;
 use crate::reporter::Reporter;
 use crate::reports::{DailyReport, LiveReport, MonthlyReport, SessionReport, WeeklyReport};
 
+/// Parameters for [`CostTracker::end_session_with_tokens`].
+///
+/// Groups the per-end fields so the session-end call stays within clippy's
+/// arity budget without changing any recorded value.
+pub struct TokenSessionEnd<'a> {
+    pub status: &'a str,
+    pub duration: Duration,
+    pub cost_tier: CostTier,
+    pub usage: TokenUsage,
+    pub model: Option<&'a str>,
+    pub num_turns: Option<u64>,
+}
+
 /// High-level cost-tracking API used by the orchestrator.
 ///
 /// Wraps a SQLite connection and exposes session/delegation lifecycle
@@ -83,16 +96,15 @@ impl CostTracker {
     ///
     /// Cost is tokens × published rates when `model` is in the registry.
     /// Otherwise NULL (not a duration stand-in).
-    pub fn end_session_with_tokens(
-        &self,
-        id: &SessionId,
-        status: &str,
-        duration: Duration,
-        cost_tier: CostTier,
-        usage: TokenUsage,
-        model: Option<&str>,
-        num_turns: Option<u64>,
-    ) -> Result<()> {
+    pub fn end_session_with_tokens(&self, id: &SessionId, end: TokenSessionEnd<'_>) -> Result<()> {
+        let TokenSessionEnd {
+            status,
+            duration,
+            cost_tier,
+            usage,
+            model,
+            num_turns,
+        } = end;
         let cost = estimate_cost_from_tokens(cost_tier, duration, usage, model);
         db::update_session_end_with_tokens(
             &self.conn,

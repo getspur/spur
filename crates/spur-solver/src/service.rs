@@ -1572,9 +1572,7 @@ fn parse_unsat_output(
 }
 
 fn require_status_only(forms: &[SExpression], status: &str) -> Result<(), ParseError> {
-    if forms.len() == 1 {
-        Ok(())
-    } else {
+    if forms.len() > 1 {
         // Allow ignored core-unavailable errors when cores were requested on a sat path.
         for form in forms.iter().skip(1) {
             if form.is_unsat_core_unavailable_error() {
@@ -1584,8 +1582,8 @@ fn require_status_only(forms: &[SExpression], status: &str) -> Result<(), ParseE
                 "unexpected output after `{status}` status"
             )));
         }
-        Ok(())
     }
+    Ok(())
 }
 
 fn parse_sat_output(
@@ -1686,11 +1684,7 @@ fn parse_model_value(
         Variable::Int { name } | Variable::IntRange { name, .. } => parse_integer(expression)
             .map(ModelValue::Int)
             .map_err(|error| error.with_context(format!("integer variable `{name}`"))),
-        Variable::Real { name } => {
-            let _ = name;
-            Ok(ModelValue::Enum(render_s_expression(expression)))
-        }
-        Variable::BitVec { name, .. } => {
+        Variable::Real { name } | Variable::BitVec { name, .. } => {
             let _ = name;
             Ok(ModelValue::Enum(render_s_expression(expression)))
         }

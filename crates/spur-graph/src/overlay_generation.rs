@@ -131,9 +131,13 @@ impl VisibleFileSlot {
     }
 }
 
+/// One chunk of the persistent map: an optional owned tree of `V` keyed by
+/// the first byte of the key.
+type PersistentMapChunk<V> = Option<Arc<BTreeMap<String, V>>>;
+
 #[derive(Debug, Clone)]
 struct PersistentMap<V> {
-    chunks: Arc<[Option<Arc<BTreeMap<String, V>>>; 256]>,
+    chunks: Arc<[PersistentMapChunk<V>; 256]>,
     len: usize,
 }
 

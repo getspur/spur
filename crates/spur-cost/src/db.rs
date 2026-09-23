@@ -601,7 +601,7 @@ pub fn query_cost_by_model(conn: &Connection) -> Result<Vec<ModelCostSummary>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tracker::CostTracker;
+    use crate::tracker::{CostTracker, TokenSessionEnd};
     use spur_acp::{CostTier, SessionId};
     use std::time::Duration;
 
@@ -616,17 +616,19 @@ mod tests {
         tracker
             .end_session_with_tokens(
                 &id,
-                "completed",
-                Duration::from_secs(2),
-                CostTier::Medium,
-                crate::pricing::TokenUsage {
-                    input_tokens: 20_000,
-                    output_tokens: 2_371,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 50,
+                TokenSessionEnd {
+                    status: "completed",
+                    duration: Duration::from_secs(2),
+                    cost_tier: CostTier::Medium,
+                    usage: crate::pricing::TokenUsage {
+                        input_tokens: 20_000,
+                        output_tokens: 2_371,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 50,
+                    },
+                    model: Some("grok-4.6"),
+                    num_turns: Some(1),
                 },
-                Some("grok-4.6"),
-                Some(1),
             )
             .unwrap();
         let row = tracker.session_detail(&id).unwrap().expect("session");

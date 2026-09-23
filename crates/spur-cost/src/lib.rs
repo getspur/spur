@@ -57,4 +57,4 @@ pub use pricing::{
     calculate_cost, calculate_cost_for_model, ModelPricing, PricingRegistry, TieredPricing,
     TokenUsage,
 };
-pub use tracker::CostTracker;
+pub use tracker::{CostTracker, TokenSessionEnd};

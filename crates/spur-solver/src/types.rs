@@ -26,7 +26,7 @@ pub const MAX_OBJECTIVES: usize = 4;
 pub const DEFAULT_MAX_SOLUTIONS: usize = 16;
 /// Maximum number of optimization solutions collected in one typed solve.
 pub const MAX_SOLUTIONS: usize = 64;
-/// Maximum BitVec width accepted by the typed surface.
+/// Maximum `BitVec` width accepted by the typed surface.
 pub const MAX_BITVEC_WIDTH: u32 = 64;
 /// Maximum concurrent incremental sessions per process.
 pub const MAX_SOLVE_SESSIONS: usize = 8;
@@ -1140,13 +1140,13 @@ pub enum ValidationErrorKind {
     InvalidMaxSolutions,
     /// An objective expression is not Int/Real/BitVec.
     ObjectiveNotNumeric,
-    /// BitVec width is zero or exceeds [`MAX_BITVEC_WIDTH`].
+    /// `BitVec` width is zero or exceeds [`MAX_BITVEC_WIDTH`].
     InvalidBitVecWidth,
-    /// BitVec literal value does not fit in its width.
+    /// `BitVec` literal value does not fit in its width.
     BitVecValueTooWide,
     /// Real literal has non-positive denominator.
     InvalidRealLiteral,
-    /// Session op requires a session_id that was missing.
+    /// Session op requires a `session_id` that was missing.
     MissingSessionId,
     /// Session id fails the pinned wire format.
     InvalidSessionId,

@@ -4,10 +4,12 @@
 //! - default-all 9 leaves: `sol_750d8ebbe59e4038` (`pass`)
 //! - `alias_core` without `family_pm`: `sol_e5dd5bb343ac4ba0` (`fail`,
 //!   `configuration.requires_any.violation`)
+//!
 //! SOLVE POST (landed `McpFamily::ALL` len 9):
 //! - default-all: `sol_60f41f6973ca4478` (`pass`)
 //! - solver-only: `sol_c7aceaac714948e1` (`pass`)
 //! - `alias_core` without pm: `sol_ac2be290fc124829` (`fail`)
+//!
 //! Leaf cardinality `maximum` in that encoding is 9.
 
 use std::collections::BTreeSet;

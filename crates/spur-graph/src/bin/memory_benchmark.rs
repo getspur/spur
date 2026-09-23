@@ -2161,9 +2161,7 @@ fn finish_telemetry(
 }
 
 fn record_sum_hardware(manifest: &mut RunManifest, key: &str, value: u128) {
-    let value = hardware_value(manifest, key)
-        .checked_add(value)
-        .unwrap_or(u128::MAX);
+    let value = hardware_value(manifest, key).saturating_add(value);
     manifest.hardware.insert(key.to_owned(), value.to_string());
 }
 

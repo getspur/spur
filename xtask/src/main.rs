@@ -549,7 +549,7 @@ impl DistPlatform {
         }
     }
 
-    /// DuckDB community/core extension CDN platform directory name.
+    /// `DuckDB` community/core extension CDN platform directory name.
     fn duckdb_platform(self) -> &'static str {
         match self {
             Self::LinuxAarch64 => "linux_arm64",
@@ -704,7 +704,7 @@ fn dist_duckdb_extensions_dir_name() -> &'static str {
     "duckdb-extensions"
 }
 
-/// Archive name for the platform-independent DuckDB extension sidecar.
+/// Archive name for the platform-independent `DuckDB` extension sidecar.
 /// GitHub release assets must be files; `gh release create dist/*` cannot
 /// upload the unpacked `duckdb-extensions/` directory.
 fn dist_duckdb_extensions_archive_name(version: &str) -> String {

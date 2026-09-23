@@ -32,6 +32,7 @@ const THREE_PANE_MIN_WIDTH: u16 =
 const TWO_PANE_MIN_WIDTH: u16 = MIN_SECTIONS_WIDTH + GUTTER + MIN_AGENTS_WIDTH;
 const SECTIONS_STACK_HEIGHT: u16 = 6;
 const STATUS_HEIGHT: u16 = 1;
+#[cfg(test)]
 const STATUS_MAX_COLS: usize = 40;
 const STATUS_IDLE: &str = "Tab  j/k  Enter  s  Esc";
 const STATUS_EDITING: &str = "Enter save  Esc cancel";

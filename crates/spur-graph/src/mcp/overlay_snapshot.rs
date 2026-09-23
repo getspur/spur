@@ -799,6 +799,10 @@ fn build_snapshot_once<R: SnapshotRuntime>(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "per-path snapshot probing threads cache, measurements, identity map, and runtime in one call"
+)]
 fn current_worktree_state<R: SnapshotRuntime>(
     worktree: &Path,
     path: &str,

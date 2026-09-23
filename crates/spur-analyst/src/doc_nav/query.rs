@@ -50,7 +50,7 @@ pub(super) fn fts_hits(
     request: &DocNavigateRequest,
 ) -> Result<Vec<DocHit>, McpHandlerError> {
     let query = request.query.as_deref().unwrap_or_default();
-    match conn.prepare(
+    if let Ok(mut stmt) = conn.prepare(
         "SELECT s.stable_symbol_id, s.qualified_name, s.file_path, s.heading_level,
                 s.child_count, s.body_text, s.body_byte_start,
                 fts_main_sections.match_bm25(s.stable_symbol_id, ?1) AS score
@@ -59,36 +59,33 @@ pub(super) fn fts_hits(
          ORDER BY score DESC
          LIMIT ?2",
     ) {
-        Ok(mut stmt) => {
-            let mut rows = stmt
-                .query(duckdb::params![query, request.k as i64])
-                .map_err(|error| {
-                    McpHandlerError::Internal(format!("doc_navigate FTS failed: {error}"))
-                })?;
-            collect_hits(&mut rows, true)
-        }
-        Err(_) => {
-            let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
-            let mut stmt = conn
-                .prepare(
-                    "SELECT stable_symbol_id, qualified_name, file_path, heading_level,
+        let mut rows = stmt
+            .query(duckdb::params![query, request.k as i64])
+            .map_err(|error| {
+                McpHandlerError::Internal(format!("doc_navigate FTS failed: {error}"))
+            })?;
+        collect_hits(&mut rows, true)
+    } else {
+        let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+        let mut stmt = conn
+            .prepare(
+                "SELECT stable_symbol_id, qualified_name, file_path, heading_level,
                             child_count, body_text, body_byte_start, NULL AS score
                      FROM sections
                      WHERE body_text ILIKE ?1
                      LIMIT ?2",
-                )
-                .map_err(|error| {
-                    McpHandlerError::Internal(format!(
-                        "failed to prepare doc_navigate body scan: {error}"
-                    ))
-                })?;
-            let mut rows = stmt
-                .query(duckdb::params![like, request.k as i64])
-                .map_err(|error| {
-                    McpHandlerError::Internal(format!("doc_navigate body scan failed: {error}"))
-                })?;
-            collect_hits(&mut rows, false)
-        }
+            )
+            .map_err(|error| {
+                McpHandlerError::Internal(format!(
+                    "failed to prepare doc_navigate body scan: {error}"
+                ))
+            })?;
+        let mut rows = stmt
+            .query(duckdb::params![like, request.k as i64])
+            .map_err(|error| {
+                McpHandlerError::Internal(format!("doc_navigate body scan failed: {error}"))
+            })?;
+        collect_hits(&mut rows, false)
     }
 }
 

@@ -187,8 +187,11 @@ fn resolve_session_gold(answer_session_ids: &[String], sessions: &[SessionRecord
         .iter()
         .flat_map(|answer_session_id| {
             sessions.iter().filter_map(move |session| {
-                (session.source_id.as_deref() == Some(answer_session_id.as_str()))
-                    .then(|| session.internal_id.clone())
+                if session.source_id.as_deref() == Some(answer_session_id.as_str()) {
+                    Some(session.internal_id.clone())
+                } else {
+                    None
+                }
             })
         })
         .collect()

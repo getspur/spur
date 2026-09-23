@@ -661,7 +661,7 @@ pub(crate) fn mention_name_from_uri(uri: &str) -> String {
         .strip_prefix("file://")
         .or_else(|| uri.split_once("://").map(|(_, rest)| rest))
         .unwrap_or(uri);
-    path.rsplit(|c| c == '/' || c == '\\')
+    path.rsplit(['/', '\\'])
         .find(|seg| !seg.is_empty())
         .unwrap_or(path)
         .to_string()

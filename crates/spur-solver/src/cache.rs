@@ -6,7 +6,6 @@
 
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, VecDeque},
-    hash::{Hash, Hasher},
     sync::Mutex,
 };
 
@@ -49,8 +48,9 @@ impl SolveCache {
         let Ok(mut guard) = self.inner.lock() else {
             return;
         };
-        if guard.entries.contains_key(&key) {
-            guard.entries.insert(key, response);
+        // Refresh an existing entry in place without touching eviction order.
+        if let Some(existing) = guard.entries.get_mut(&key) {
+            *existing = response;
             return;
         }
         while guard.order.len() >= MAX_CACHE_ENTRIES {
@@ -75,8 +75,8 @@ pub fn fingerprint_request<T: Serialize>(request: &T) -> Result<String, String> 
     let stripped = strip_ephemeral_fields(value);
     let canonical = serde_json::to_vec(&stripped).map_err(|error| error.to_string())?;
     let mut hasher = DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    Ok(format!("fp:{:016x}", hasher.finish()))
+    std::hash::Hash::hash(&canonical, &mut hasher);
+    Ok(format!("fp:{:016x}", std::hash::Hasher::finish(&hasher)))
 }
 
 fn strip_ephemeral_fields(mut value: Value) -> Value {

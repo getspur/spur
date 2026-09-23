@@ -734,24 +734,6 @@ mod file_oid_cache {
 
     static FILE_OID_CACHE: OnceLock<Mutex<FileOidCache>> = OnceLock::new();
 
-    pub(super) fn file_oid_match(
-        worktree: &Path,
-        worktree_head_oid: &str,
-        graph_content_hash: &str,
-        rel_path: &str,
-        indexed_oid: &str,
-    ) -> Option<bool> {
-        file_oid_match_inner(
-            worktree,
-            worktree_head_oid,
-            graph_content_hash,
-            rel_path,
-            indexed_oid,
-            None,
-        )
-        .as_bool()
-    }
-
     pub(super) fn file_oid_match_detail(
         worktree: &Path,
         worktree_head_oid: &str,
@@ -843,15 +825,6 @@ mod file_oid_cache {
         .as_bool()
     }
 
-    pub(super) fn aggregate_file_oids_match(
-        worktree: &Path,
-        worktree_head_oid: &str,
-        graph_content_hash: &str,
-        files: &[(&str, &str)],
-    ) -> Option<bool> {
-        aggregate_file_oid_report(worktree, worktree_head_oid, graph_content_hash, files).verdict
-    }
-
     pub(super) fn aggregate_file_oid_report(
         worktree: &Path,
         worktree_head_oid: &str,
@@ -899,16 +872,6 @@ mod file_oid_cache {
         Match,
         Mismatch { current_oid: [u8; 20] },
         Unknown,
-    }
-
-    impl FileOidMatch {
-        fn as_bool(&self) -> Option<bool> {
-            match self {
-                Self::Match => Some(true),
-                Self::Mismatch { .. } => Some(false),
-                Self::Unknown => None,
-            }
-        }
     }
 
     #[derive(Debug)]
@@ -2375,6 +2338,10 @@ async fn code_graph_backend_response_with_refresh(
     Ok(body)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "overlay attempts thread backend, client, worktree, runtime, and handler context in one call"
+)]
 async fn overlay_response_for_backend(
     backend: &CodeSearchBackend,
     request_client: &(dyn GraphQueryClient + Sync),
@@ -2758,6 +2725,7 @@ fn prepare_overlay_for_worktree(
     }))
 }
 
+#[cfg(test)]
 fn overlay_client_for_backend<'a>(
     backend: &'a CodeSearchBackend,
     rebuild_candidate: &RebuildCandidate,

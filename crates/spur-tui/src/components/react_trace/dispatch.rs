@@ -371,7 +371,7 @@ fn protocol_diff_to_display(diff: &spur_acp::Diff) -> adapter::FileChangeDisplay
             "delete" => Some(adapter::FileChangeKind::Deleted),
             _ => None,
         })
-        .unwrap_or_else(|| match diff.old_text.as_deref() {
+        .unwrap_or(match diff.old_text.as_deref() {
             None => adapter::FileChangeKind::Added,
             Some(_) if diff.new_text.is_empty() => adapter::FileChangeKind::Deleted,
             Some(_) => adapter::FileChangeKind::Updated,
