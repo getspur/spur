@@ -14,6 +14,8 @@
 
 pub mod cache;
 pub mod clock;
+#[cfg(feature = "code")]
+pub mod code;
 pub mod engine;
 pub mod entry;
 pub mod error;

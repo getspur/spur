@@ -45,7 +45,7 @@ impl RootRecordingSource {
 }
 
 impl MentionSource for RootRecordingSource {
-    fn key(&self) -> &str {
+    fn key(&self) -> &'static str {
         "recording"
     }
 

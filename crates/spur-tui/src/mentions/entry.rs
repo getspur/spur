@@ -4,16 +4,7 @@ use std::sync::Arc;
 use super::issue_source::IssueMentionDescriptor;
 use spur_acp::AgentKind;
 use spur_graph::CodeMentionPayload;
-
-#[derive(Debug, Clone)]
-pub struct CodeMentionCandidate {
-    pub(crate) stable_symbol_id: Box<str>,
-    pub(crate) entity_name: Box<str>,
-    pub(crate) file_path: Arc<str>,
-    pub(crate) line_range: [usize; 2],
-    pub(crate) symbol_kind: Arc<str>,
-    pub(crate) enclosing_scope: Option<Arc<str>>,
-}
+use spur_mentions::code::source::CodeMentionCandidate;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum MentionKind {

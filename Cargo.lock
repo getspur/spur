@@ -9454,9 +9454,12 @@ dependencies = [
 name = "spur-mentions"
 version = "1.24.0"
 dependencies = [
+ "anyhow",
+ "filetime",
  "ignore",
  "nucleo-matcher",
  "spur-graph",
+ "tempfile",
  "tracing",
  "url",
 ]

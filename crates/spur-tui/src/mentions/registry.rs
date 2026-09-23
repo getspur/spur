@@ -34,9 +34,11 @@ use spur_mentions::{
     SourceContext, SourceSnapshot, SystemClock,
 };
 
-use super::code_graph::source::{entry_for_candidate, CodeGraphMentionSource};
+use super::code_graph::source::{
+    entry_for_candidate, CodeGraphMentionSource, CodeMentionCandidate,
+};
 use super::datasource_source::DatasourceMentionSource;
-use super::entry::{CodeMentionCandidate, MentionEntry, MentionKind, MentionSource};
+use super::entry::{MentionEntry, MentionKind, MentionSource};
 use super::file_source::FileMentionSource;
 use super::issue_source::{IssueMentionDescriptor, IssueMentionSource};
 use super::session::SessionMentionSource;
