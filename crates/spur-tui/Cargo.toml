@@ -43,7 +43,6 @@ tracing = { workspace = true }
 unicode-segmentation = "1"
 unicode-width = "0.1"
 nucleo-matcher = { workspace = true }
-ignore = { workspace = true }
 tui-textarea = "0.7"
 directories = { version = "5", optional = true }
 tempfile = "3"

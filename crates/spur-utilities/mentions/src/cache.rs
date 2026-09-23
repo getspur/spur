@@ -116,6 +116,13 @@ impl SnapshotCache {
             .retain(|key, _| key.canonical_root != canonical_root);
     }
 
+    /// Drop every snapshot for one source key (all roots): source-swap
+    /// invalidation, the per-source counterpart of [`SnapshotCache::invalidate_root`].
+    pub(crate) fn invalidate_source(&mut self, source_key: &str) {
+        self.entries
+            .retain(|key, _| key.source_key.as_ref() != source_key);
+    }
+
     /// Drop every snapshot.
     pub(crate) fn clear(&mut self) {
         self.entries.clear();

@@ -9557,7 +9557,6 @@ dependencies = [
  "divan",
  "filetime",
  "futures 0.3.32",
- "ignore",
  "image 0.25.10",
  "libc",
  "mermaid-rs-renderer",

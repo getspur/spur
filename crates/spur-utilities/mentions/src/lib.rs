@@ -23,7 +23,9 @@ pub mod rank;
 
 pub use cache::CacheKey;
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use engine::{MentionEngine, QueryOptions, QueryResult, DEFAULT_SNAPSHOT_TTL};
+pub use engine::{
+    MentionEngine, QueryOptions, QueryResult, SnapshotResolution, DEFAULT_SNAPSHOT_TTL,
+};
 pub use entry::{
     MentionEntry, MentionId, MentionKind, MentionSource, SourceBuildError, SourceBuildErrorKind,
     SourceContext, SourceSnapshot,

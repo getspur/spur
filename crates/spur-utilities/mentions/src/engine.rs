@@ -32,14 +32,17 @@ use nucleo_matcher::{Config, Matcher};
 use crate::cache::{CacheKey, SnapshotCache};
 use crate::clock::Clock;
 use crate::entry::{
-    MentionEntry, MentionSource, SourceBuildErrorKind, SourceContext, SourceSnapshot,
+    MentionEntry, MentionSource, SourceBuildError, SourceBuildErrorKind, SourceContext,
+    SourceSnapshot,
 };
 use crate::error::{MentionError, QueryDiagnostic, RootError, SourceBuildFailure, TraversalError};
 use crate::profile::FilesystemProfile;
 use crate::rank::{score_all, sort_ranked, RankOptions};
+use std::path::PathBuf;
 
-/// Initial compatibility TTL, matching today's TUI registry
-/// (`GLOBAL_SOURCE_CACHE_TTL`). Cache capacity and eviction are
+/// Initial compatibility TTL, matching the TUI registry snapshot cache
+/// it replaced (600s; the old facade's per-kind TTL constants were both
+/// this value). Cache capacity and eviction are
 /// configuration; benchmarks may justify changing this later.
 pub const DEFAULT_SNAPSHOT_TTL: Duration = Duration::from_secs(600);
 
@@ -83,6 +86,35 @@ pub struct QueryResult {
     pub diagnostics: Vec<QueryDiagnostic>,
 }
 
+/// Outcome of one [`MentionEngine::resolve_snapshot`] call (the per-source
+/// seam frontends with deferred builds compose on; the fused
+/// [`MentionEngine::query`] path never surfaces it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotResolution {
+    /// Fresh cache hit: the snapshot is within TTL under the current
+    /// profile fingerprint and source token.
+    Fresh(Arc<SourceSnapshot>),
+    /// The source was rebuilt and published now.
+    Built(Arc<SourceSnapshot>),
+    /// A rebuild failed; the previously retained snapshot keeps serving
+    /// (even an expired one), exactly like the fused query's optional
+    /// degradation policy.
+    Retained(Arc<SourceSnapshot>),
+    /// The rebuild failed and nothing was retained under this identity.
+    Failed(SourceBuildFailure),
+}
+
+/// Per-slot outcome of the shared resolve loop behind both
+/// [`MentionEngine::query`] and [`MentionEngine::resolve_snapshot`].
+enum SlotOutcome {
+    Fresh(Arc<SourceSnapshot>),
+    Built(Arc<SourceSnapshot>),
+    Failed {
+        key: CacheKey,
+        error: SourceBuildError,
+    },
+}
+
 /// One registered source and its failure policy.
 struct SourceSlot {
     source: Box<dyn MentionSource>,
@@ -121,11 +153,23 @@ impl MentionEngine {
 
     /// Register a source. `required` sources fail the whole query when
     /// their build fails; optional ones degrade to diagnostics.
+    ///
+    /// One source per [`MentionSource::key`]: registering a key again
+    /// replaces the earlier source (its cached snapshots stay until
+    /// invalidated or expired) and keeps the key's generation counter, so
+    /// generations stay monotonic across source swaps.
     pub fn register_source(&mut self, source: Box<dyn MentionSource>, required: bool) {
+        let key = source.key().to_owned();
+        let last_generation = self
+            .sources
+            .iter()
+            .find(|slot| slot.source.key() == key)
+            .map_or(0, |slot| slot.last_generation);
+        self.sources.retain(|slot| slot.source.key() != key);
         self.sources.push(SourceSlot {
             source,
             required,
-            last_generation: 0,
+            last_generation,
         });
     }
 
@@ -151,6 +195,152 @@ impl MentionEngine {
     /// generation counters keep advancing.
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+    }
+
+    /// Drop every cached snapshot for one source key (all roots): the
+    /// per-source counterpart of [`MentionEngine::invalidate_root`] for
+    /// source-swap invalidation. Per-source generation counters keep
+    /// advancing.
+    pub fn invalidate_source(&mut self, source_key: &str) {
+        self.cache.invalidate_source(source_key);
+    }
+
+    /// Fresh-cache lookup for one source without building: `Some` only
+    /// when a snapshot exists under exactly this root/profile/token
+    /// identity and is within TTL.
+    ///
+    /// Cache identity uses the canonical form of `root` when resolvable
+    /// (alternate spellings of one directory share a snapshot) and the path
+    /// as given otherwise. Unlike [`MentionEngine::query`], the root is
+    /// neither validated nor canonicalized for its own sake: frontends
+    /// that derive row data (file URIs, relative displays) from the root
+    /// keep byte-identical output regardless of how they spell the path.
+    pub fn cached_snapshot(
+        &self,
+        root: &Path,
+        source_key: &str,
+        options: &QueryOptions,
+    ) -> Option<Arc<SourceSnapshot>> {
+        let slot = self
+            .sources
+            .iter()
+            .find(|slot| slot.source.key() == source_key)?;
+        let key = CacheKey::new(
+            identity_root(root),
+            slot.source.key(),
+            options.filesystem_profile.fingerprint(),
+            slot.source.source_token(),
+        );
+        self.cache.get_fresh(&key, self.clock.now(), self.ttl)
+    }
+
+    /// Resolve one source's snapshot: fresh cache hit, or build and publish
+    /// now. The per-source seam behind frontends whose query pipelines
+    /// cannot use the fused [`MentionEngine::query`] (deferred off-thread
+    /// builds, frontend-specific ranking over borrowed rows).
+    ///
+    /// Builds receive `root` exactly as passed — never a canonicalized
+    /// substitute — while the cache identity still uses the canonical form
+    /// (see [`MentionEngine::cached_snapshot`]). Required/optional policy is
+    /// the caller's: this seam always degrades on failure
+    /// ([`SnapshotResolution::Retained`] / [`Failed`]); only the fused query
+    /// hard-fails on required sources.
+    pub fn resolve_snapshot(
+        &mut self,
+        root: &Path,
+        source_key: &str,
+        options: &QueryOptions,
+    ) -> SnapshotResolution {
+        let Some(pos) = self.slot_index(source_key) else {
+            return SnapshotResolution::Failed(SourceBuildFailure::new(
+                source_key,
+                "source is not registered with this engine",
+            ));
+        };
+        match self.resolve_slot(pos, root, options) {
+            SlotOutcome::Fresh(snapshot) => SnapshotResolution::Fresh(snapshot),
+            SlotOutcome::Built(snapshot) => SnapshotResolution::Built(snapshot),
+            SlotOutcome::Failed { key, error } => match self.cache.get_any(&key) {
+                Some(retained) => SnapshotResolution::Retained(retained),
+                None => SnapshotResolution::Failed(SourceBuildFailure::new(
+                    key.source_key.into_string(),
+                    error.message,
+                )),
+            },
+        }
+    }
+
+    /// Publish an externally built snapshot under the caller's root/profile
+    /// identity: stamps the source's next generation and stores atomically.
+    /// For deferred builds whose data was produced outside the engine (e.g.
+    /// a frontend worker thread); the fused query never calls it.
+    ///
+    /// Returns `None` when no source is registered under `source_key`.
+    pub fn publish_snapshot(
+        &mut self,
+        root: &Path,
+        source_key: &str,
+        options: &QueryOptions,
+        snapshot: SourceSnapshot,
+    ) -> Option<Arc<SourceSnapshot>> {
+        let pos = self.slot_index(source_key)?;
+        let slot = &mut self.sources[pos];
+        slot.last_generation += 1;
+        let mut snapshot = snapshot;
+        snapshot.generation = slot.last_generation;
+        let key = CacheKey::new(
+            identity_root(root),
+            slot.source.key(),
+            options.filesystem_profile.fingerprint(),
+            slot.source.source_token(),
+        );
+        Some(self.cache.publish(key, snapshot, self.clock.now()))
+    }
+
+    fn slot_index(&self, source_key: &str) -> Option<usize> {
+        self.sources
+            .iter()
+            .position(|slot| slot.source.key() == source_key)
+    }
+
+    /// Shared per-slot resolve loop: fresh-hit lookup, build + publish on
+    /// miss. `root` is passed to the source verbatim; only the cache key
+    /// uses the canonical identity form.
+    fn resolve_slot(&mut self, pos: usize, root: &Path, options: &QueryOptions) -> SlotOutcome {
+        let slot = &mut self.sources[pos];
+        let key = CacheKey::new(
+            identity_root(root),
+            slot.source.key(),
+            options.filesystem_profile.fingerprint(),
+            slot.source.source_token(),
+        );
+        if let Some(snapshot) = self.cache.get_fresh(&key, self.clock.now(), self.ttl) {
+            tracing::debug!(
+                target: SPAN_TARGET,
+                source = key.source_key.as_ref(),
+                cache_hit = true,
+                "mention source snapshot resolved"
+            );
+            return SlotOutcome::Fresh(snapshot);
+        }
+        let context = SourceContext {
+            filesystem_profile: options.filesystem_profile,
+        };
+        match slot.source.build(root, &context) {
+            Ok(mut snapshot) => {
+                slot.last_generation += 1;
+                snapshot.generation = slot.last_generation;
+                tracing::debug!(
+                    target: SPAN_TARGET,
+                    source = key.source_key.as_ref(),
+                    cache_hit = false,
+                    generation = slot.last_generation,
+                    "mention source snapshot built"
+                );
+                SlotOutcome::Built(self.cache.publish(key, snapshot, self.clock.now()))
+            }
+            Err(error) => SlotOutcome::Failed { key, error },
+        }
     }
 
     /// Explicitly invalidate every snapshot for `root` (canonicalized),
@@ -214,52 +404,27 @@ impl MentionEngine {
                 .unwrap_or(-1),
         );
 
-        let context = SourceContext {
-            filesystem_profile: options.filesystem_profile,
-        };
         let mut diagnostics = Vec::new();
         let mut snapshots: Vec<Arc<SourceSnapshot>> = Vec::with_capacity(self.sources.len());
         let mut cache_hits = 0u32;
         let mut cache_misses = 0u32;
 
         let build_started = self.clock.now();
-        for slot in &mut self.sources {
-            let key = CacheKey::new(
-                canonical_root.clone(),
-                slot.source.key(),
-                options.filesystem_profile.fingerprint(),
-                slot.source.source_token(),
-            );
-            if let Some(snapshot) = self.cache.get_fresh(&key, self.clock.now(), self.ttl) {
-                cache_hits += 1;
-                tracing::debug!(
-                    target: SPAN_TARGET,
-                    source = key.source_key.as_ref(),
-                    cache_hit = true,
-                    "mention source snapshot resolved"
-                );
-                snapshots.push(snapshot);
-                continue;
-            }
-            cache_misses += 1;
-            match slot.source.build(&canonical_root, &context) {
-                Ok(mut snapshot) => {
-                    slot.last_generation += 1;
-                    snapshot.generation = slot.last_generation;
-                    tracing::debug!(
-                        target: SPAN_TARGET,
-                        source = key.source_key.as_ref(),
-                        cache_hit = false,
-                        generation = slot.last_generation,
-                        "mention source snapshot built"
-                    );
-                    let published = self.cache.publish(key, snapshot, self.clock.now());
-                    snapshots.push(published);
+        for pos in 0..self.sources.len() {
+            match self.resolve_slot(pos, &canonical_root, options) {
+                SlotOutcome::Fresh(snapshot) => {
+                    cache_hits += 1;
+                    snapshots.push(snapshot);
                 }
-                Err(error) => {
-                    // Failed builds never replace a valid previous
-                    // snapshot: the cache entry is left untouched.
-                    if slot.required {
+                SlotOutcome::Built(snapshot) => {
+                    cache_misses += 1;
+                    snapshots.push(snapshot);
+                }
+                // Failed builds never replace a valid previous snapshot:
+                // the cache entry is left untouched.
+                SlotOutcome::Failed { key, error } => {
+                    cache_misses += 1;
+                    if self.sources[pos].required {
                         return Err(match error.kind {
                             SourceBuildErrorKind::Traversal => MentionError::Traversal(
                                 TraversalError::new(key.source_key.into_string(), error.message),
@@ -329,6 +494,14 @@ impl MentionEngine {
             diagnostics,
         })
     }
+}
+
+/// Cache-identity root: the canonical form when resolvable, the path as
+/// given otherwise. Build inputs stay verbatim (see the per-source seams:
+/// [`MentionEngine::resolve_snapshot`] and friends); only cache identity
+/// is normalized so alternate spellings of one directory share a snapshot.
+fn identity_root(root: &Path) -> PathBuf {
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
 }
 
 /// Redacted root identity for spans: a 64-bit hash of the canonical path.
