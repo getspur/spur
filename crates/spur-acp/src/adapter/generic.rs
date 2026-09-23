@@ -1,6 +1,9 @@
 use serde_json::Value;
 
-use super::{NormalizedTerminalCommand, ObservePayload, ToolFamily, ToolInputDisplay, JSON_INPUT_PREVIEW_LINES};
+use super::{
+    NormalizedTerminalCommand, ObservePayload, ToolFamily, ToolInputDisplay,
+    JSON_INPUT_PREVIEW_LINES,
+};
 
 /// Normalize packed `terminal/create` requests emitted by generic ACP agents.
 ///
