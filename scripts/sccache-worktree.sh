@@ -93,6 +93,11 @@ enable_spur_s3_cache() {
     export SCCACHE_BUCKET="${SCCACHE_BUCKET:-spurlab-591950085580-spur-sccache-apse5}"
     export SCCACHE_REGION="${SCCACHE_REGION:-ap-southeast-5}"
     export AWS_REGION="${AWS_REGION:-$SCCACHE_REGION}"
+    # Keep the multilevel-configured server RESIDENT: sccache's default 10-min
+    # idle timeout lets the S3-configured server die between builds, after which
+    # unconfigured client auto-spawns come up disk-only and S3 stops working
+    # until the next explicit restart (observed 2026-09-23). 0 = never idle.
+    export SCCACHE_IDLE_TIMEOUT="${SCCACHE_IDLE_TIMEOUT:-0}"
     # Credentials resolve through the standard AWS chain (env vars, then the
     # default profile in ~/.aws/credentials, then IMDS).
 
@@ -174,9 +179,19 @@ if use_spur_s3_sccache && [[ -n "$GIT_ROOT" ]]; then
     SPUR_NS="${SPUR_SCCACHE_NAMESPACE:-$(basename "$NS_MAIN_ROOT")}"
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-$SPUR_NS}"
     if [[ -z "${SCCACHE_SERVER_UDS:-}" && -z "${SCCACHE_SERVER_PORT:-}" ]]; then
-        SPUR_SRV_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
-        mkdir -p "$SPUR_SRV_DIR" 2>/dev/null || true
-        export SCCACHE_SERVER_UDS="$SPUR_SRV_DIR/srv-$SPUR_NS.sock"
+        # macOS homebrew clients ALWAYS connect via TCP 127.0.0.1:4226 and
+        # ignore SCCACHE_SERVER_UDS entirely. Exporting the UDS on Darwin only
+        # spawns orphan UDS-bound servers that serve no client (observed
+        # 2026-09-23: zero-counter orphans while builds churned auto-spawned
+        # disk-only TCP servers). Linux (the build VMs) honors the UDS
+        # end-to-end, so keep per-namespace sockets there only. Note: with one
+        # shared TCP server on a mac, SCCACHE_S3_KEY_PREFIX is baked per server
+        # start — the last-started repo's prefix applies until restart.
+        if [[ "$(uname -s 2>/dev/null || echo "")" != "Darwin" ]]; then
+            SPUR_SRV_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
+            mkdir -p "$SPUR_SRV_DIR" 2>/dev/null || true
+            export SCCACHE_SERVER_UDS="$SPUR_SRV_DIR/srv-$SPUR_NS.sock"
+        fi
     fi
 fi
 
