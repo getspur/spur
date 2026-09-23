@@ -15,6 +15,7 @@ graph-embed = ["spur-graph/embed"]
 
 [dependencies]
 spur-acp = { workspace = true }
+spur-commands = { workspace = true }
 spur-context = { workspace = true, optional = true }
 spur-cost = { workspace = true, optional = true }
 spur-core = { workspace = true, default-features = false }
@@ -23,7 +24,6 @@ spur-pm = { workspace = true }
 spur-license = { workspace = true }
 spur-mcp = { workspace = true }
 spur-mentions = { workspace = true, features = ["code"] }
-spur-commands = { workspace = true }
 spur-telemetry = { path = "../../crates/spur-telemetry" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

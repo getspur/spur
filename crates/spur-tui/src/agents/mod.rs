@@ -10,9 +10,12 @@
 //! | json_path_list          | IngestParserKind         | ingest::run_ingest_hook |
 //! | acp_available_command   | ItemSchemaKind           | ingest::run_ingest_hook |
 //! | system_note             | ResponseRenderKind       | session_detail::render_response |
+//!
+//! The pure entry builders moved to `spur-commands` (spec 2026-09-23
+//! §3.3/§5 C2); they are re-exported so `crate::agents::build_entry`
+//! call sites compile unchanged.
 
-pub mod entry_builder;
 pub mod ingest;
 
-pub use entry_builder::{build_entry, build_static_entry};
 pub use ingest::run_ingest_hook;
+pub use spur_commands::entry_builder::{build_entry, build_static_entry};

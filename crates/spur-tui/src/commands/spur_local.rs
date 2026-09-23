@@ -24,8 +24,8 @@
 //! from the popup in favor of spur's uniform retire+respawn handler.
 
 use super::entry::{CommandEntry, CommandSource, Dispatch};
-use super::registry::LocalLayer;
 use crate::action::{Action, IssueAction, ViewId};
+use spur_commands::registry::LocalLayer;
 
 /// Static registry of spur-local slash commands available in every session.
 pub struct SpurLocalSource;

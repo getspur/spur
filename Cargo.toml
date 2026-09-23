@@ -69,8 +69,8 @@ clap = { version = "4", features = ["derive", "env"] }
 # TUI
 ratatui = "0.29"
 crossterm = "0.28"
-pulldown-cmark = { version = "0.13", default-features = false }
 nucleo-matcher = "0.3"
+pulldown-cmark = { version = "0.13", default-features = false }
 ignore = "0.4"
 
 # HTTP
@@ -135,6 +135,7 @@ licenseseat = "=0.5.3"
 
 # Workspace crates
 spur-acp = { path = "crates/spur-acp" }
+spur-commands = { path = "crates/spur-utilities/commands" }
 spur-blob-store = { path = "crates/spur-blob-store" }
 spur-mcp = { path = "crates/spur-mcp" }
 spur-solver = { path = "crates/spur-solver" }
@@ -153,7 +154,6 @@ spur-context-service = { path = "crates/spur-context-service" }
 spur-graph = { path = "crates/spur-graph", default-features = false }
 spur-utilities = { path = "crates/spur-utilities/facade" }
 spur-mentions = { path = "crates/spur-utilities/mentions" }
-spur-commands = { path = "crates/spur-utilities/commands" }
 spur-analyst = { path = "crates/spur-analyst", default-features = false }
 
 

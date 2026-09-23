@@ -1,4 +1,4 @@
-use super::entry::CommandEntry;
+use crate::entry::CommandEntry;
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Matcher,

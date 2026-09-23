@@ -10,9 +10,9 @@
 
 use std::ops::{Deref, DerefMut};
 
-use super::registry;
 use super::spur_local::SpurLocalSource;
 use spur_acp::AgentConfig;
+use spur_commands::registry;
 
 /// Merged slash-command registry for the TUI: the neutral registry plus
 /// the spur-local meta-command layer.

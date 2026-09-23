@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use super::advertised::{normalize_command_name, AdvertisedEntries, PinnedCapabilityRoute};
-use super::entry::{CommandEntry, CommandSource, Dispatch};
+use crate::advertised::{normalize_command_name, AdvertisedEntries, PinnedCapabilityRoute};
+use crate::entry::{CommandEntry, CommandSource, Dispatch};
 use spur_acp::capability_evidence::DispatchRoute;
 use spur_acp::{AgentConfig, SpurAgentCaps};
 
@@ -132,7 +132,9 @@ impl CommandRegistry {
                     .commands
                     .static_commands
                     .iter()
-                    .map(|decl| crate::agents::build_static_entry(&handle, &c.commands, decl))
+                    .map(|decl| {
+                        crate::entry_builder::build_static_entry(&handle, &c.commands, decl)
+                    })
                     .collect();
                 (handle, entries)
             })
@@ -499,7 +501,7 @@ impl CommandRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+    use crate::entry::{CommandEntry, CommandSource, Dispatch};
     use spur_acp::{AgentConfig, CommandsConfig, DispatchKind, StaticCommandDecl};
 
     /// Fixture local layer for the shadowing tests: one exclusive

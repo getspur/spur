@@ -12,14 +12,15 @@ use spur_acp::capability_evidence::{
 };
 use spur_acp::{SessionConfigOption, SpurAgentCaps};
 
-use super::entry::{CommandEntry, CommandSource, Dispatch};
+use crate::entry::{CommandEntry, CommandSource, Dispatch};
 
 pub struct AdvertisedSource;
 
 /// The reduced route and immutable evidence epoch selected for one normalized
-/// slash-command name.
+/// slash-command name. Public because the TUI submit router consults
+/// `pinned_route_for_command` when reducing capability routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PinnedCapabilityRoute {
+pub struct PinnedCapabilityRoute {
     pub evidence_epoch: EvidenceEpochId,
     pub route: DispatchRoute,
 }
@@ -288,7 +289,7 @@ pub(crate) fn normalize_command_name(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub(crate) fn pinned_route_for_command(
+pub fn pinned_route_for_command(
     caps: &SpurAgentCaps,
     command_name: &str,
 ) -> Option<PinnedCapabilityRoute> {
@@ -616,6 +617,7 @@ fn kiro_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::LocalLayer;
     use spur_acp::capability_evidence::{
         CapabilityChoice, CapabilityKey, CapabilityKind, CliIdentity, EvidenceClaim, EvidenceEpoch,
         EvidenceEpochId, EvidenceProvenance, EvidenceRecord, EvidenceSessionScope, ObservationTime,
@@ -809,293 +811,6 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_evidence_keeps_notified_skill_commands_visible() {
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-
-        let identity = evidence_identity();
-        let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
-        let caps = with_incomplete_evidence(with_complete_evidence(
-            SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp),
-            14,
-            vec![capability_evidence(
-                &identity,
-                CapabilityKind::Command,
-                "commands",
-                EvidenceClaim::CandidateObserved,
-                EvidenceProvenance::ObservedNotification,
-                &[
-                    ("$spurpower-solve", "Solve"),
-                    ("custom-skill", "Custom skill"),
-                ],
-            )],
-        ));
-        let mut cfg = spur_acp::AgentConfig::with_defaults("codex");
-        cfg.kind = AgentKind::CodexAcp;
-        let commands = vec![
-            spur_acp::AvailableCommand::new("$spurpower-solve", "Solve"),
-            spur_acp::AvailableCommand::new("custom-skill", "Custom skill"),
-        ];
-
-        // Both startup orderings must preserve a complete command notification.
-        for notification_first in [false, true] {
-            let mut view = crate::views::session_detail::SessionDetailView::new(
-                spur_acp::SessionId("sid".to_owned()),
-                "codex".to_owned(),
-                "brain".to_owned(),
-                std::path::PathBuf::from("/tmp"),
-                std::sync::Arc::new(cfg.clone()),
-                Vec::new(),
-            );
-            if notification_first {
-                view.apply_available_commands(&commands);
-            }
-            view.apply_advertised_commands(Some(&caps), &[]);
-            if !notification_first {
-                view.apply_available_commands(&commands);
-            }
-            let registry = view.command_registry();
-            for command in &commands {
-                let visible = registry.available_commands_for_session(Some(&caps));
-                let entries = visible
-                    .iter()
-                    .filter(|entry| entry.name == command.name)
-                    .collect::<Vec<_>>();
-                assert_eq!(entries.len(), 1, "missing skill {}", command.name);
-                assert!(matches!(entries[0].dispatch, Dispatch::PromptText { .. }));
-                assert_eq!(pinned_route_for_command(&caps, &command.name), None);
-                let input = format!("/{} inspect this", command.name);
-                let SubmitDecision::Send { blocks, .. } =
-                    route_with_caps(&input, &[], &[], registry, false, Some(&caps))
-                else {
-                    panic!("skill must dispatch as a prompt");
-                };
-                assert!(
-                    matches!(blocks.as_slice(), [spur_acp::ContentBlock::Text(text)]
-                    if text.text == input)
-                );
-            }
-            view.apply_available_commands(&[]);
-            assert!(view
-                .command_registry()
-                .resolve("/$spurpower-solve")
-                .is_none());
-        }
-    }
-
-    #[test]
-    fn incomplete_evidence_keeps_standard_config_commands_on_protocol_dispatch() {
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-
-        let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
-        new.config_options = Some(vec![
-            SessionConfigOption::select(
-                SessionConfigId::new("model"),
-                "Model",
-                "test-model",
-                vec![SessionConfigSelectOption::new("test-model", "Test Model")],
-            ),
-            SessionConfigOption::select(
-                SessionConfigId::new("reasoning_effort"),
-                "Reasoning effort",
-                "high",
-                vec![SessionConfigSelectOption::new("high", "High")],
-            ),
-        ]);
-        let identity = evidence_identity();
-        let caps = with_incomplete_evidence(with_complete_evidence(
-            SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp),
-            14,
-            vec![
-                model_evidence(
-                    &identity,
-                    EvidenceClaim::NativeVerified,
-                    EvidenceProvenance::StandardAdvertisement,
-                ),
-                capability_evidence(
-                    &identity,
-                    CapabilityKind::Effort,
-                    "reasoning_effort",
-                    EvidenceClaim::NativeVerified,
-                    EvidenceProvenance::StandardAdvertisement,
-                    &[("high", "High")],
-                ),
-            ],
-        ));
-
-        let entries = AdvertisedSource::entries_from_caps("codex", &caps);
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["model", "effort"]
-        );
-        assert!(entries
-            .iter()
-            .all(|entry| matches!(entry.dispatch, Dispatch::SetSessionConfigOption { .. })));
-        assert_eq!(pinned_route_for_command(&caps, "model"), None);
-        assert_eq!(pinned_route_for_command(&caps, "effort"), None);
-
-        let mut registry = crate::commands::CommandRegistry::new();
-        registry.set_agent_commands(
-            "codex",
-            vec![
-                CommandEntry {
-                    name: "model".to_owned(),
-                    description: "Agent prompt model".to_owned(),
-                    hint: None,
-                    source: CommandSource::Agent {
-                        handle: "codex".to_owned(),
-                    },
-                    dispatch: Dispatch::PromptText {
-                        normalized: "/model".to_owned(),
-                    },
-                    arg_picker_spec: None,
-                },
-                CommandEntry {
-                    name: "effort".to_owned(),
-                    description: "Unverified vendor effort".to_owned(),
-                    hint: None,
-                    source: CommandSource::Agent {
-                        handle: "codex".to_owned(),
-                    },
-                    dispatch: Dispatch::VendorExec {
-                        method: "vendor/set_effort".to_owned(),
-                        command: "effort".to_owned(),
-                        args_template: spur_acp::ArgsTemplateKind::RawRest,
-                    },
-                    arg_picker_spec: None,
-                },
-            ],
-        );
-        registry.set_advertised_commands("codex", entries);
-        assert!(matches!(
-            route_with_caps(
-                "/model test-model",
-                &[],
-                &[],
-                &registry,
-                false,
-                Some(&caps),
-            ),
-            SubmitDecision::SetSessionConfigOption { ref config_id, ref value, .. }
-                if config_id == "model" && value == "test-model"
-        ));
-        assert!(matches!(
-            route_with_caps(
-                "/effort high",
-                &[],
-                &[],
-                &registry,
-                false,
-                Some(&caps),
-            ),
-            SubmitDecision::SetSessionConfigOption { ref config_id, ref value, .. }
-                if config_id == "reasoning_effort" && value == "high"
-        ));
-    }
-
-    #[test]
-    fn incomplete_evidence_does_not_enable_vendor_native_commands() {
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-
-        let mut caps = grok_caps();
-        caps.config_options = vec![SessionConfigOption::select(
-            SessionConfigId::new("model"),
-            "Model",
-            "test-model",
-            vec![SessionConfigSelectOption::new("test-model", "Test Model")],
-        )];
-        let caps = with_incomplete_evidence(caps);
-
-        let entries = AdvertisedSource::entries_from_caps("grok", &caps);
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, "model");
-        assert!(matches!(
-            entries[0].dispatch,
-            Dispatch::SetSessionConfigOption { .. }
-        ));
-        assert_eq!(pinned_route_for_command(&caps, "model"), None);
-        assert_eq!(pinned_route_for_command(&caps, "effort"), None);
-
-        let mut registry = crate::commands::CommandRegistry::new();
-        registry.set_advertised_commands("grok", entries);
-        assert!(matches!(
-            route_with_caps(
-                "/model test-model",
-                &[],
-                &[],
-                &registry,
-                false,
-                Some(&caps),
-            ),
-            SubmitDecision::SetSessionConfigOption { ref config_id, ref value, .. }
-                if config_id == "model" && value == "test-model"
-        ));
-    }
-
-    #[test]
-    fn incomplete_evidence_suppresses_vendor_only_command_collisions() {
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-
-        let caps = with_incomplete_evidence(grok_caps());
-        let entries = AdvertisedSource::entries_from_caps("grok", &caps);
-        assert!(entries.is_empty());
-
-        let mut registry = crate::commands::CommandRegistry::new();
-        registry.set_agent_commands(
-            "grok",
-            vec![
-                CommandEntry {
-                    name: "model".to_owned(),
-                    description: "Unverified vendor model".to_owned(),
-                    hint: None,
-                    source: CommandSource::Agent {
-                        handle: "grok".to_owned(),
-                    },
-                    dispatch: Dispatch::VendorExec {
-                        method: "vendor/set_model".to_owned(),
-                        command: "model".to_owned(),
-                        args_template: spur_acp::ArgsTemplateKind::RawRest,
-                    },
-                    arg_picker_spec: None,
-                },
-                CommandEntry {
-                    name: "effort".to_owned(),
-                    description: "Unverified vendor effort".to_owned(),
-                    hint: None,
-                    source: CommandSource::Agent {
-                        handle: "grok".to_owned(),
-                    },
-                    dispatch: Dispatch::VendorExec {
-                        method: "vendor/set_effort".to_owned(),
-                        command: "effort".to_owned(),
-                        args_template: spur_acp::ArgsTemplateKind::RawRest,
-                    },
-                    arg_picker_spec: None,
-                },
-            ],
-        );
-        registry.set_advertised_commands("grok", entries);
-
-        let visible = registry.available_commands_for_session(Some(&caps));
-        assert!(visible
-            .iter()
-            .all(|entry| entry.name != "model" && entry.name != "effort"));
-        assert!(matches!(
-            route_with_caps("/model grok-4.6", &[], &[], &registry, false, Some(&caps)),
-            SubmitDecision::Send { .. }
-        ));
-        assert!(matches!(
-            route_with_caps("/effort high", &[], &[], &registry, false, Some(&caps)),
-            SubmitDecision::Send { .. }
-        ));
-    }
-
-    #[test]
     fn agent_modes_yield_mode_entry_with_advertised_ids_and_labels() {
         let entries = AdvertisedSource::entries_from_caps("codex", &caps_with_modes());
         let mode = entries
@@ -1120,43 +835,6 @@ mod tests {
                 ("agent-full-access", "Agent (full access)"),
             ]
         );
-    }
-
-    #[test]
-    fn incomplete_evidence_keeps_standard_mode_on_protocol_dispatch() {
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-
-        let caps = with_incomplete_evidence(caps_with_modes());
-        let entries = AdvertisedSource::entries_from_caps("codex", &caps);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, "mode");
-        assert!(matches!(entries[0].dispatch, Dispatch::SetSessionMode));
-        assert_eq!(pinned_route_for_command(&caps, "mode"), None);
-
-        let mut registry = crate::commands::CommandRegistry::new();
-        registry.set_agent_commands(
-            "codex",
-            vec![CommandEntry {
-                name: "mode".to_owned(),
-                description: "Unverified vendor mode".to_owned(),
-                hint: None,
-                source: CommandSource::Agent {
-                    handle: "codex".to_owned(),
-                },
-                dispatch: Dispatch::VendorExec {
-                    method: "vendor/set_mode".to_owned(),
-                    command: "mode".to_owned(),
-                    args_template: spur_acp::ArgsTemplateKind::RawRest,
-                },
-                arg_picker_spec: None,
-            }],
-        );
-        registry.set_advertised_commands("codex", entries);
-
-        assert!(matches!(
-            route_with_caps("/mode agent", &[], &[], &registry, false, Some(&caps)),
-            SubmitDecision::SetSessionMode { ref value } if value == "agent"
-        ));
     }
 
     fn grok_caps() -> SpurAgentCaps {
@@ -1255,7 +933,7 @@ mod tests {
                     == vec!["xhigh", "high", "medium", "low"]
         ));
 
-        let mut registry = crate::commands::CommandRegistry::new();
+        let mut registry = crate::registry::CommandRegistry::new(LocalLayer::empty());
         registry.set_advertised_commands("grok", entries);
         let visible = registry.available_commands_for_session(Some(&caps));
         assert!(visible.iter().any(|entry| entry.name == "model"));
@@ -1346,7 +1024,7 @@ mod tests {
                     == vec!["auto", "claude-sonnet-4.5"]
         ));
 
-        let mut registry = crate::commands::CommandRegistry::new();
+        let mut registry = crate::registry::CommandRegistry::new(LocalLayer::empty());
         registry.set_advertised_commands("kiro", entries);
         let visible = registry.available_commands_for_session(Some(&caps));
         assert!(visible.iter().any(|entry| entry.name == "model"));
@@ -1397,7 +1075,7 @@ mod tests {
                 EvidenceProvenance::VendorAdvertisement,
             )],
         );
-        let mut registry = crate::commands::CommandRegistry::new();
+        let mut registry = crate::registry::CommandRegistry::new(LocalLayer::empty());
         registry.set_agent_commands(
             "kiro",
             vec![CommandEntry {
@@ -1438,7 +1116,7 @@ mod tests {
                 EvidenceProvenance::InconclusiveFailure,
             )],
         );
-        let mut registry = crate::commands::CommandRegistry::new();
+        let mut registry = crate::registry::CommandRegistry::new(LocalLayer::empty());
         registry.set_agent_commands(
             "kiro",
             vec![CommandEntry {

@@ -1,12 +1,14 @@
-pub mod advertised;
-pub mod entry;
-pub mod fuzzy;
-pub mod kiro_skills;
-pub mod registry;
+// Neutral command modules moved to `spur-commands` (spec 2026-09-23
+// §3.3/§5 C2). Module re-exports keep every existing
+// `crate::commands::{advertised,entry,fuzzy,kiro_skills}::…` path
+// compiling; the TUI keeps its meta-command catalog (`spur_local`), the
+// submit router, and the `CommandRegistry` newtype.
 pub mod spur_local;
 pub mod submit_router;
 pub mod tui_registry;
 
-pub use entry::{CommandEntry, CommandSource, Dispatch};
+pub use spur_commands::{advertised, entry, fuzzy, kiro_skills};
+
+pub use spur_commands::entry::{CommandEntry, CommandSource, Dispatch};
 pub use spur_local::{local_dispatch, SpurLocalSource};
 pub use tui_registry::CommandRegistry;
