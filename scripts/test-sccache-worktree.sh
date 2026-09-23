@@ -123,6 +123,28 @@ chain=$(sed -n 's/^chain=//p' "$CAPTURE")
     && pass "SPUR_SCCACHE_S3=0 disables S3 backend exports" \
     || fail "SPUR_SCCACHE_S3=0 still exported bucket='$bucket' chain='$chain'"
 
+# ---- case 6: ambient GCS backend (GCP fallback VM profile.d) defers to it ----
+# On a GCP builder, profile.d already configures disk,gcs via SCCACHE_GCS_BUCKET.
+# The wrapper's S3 default must stand down there instead of exporting S3
+# bucket/region pollution into the gcs chain.
+: > "$CAPTURE"
+( cd "$WT" && SCCACHE_GCS_BUCKET=wiilearn-spur-sccache-asia "$WRAPPER" rustc - --crate-name x ) \
+    >/dev/null 2>&1
+bucket=$(sed -n 's/^bucket=//p' "$CAPTURE")
+chain=$(sed -n 's/^chain=//p' "$CAPTURE")
+[[ -z "$bucket" && -z "$chain" ]] \
+    && pass "ambient SCCACHE_GCS_BUCKET defers to the GCS backend (no S3 exports)" \
+    || fail "ambient GCS config still triggered S3 exports bucket='$bucket' chain='$chain'"
+
+# ---- case 7: explicit SPUR_SCCACHE_S3=1 outranks ambient GCS config ----------
+: > "$CAPTURE"
+( cd "$WT" && SCCACHE_GCS_BUCKET=wiilearn-spur-sccache-asia SPUR_SCCACHE_S3=1 "$WRAPPER" rustc - --crate-name x ) \
+    >/dev/null 2>&1
+bucket=$(sed -n 's/^bucket=//p' "$CAPTURE")
+[[ "$bucket" == "wiilearn-spur-sccache-apse5" ]] \
+    && pass "explicit SPUR_SCCACHE_S3=1 wins over ambient GCS config" \
+    || fail "explicit S3 override broken under ambient GCS: bucket='$bucket'"
+
 echo
 if [[ $FAILURES -eq 0 ]]; then
     echo "OK — all sccache-worktree wrapper assertions passed"
