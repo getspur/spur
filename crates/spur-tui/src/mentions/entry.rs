@@ -26,7 +26,7 @@ pub enum MentionKind {
     Datasource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MentionEntry {
     /// Optional synthetic section header marker (empty-query grouping rows).
     pub section_header: Option<&'static str>,

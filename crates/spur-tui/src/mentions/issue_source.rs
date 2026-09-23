@@ -11,7 +11,7 @@ use super::issue_search::push_issue_search_text;
 
 const DISPLAY_CHAR_LIMIT: usize = 80;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueMentionDescriptor {
     pub id: String,
     pub title: String,

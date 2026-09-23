@@ -9150,6 +9150,7 @@ dependencies = [
  "nucleo-matcher",
  "serde_json",
  "spur-acp",
+ "tempfile",
  "tracing",
 ]
 
