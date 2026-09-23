@@ -92,9 +92,9 @@ if [[ -s "$CAPTURE" ]]; then
         fail "CARGO_TARGET_DIR leaked to sccache: '$target_dir' — every VM compile key diverges per worktree (sccache hashes all CARGO_* vars)"
     fi
 
-    [[ "$bucket" == "wiilearn-spur-sccache-apse5" ]] \
-        && pass "default L1 bucket = aws-my Malaysia (wiilearn-spur-sccache-apse5)" \
-        || fail "default bucket: got '$bucket', want wiilearn-spur-sccache-apse5 (aws-my)"
+    [[ "$bucket" == "spurlab-591950085580-spur-sccache-apse5" ]] \
+        && pass "default L1 bucket = aws-my Malaysia (spurlab-591950085580-spur-sccache-apse5)" \
+        || fail "default bucket: got '$bucket', want spurlab-591950085580-spur-sccache-apse5 (aws-my)"
 
     [[ "$chain" == "disk,s3" ]] \
         && pass "default SCCACHE_MULTILEVEL_CHAIN=disk,s3" \
@@ -141,7 +141,7 @@ chain=$(sed -n 's/^chain=//p' "$CAPTURE")
 ( cd "$WT" && SCCACHE_GCS_BUCKET=wiilearn-spur-sccache-asia SPUR_SCCACHE_S3=1 "$WRAPPER" rustc - --crate-name x ) \
     >/dev/null 2>&1
 bucket=$(sed -n 's/^bucket=//p' "$CAPTURE")
-[[ "$bucket" == "wiilearn-spur-sccache-apse5" ]] \
+[[ "$bucket" == "spurlab-591950085580-spur-sccache-apse5" ]] \
     && pass "explicit SPUR_SCCACHE_S3=1 wins over ambient GCS config" \
     || fail "explicit S3 override broken under ambient GCS: bucket='$bucket'"
 

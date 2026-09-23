@@ -21,7 +21,7 @@
 #   default             → two-level cache L0=local disk, L1=AWS S3
 #                         (SCCACHE_MULTILEVEL_CHAIN=disk,s3; honored by
 #                         sccache 0.15.0). Default bucket
-#                         wiilearn-spur-sccache-apse5 in ap-southeast-5,
+#                         spurlab-591950085580-spur-sccache-apse5 in ap-southeast-5,
 #                         matching the aws-my primary builder.
 #   SPUR_SCCACHE_S3=0  → disable the default S3 backend.
 #   SPUR_SCCACHE_GCS=1 → two-level cache L0=local disk, L1=GCS (macOS-gated)
@@ -90,7 +90,7 @@ enable_spur_s3_cache() {
     # the request. Bucket suffix apse5 == ap-southeast-5 (Malaysia), matching
     # the aws-my primary builder's cloud-build config so local and remote
     # builds share the same S3 L1 cache.
-    export SCCACHE_BUCKET="${SCCACHE_BUCKET:-wiilearn-spur-sccache-apse5}"
+    export SCCACHE_BUCKET="${SCCACHE_BUCKET:-spurlab-591950085580-spur-sccache-apse5}"
     export SCCACHE_REGION="${SCCACHE_REGION:-ap-southeast-5}"
     export AWS_REGION="${AWS_REGION:-$SCCACHE_REGION}"
     # Credentials resolve through the standard AWS chain (env vars, then the
