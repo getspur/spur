@@ -35,6 +35,7 @@ pub(crate) fn normalize_terminal_command(
 ) -> Option<NormalizedTerminalCommand> {
     match kind {
         AgentKind::Grok => grok::normalize_terminal_command(command, args),
+        AgentKind::Generic => generic::normalize_terminal_command(command, args),
         AgentKind::ClaudeStreamJson
         | AgentKind::ClaudeCodeAcp
         | AgentKind::CodexAcp
@@ -42,8 +43,7 @@ pub(crate) fn normalize_terminal_command(
         | AgentKind::Kimi
         | AgentKind::Gemini
         | AgentKind::OpenCode
-        | AgentKind::Pi
-        | AgentKind::Generic => None,
+        | AgentKind::Pi => None,
     }
 }
 

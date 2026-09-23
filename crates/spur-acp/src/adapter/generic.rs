@@ -1,6 +1,42 @@
 use serde_json::Value;
 
-use super::{ObservePayload, ToolFamily, ToolInputDisplay, JSON_INPUT_PREVIEW_LINES};
+use super::{NormalizedTerminalCommand, ObservePayload, ToolFamily, ToolInputDisplay, JSON_INPUT_PREVIEW_LINES};
+
+/// Normalize packed `terminal/create` requests emitted by generic ACP agents.
+///
+/// Observed on goose 1.51.0 (`goose acp`): the shell tool sends the entire
+/// command line in `command` with `args` absent, e.g.
+/// `command = "echo hi"`. That is a valid ACP shape — `command` is a
+/// free-form string — but the host's direct exec treats it as an executable
+/// path and fails with ENOENT. Packed requests (empty `args`) are routed
+/// through `/bin/bash -c <verbatim command>`; split requests keep the
+/// protocol-correct direct-exec path. On non-Unix targets this is a no-op.
+pub(crate) fn normalize_terminal_command(
+    command: &str,
+    args: &[String],
+) -> Option<NormalizedTerminalCommand> {
+    #[cfg(not(unix))]
+    {
+        let _ = (command, args);
+        None
+    }
+
+    #[cfg(unix)]
+    {
+        if !args.is_empty() || command.is_empty() {
+            return None;
+        }
+        tracing::info!(
+            agent_kind = "generic",
+            original_command_len = command.len(),
+            "Generic adapter: packed terminal/create argv; running via /bin/bash -c"
+        );
+        Some(NormalizedTerminalCommand {
+            program: "/bin/bash",
+            args: vec!["-c".to_string(), command.to_string()],
+        })
+    }
+}
 
 /// Generic `refine` — catches common `Other`-kinded tools the protocol
 /// didn't classify, via case-insensitive substring match on `title`.

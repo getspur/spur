@@ -1,4 +1,10 @@
 //! Byte-level oracle for the workaround, independent of shell execution.
+//!
+//! Boundary fence: the Grok adapter itself stays narrow (only POSIX-lexed
+//! `/bin/bash -c|-lc <script>` wrappers normalize). Packed commands from
+//! OTHER known agent kinds also stay direct-exec here. `AgentKind::Generic`
+//! deliberately normalizes packed requests via `/bin/bash -c` — observed on
+//! goose 1.51 — and is covered by `adapter::generic::terminal_command_tests`.
 
 use super::normalize_terminal_command;
 use crate::types::AgentKind;
@@ -65,7 +71,7 @@ fn grok_golden_packed_scripts_preserve_exact_argv() {
 }
 
 #[test]
-fn grok_golden_does_not_expand_the_normalization_boundary() {
+fn grok_golden_passthrough_retains_original_command_args() {
     let corpus = corpus();
     assert!(!corpus.passthrough.is_empty());
     for case in corpus.passthrough {
@@ -83,7 +89,9 @@ fn grok_golden_does_not_expand_the_normalization_boundary() {
 }
 
 #[test]
-fn packed_commands_are_unchanged_for_every_other_agent() {
+fn packed_commands_are_unchanged_for_known_agent_kinds() {
+    // Generic is excluded: packed requests route through `/bin/bash -c`
+    // (goose 1.51 interop). See `adapter::generic::terminal_command_tests`.
     for kind in [
         AgentKind::ClaudeStreamJson,
         AgentKind::ClaudeCodeAcp,
@@ -93,7 +101,6 @@ fn packed_commands_are_unchanged_for_every_other_agent() {
         AgentKind::Gemini,
         AgentKind::OpenCode,
         AgentKind::Pi,
-        AgentKind::Generic,
     ] {
         let corpus = corpus();
         for case in corpus.cases.into_iter().chain(corpus.lexical_only) {
