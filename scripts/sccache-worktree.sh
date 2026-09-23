@@ -44,6 +44,13 @@ use_spur_s3_sccache() {
             return 1 ;;
         __spur_unset__)
             [[ "${SPUR_SCCACHE_GCS:-0}" == "1" ]] && return 1
+            # An environment already configured for the GCS backend (the GCP
+            # fallback builder's profile.d exports SCCACHE_GCS_BUCKET with
+            # SCCACHE_MULTILEVEL_CHAIN=disk,gcs) must not get the S3 default's
+            # bucket/region exports injected on top. Explicit SPUR_SCCACHE_S3
+            # values (the case arms above/below) still win over the ambient
+            # config, so a deliberate local S3 run is unaffected.
+            [[ -n "${SCCACHE_GCS_BUCKET:-}" ]] && return 1
             return 0 ;;
         *)
             return 0 ;;
