@@ -24,6 +24,9 @@ members = [
     "crates/spur-context-auth",
     "crates/spur-code-eval",
     "crates/spur-graph",
+    "crates/spur-utilities/facade",
+    "crates/spur-utilities/mentions",
+    "crates/spur-utilities/commands",
     "crates/tree-sitter-mermaid",
     "xtask",
 ]
@@ -67,6 +70,8 @@ clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.29"
 crossterm = "0.28"
 pulldown-cmark = { version = "0.13", default-features = false }
+nucleo-matcher = "0.3"
+ignore = "0.4"
 
 # HTTP
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -118,6 +123,8 @@ regex = "1"
 semver = "1"
 sha2 = "0.10"
 similar = "2.7"
+base64 = "0.22"
+url = "2"
 proptest = "1"
 insta = "=1.41.1"
 petgraph = { version = "0.6", default-features = false, features = ["stable_graph"] }
@@ -144,6 +151,9 @@ spur-context-source = { path = "crates/spur-context-source" }
 spur-context-fetcher = { path = "crates/spur-context-fetcher" }
 spur-context-service = { path = "crates/spur-context-service" }
 spur-graph = { path = "crates/spur-graph", default-features = false }
+spur-utilities = { path = "crates/spur-utilities/facade" }
+spur-mentions = { path = "crates/spur-utilities/mentions" }
+spur-commands = { path = "crates/spur-utilities/commands" }
 spur-analyst = { path = "crates/spur-analyst", default-features = false }
 
 

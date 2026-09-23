@@ -1,0 +1,21 @@
+[package]
+name = "spur-mentions"
+description = "Neutral mention completion engine (no ACP types; optional `code` feature pulls spur-graph)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+code = ["dep:spur-graph"]
+
+[dependencies]
+spur-graph = { workspace = true, optional = true }
+nucleo-matcher = { workspace = true }
+ignore = { workspace = true }
+url = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
