@@ -9458,6 +9458,7 @@ dependencies = [
  "filetime",
  "ignore",
  "nucleo-matcher",
+ "proptest",
  "spur-graph",
  "tempfile",
  "tracing",

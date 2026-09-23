@@ -6,11 +6,13 @@
 //!
 //! M1 (decoupling spec §5 Phase M) shipped the neutral core types
 //! ([`MentionEntry`], [`MentionId`], [`MentionKind`], [`MentionSource`],
-//! [`SourceSnapshot`]). M2a adds the engine core: [`MentionEngine::query`],
+//! [`SourceSnapshot`]). M2a added the engine core: [`MentionEngine::query`],
 //! the root-scoped TTL [`cache::CacheKey`] identity, the filesystem
 //! compatibility [`FilesystemProfile`]s behind [`FileMentionSource`], and
-//! the deterministic [`rank_full_sort`] reference the later top-K
-//! selection must reproduce.
+//! the deterministic [`rank_full_sort`] reference. M5 adds the bounded
+//! [`rank_top_k`] selection (`select_nth_unstable_by` + prefix sort) that
+//! reproduces the reference byte for byte; [`MentionEngine::query`] routes
+//! through it.
 
 pub mod cache;
 pub mod clock;
@@ -38,7 +40,7 @@ pub use error::{
 };
 pub use file_source::FileMentionSource;
 pub use profile::{FilesystemProfile, UriConstruction};
-pub use rank::{rank_full_sort, RankOptions, RankedRef, TierPolicy};
+pub use rank::{rank_full_sort, rank_top_k, select_top_k, RankOptions, RankedRef, TierPolicy};
 
 /// Graph-backed code mention payload, available only when the `code` feature
 /// pulls `spur-graph` (the TUI enables it; the notebook's

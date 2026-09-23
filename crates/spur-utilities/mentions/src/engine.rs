@@ -3,8 +3,10 @@
 //! [`MentionEngine::query`] canonicalizes the root, resolves one snapshot
 //! per registered source through the root-scoped TTL cache (identity:
 //! `canonical_root + source_key + profile_fingerprint + source_token`),
-//! ranks the concatenated candidates with the deterministic full-sort
-//! reference, and returns owned rows plus non-fatal diagnostics.
+//! ranks the concatenated candidates with the bounded top-K selection
+//! (byte-identical to the deterministic full-sort reference, pinned by the
+//! sud-m5 property tests), and returns owned rows plus non-fatal
+//! diagnostics.
 //!
 //! Failure policy (spec error table): a *required* source whose build
 //! fails fails the whole query with a typed [`MentionError`]; an
@@ -37,7 +39,7 @@ use crate::entry::{
 };
 use crate::error::{MentionError, QueryDiagnostic, RootError, SourceBuildFailure, TraversalError};
 use crate::profile::FilesystemProfile;
-use crate::rank::{score_all, sort_ranked, RankOptions};
+use crate::rank::{score_all, select_top_k, RankOptions};
 use std::path::PathBuf;
 
 /// Initial compatibility TTL, matching the TUI registry snapshot cache
@@ -80,7 +82,8 @@ impl Default for QueryOptions {
 /// degradations observed while assembling them.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct QueryResult {
-    /// Ranked rows in display order (full-sort comparator, then truncate).
+    /// Ranked rows in display order (bounded top-K selection over the
+    /// full-sort comparator, then truncate).
     pub entries: Vec<MentionEntry>,
     /// One entry per degraded optional source.
     pub diagnostics: Vec<QueryDiagnostic>,
@@ -352,8 +355,11 @@ impl MentionEngine {
     }
 
     /// Run one completion query: resolve or rebuild each source snapshot,
-    /// rank the concatenated candidates with the full-sort reference, and
-    /// truncate to `options.rank.limit`.
+    /// then rank the concatenated candidates with the bounded top-K
+    /// selection — `select_nth_unstable_by` plus a prefix sort when the
+    /// match count exceeds the limit, byte-identical to the full-sort
+    /// reference (`tests/rank_top_k.rs`) and capped at
+    /// `options.rank.limit`.
     pub fn query(
         &mut self,
         root: &Path,
@@ -464,12 +470,16 @@ impl MentionEngine {
         }
         span.record("candidates", refs.len());
 
-        // Same primitives the reference `rank_full_sort` composes; split
-        // here so the score and select phases time separately.
+        // Same scoring pass the reference `rank_full_sort` runs; the select
+        // phase is the sud-m5 bounded top-K (select_nth_unstable_by +
+        // prefix sort when matches exceed the limit), split here so the
+        // score and select phases time separately.
         let score_started = self.clock.now();
         let mut scored = score_all(&refs, query, &options.rank.tiers, &mut self.matcher);
         let score_finished = self.clock.now();
-        sort_ranked(&mut scored);
+        let matched = scored.len();
+        let kept = select_top_k(&mut scored, options.rank.limit);
+        scored.truncate(kept);
         let select_finished = self.clock.now();
         span.record(
             "score_us",
@@ -479,11 +489,8 @@ impl MentionEngine {
             "select_us",
             micros(select_finished.duration_since(score_finished)),
         );
-        span.record("matched", scored.len());
+        span.record("matched", matched);
 
-        if let Some(limit) = options.rank.limit {
-            scored.truncate(limit);
-        }
         let entries: Vec<MentionEntry> = scored
             .into_iter()
             .map(|ranked| ranked.entry.clone())
