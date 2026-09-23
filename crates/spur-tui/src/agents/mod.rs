@@ -4,9 +4,9 @@
 //!
 //! | Hook ID                 | Kind                     | Where implemented    |
 //! |-------------------------|--------------------------|----------------------|
-//! | prompt_text             | DispatchKind             | entry_builder + submit_router |
-//! | vendor_exec             | DispatchKind             | entry_builder + submit_router + orchestrator |
-//! | raw_rest                | ArgsTemplateKind         | submit_router |
+//! | prompt_text             | DispatchKind             | entry_builder + submit_shell |
+//! | vendor_exec             | DispatchKind             | entry_builder + submit_shell + orchestrator |
+//! | raw_rest                | ArgsTemplateKind         | submit_shell |
 //! | json_path_list          | IngestParserKind         | ingest::run_ingest_hook |
 //! | acp_available_command   | ItemSchemaKind           | ingest::run_ingest_hook |
 //! | system_note             | ResponseRenderKind       | session_detail::render_response |

@@ -298,7 +298,7 @@ impl App {
 
     pub(super) fn query_to_action(&self, query: &str) -> Option<crate::action::Action> {
         use crate::action::Action;
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
+        use crate::commands::submit_shell::{route_with_caps, SubmitDecision};
         use crate::commands::CommandRegistry;
 
         // IMPORTANT — DO NOT "SIMPLIFY":

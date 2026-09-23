@@ -15,8 +15,8 @@ use spur_acp::{
     SpurAgentCaps,
 };
 use spur_tui::commands::advertised::{pinned_route_for_command, AdvertisedSource};
-use spur_tui::commands::submit_router::route_with_caps;
-use spur_tui::commands::submit_router::SubmitDecision;
+use spur_tui::commands::submit_shell::route_with_caps;
+use spur_tui::commands::submit_shell::SubmitDecision;
 use spur_tui::commands::{CommandEntry, CommandSource, Dispatch};
 
 fn evidence_identity() -> CliIdentity {

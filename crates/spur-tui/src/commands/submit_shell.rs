@@ -1,9 +1,9 @@
-//! SubmitRouter — decide what to do with an Enter-submitted InputBar.
+//! Submit shell — the TUI boundary over the pure submit classifier
+//! (decoupling spec 2026-09-23 §3.4).
 //!
 //! On Enter, the `InputBar` captures `(text, ranges, interrupt)`. The
-//! router takes that triple, pending image attachments, plus the
-//! `CommandRegistry` and returns a
-//! `SubmitDecision`:
+//! shell takes that triple, pending image attachments, plus the
+//! `CommandRegistry` and returns a `SubmitDecision`:
 //!
 //! * `Empty`         — nothing to do.
 //! * `Send`          — forward `Vec<ContentBlock>` to the agent.
@@ -12,27 +12,41 @@
 //!
 //! Non-slash text routes to `Send`, assembling blocks by interleaving
 //! `Text` with `ResourceLink`/`Image` blocks from `ranges`.
+//!
+//! This module owns the frontend pieces the neutral
+//! [`spur_commands::submit`] core deliberately leaves out (spec §3.4):
+//! `ProtectedRange`/`ImageAttachment` handling and the
+//! `ProtectedRange → MentionSpan` conversion, the `RetrievalAccept`
+//! flow, code-mention payload expansion (`mentions::code_graph::
+//! expansion` — the `¬c_m` rule), and `SubmitDecision::Local { action }`
+//! production via `local_dispatch`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::Value;
-use spur_acp::capability_evidence::DispatchRoute;
-use spur_acp::{
-    ContentBlock, EmbeddedResource, EmbeddedResourceResource, ResourceLink, SpurAgentCaps,
-    TextContent, TextResourceContents,
+use spur_acp::{ContentBlock, SpurAgentCaps};
+use spur_commands::submit::{
+    assemble_blocks_with_special, classify, MentionSpan, SpecialSpan, SubmitPlan,
 };
 
 use crate::action::Action;
 use crate::components::input_bar::{ImageAttachment, ProtectedRange, RangeKind};
 use crate::components::query_source::RetrievalAccept;
-use crate::mentions::code_graph::expansion::{expand, ExpandedMention, PER_PROMPT_CAP_BYTES};
-use spur_graph::{CodeMentionKind, CodeMentionPayload};
+use crate::mentions::code_graph::expansion::{expand, ExpandedMention};
 
-use super::advertised::pinned_route_for_command;
-use super::entry::{CommandSource, Dispatch};
 use super::spur_local::local_dispatch;
 use super::tui_registry::CommandRegistry;
+
+// Names the moved in-file test modules expect to inherit via
+// `use super::*` (top-level imports of the pre-split `submit_router`).
+#[cfg(test)]
+use super::entry::Dispatch;
+#[cfg(test)]
+use spur_acp::EmbeddedResourceResource;
+
+pub use spur_commands::submit::PromptBlockCaps;
 
 /// What the controller should do with an Enter-submitted InputBar.
 #[derive(Debug)]
@@ -56,7 +70,7 @@ pub enum SubmitDecision {
         params: Value,
     },
     /// v1 codex `/model` and `/effort` slash pickers — typed wire dispatch
-    /// to ACP `session/set_config_option`. The consumer (app.rs → orchestrator)
+    /// to ACP `session/set_config-option`. The consumer (app.rs → orchestrator)
     /// maps this to `InteractiveInput::SetSessionConfigOption`.
     SetSessionConfigOption {
         command_name: String,
@@ -94,11 +108,10 @@ pub fn route(
     route_with_caps(text, ranges, images, registry, interrupt, None)
 }
 
-/// Caps-aware route. When `caps` advertise the dedicated
-/// `session/set_model` method, `/model <value>` is rewritten from
-/// `SubmitDecision::SetSessionConfigOption` to
-/// `SubmitDecision::SetSessionModel` so the orchestrator can pick the
-/// dedicated dispatch. Spec §6.3 / Wave B.4.
+/// Caps-aware route. Intercepts the TUI's frontend-owned meta commands,
+/// then delegates the decision core to `spur_commands::submit::classify`
+/// (registry resolution, capability-route reduction, dispatch
+/// decomposition, and pure block assembly over `MentionSpan`s).
 pub fn route_with_caps(
     text: &str,
     ranges: &[ProtectedRange],
@@ -130,194 +143,40 @@ pub fn route_with_caps(
         }
     }
 
-    if text.starts_with('/') {
-        if let Some(entry) = registry.resolve(text) {
-            let command_name = entry.name;
-            // Snapshot the immutable evidence epoch and selected route before
-            // producing a decision. The returned decision is irreversible: a
-            // later capability refresh can only affect a later invocation.
-            let pinned_route = match &entry.source {
-                CommandSource::Agent { .. } | CommandSource::Advertised { .. } => caps
-                    .and_then(|caps| pinned_route_for_command(caps, &command_name))
-                    .map(|pinned| (pinned.evidence_epoch, pinned.route)),
-                CommandSource::Spur => None,
-            };
-            if let Some((_evidence_epoch, route)) = pinned_route {
-                match route {
-                    DispatchRoute::Hidden => return SubmitDecision::Empty,
-                    DispatchRoute::PromptOnly => {
-                        let normalized = match &entry.dispatch {
-                            Dispatch::PromptText { normalized } => normalized.clone(),
-                            _ => format!("/{command_name}"),
-                        };
-                        let rest = rest_after_first_token(text);
-                        let normalized_full = if rest.is_empty() {
-                            normalized
-                        } else {
-                            format!("{normalized} {rest}")
-                        };
-                        return SubmitDecision::Send {
-                            blocks: vec![ContentBlock::Text(TextContent::new(normalized_full))],
-                            interrupt,
-                        };
-                    }
-                    DispatchRoute::NativePreferred
-                        if matches!(&entry.dispatch, Dispatch::PromptText { .. }) =>
-                    {
-                        return SubmitDecision::Empty;
-                    }
-                    DispatchRoute::NativePreferred => {}
-                }
-            }
-            return match entry.dispatch {
-                Dispatch::Local { name } => {
-                    let rest = rest_after_first_token(text);
-                    let arg = (!rest.is_empty()).then_some(rest.as_str());
-                    match local_dispatch(&name, arg) {
-                        Some(action) => SubmitDecision::Local { action },
-                        // Unreachable for the TUI layer (every catalog name
-                        // resolves); fail closed rather than send garbage.
-                        None => SubmitDecision::Empty,
-                    }
-                }
-                Dispatch::PromptText { normalized } => {
-                    let rest = rest_after_first_token(text);
-                    let normalized_full = if rest.is_empty() {
-                        normalized
-                    } else {
-                        format!("{} {}", normalized, rest)
-                    };
-                    SubmitDecision::Send {
-                        blocks: vec![ContentBlock::Text(TextContent::new(normalized_full))],
-                        interrupt,
-                    }
-                }
-                Dispatch::SetSessionConfigOption { config_id } => {
-                    // Parse the arg from text (whatever follows `/<cmd> `).
-                    let value = rest_after_first_token(text);
-                    let value = value.trim().to_string();
-                    if value.is_empty() {
-                        // No arg yet — picker should still be open. Treat as no-op.
-                        SubmitDecision::Empty
-                    } else if pinned_route.is_none()
-                        && config_id == "model"
-                        && caps.is_some_and(|c| {
-                            c.capability_evidence.is_none() && c.supports_set_model()
-                        })
-                    {
-                        // Wave B.4 / spec §6.3: prefer the dedicated
-                        // semantic model dispatch for legacy snapshots that
-                        // predate capability evidence. Complete evidence uses
-                        // the pinned route above; incomplete evidence keeps the
-                        // standard SetSessionConfigOption entry fail-closed.
-                        // When direct `set_model` is unavailable,
-                        // NativeAcpConnection::set_session_model also
-                        // applies its own state-gated fallback for
-                        // calls that flow through it directly.
-                        SubmitDecision::SetSessionModel { value }
-                    } else {
-                        SubmitDecision::SetSessionConfigOption {
-                            command_name,
-                            config_id,
-                            value,
-                        }
-                    }
-                }
-                Dispatch::SetSessionModel => {
-                    let value = rest_after_first_token(text).trim().to_string();
-                    if value.is_empty() {
-                        SubmitDecision::Empty
-                    } else {
-                        SubmitDecision::SetSessionModel { value }
-                    }
-                }
-                Dispatch::SetSessionEffort => {
-                    let value = rest_after_first_token(text).trim().to_string();
-                    if value.is_empty() || !is_advertised_effort(caps, &value) {
-                        SubmitDecision::Empty
-                    } else {
-                        SubmitDecision::SetSessionEffort { value }
-                    }
-                }
-                Dispatch::SetSessionMode => {
-                    let value = rest_after_first_token(text).trim().to_string();
-                    if value.is_empty() || !is_advertised_mode(caps, &value) {
-                        SubmitDecision::Empty
-                    } else {
-                        SubmitDecision::SetSessionMode { value }
-                    }
-                }
-                Dispatch::VendorExec {
-                    method,
-                    command,
-                    args_template,
-                } => {
-                    let rest = rest_after_first_token(text);
-                    let params = match args_template {
-                        spur_acp::ArgsTemplateKind::RawRest => {
-                            if rest.is_empty() {
-                                serde_json::json!({ "command": command })
-                            } else {
-                                serde_json::json!({
-                                    "command": command,
-                                    "args": { "raw": rest },
-                                })
-                            }
-                        }
-                    };
-                    SubmitDecision::VendorExec { method, params }
-                }
-            };
-        }
-        // Unknown /command — fall through to Send as plain text so the
-        // agent receives it (agents often render unknown slash commands
-        // verbatim as prompts).
-    }
+    let spans: Vec<MentionSpan> = ranges.iter().map(mention_span_from_range).collect();
+    let specials = image_specials(ranges, images, PromptBlockCaps::from_agent(caps).image);
+    let mut lookup = |span: &MentionSpan| specials.get(&(span.start, span.end)).cloned();
 
-    let blocks =
-        assemble_blocks_with_prompt_caps(text, ranges, images, PromptBlockCaps::from_agent(caps));
-    SubmitDecision::Send { blocks, interrupt }
+    let plan = classify(text, &spans, registry, interrupt, caps, Some(&mut lookup));
+    decision_from_plan(plan)
 }
 
-fn is_advertised_effort(caps: Option<&SpurAgentCaps>, value: &str) -> bool {
-    caps.and_then(|caps| caps.grok_display.as_ref())
-        .and_then(|display| {
-            display
-                .model_id
-                .as_deref()
-                .map(|model_id| display.efforts_for_model(model_id))
-        })
-        .is_some_and(|efforts| efforts.iter().any(|effort| effort.id == value))
-}
-
-fn is_advertised_mode(caps: Option<&SpurAgentCaps>, value: &str) -> bool {
-    caps.and_then(|caps| caps.modes.as_ref())
-        .is_some_and(|modes| {
-            modes
-                .available_modes
-                .iter()
-                .any(|mode| mode.id.0.as_ref() == value)
-        })
-}
-
-/// Prompt-type gates from the agent's advertised `promptCapabilities`.
-/// Omitted / unknown caps are treated as unsupported (ACP initialize).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PromptBlockCaps {
-    pub image: bool,
-    pub embedded_context: bool,
-}
-
-impl PromptBlockCaps {
-    #[must_use]
-    pub fn from_agent(caps: Option<&SpurAgentCaps>) -> Self {
-        let Some(caps) = caps else {
-            return Self::default();
-        };
-        Self {
-            image: caps.agent.prompt_capabilities.image,
-            embedded_context: caps.agent.prompt_capabilities.embedded_context,
-        }
+/// Map a neutral [`SubmitPlan`] to the TUI decision, resolving
+/// [`SubmitPlan::Local`] through `local_dispatch` — the single place
+/// mapping neutral meta-command names back to TUI actions.
+fn decision_from_plan(plan: SubmitPlan) -> SubmitDecision {
+    match plan {
+        SubmitPlan::Send { blocks, interrupt } => SubmitDecision::Send { blocks, interrupt },
+        SubmitPlan::Local { name, arg } => match local_dispatch(&name, arg.as_deref()) {
+            Some(action) => SubmitDecision::Local { action },
+            // Unreachable for the TUI layer (every catalog name
+            // resolves); fail closed rather than send garbage.
+            None => SubmitDecision::Empty,
+        },
+        SubmitPlan::VendorExec { method, params } => SubmitDecision::VendorExec { method, params },
+        SubmitPlan::SetSessionConfigOption {
+            command_name,
+            config_id,
+            value,
+        } => SubmitDecision::SetSessionConfigOption {
+            command_name,
+            config_id,
+            value,
+        },
+        SubmitPlan::SetSessionModel { value } => SubmitDecision::SetSessionModel { value },
+        SubmitPlan::SetSessionEffort { value } => SubmitDecision::SetSessionEffort { value },
+        SubmitPlan::SetSessionMode { value } => SubmitDecision::SetSessionMode { value },
+        SubmitPlan::Empty => SubmitDecision::Empty,
     }
 }
 
@@ -336,14 +195,6 @@ pub(crate) fn local_action_from_picker_accept(
     }
 }
 
-/// Everything after the first whitespace-delimited token of `text`.
-fn rest_after_first_token(text: &str) -> String {
-    match text.split_once(char::is_whitespace) {
-        Some((_, rest)) => rest.trim_start().to_string(),
-        None => String::new(),
-    }
-}
-
 /// `Some("")` for the bare `/<name>` form, `Some(" <rest>")` for
 /// `/<name> <rest>`, and `None` when `text` is not that command at all
 /// (including longer names sharing the prefix, e.g. `/brains` vs `/brain`).
@@ -356,41 +207,109 @@ fn arg_after_command<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     }
 }
 
-/// Walk `text` + sorted `ranges` interleaved → `[Text, ResourceLink/Image, Text, …]`.
-/// Uses protocol-safe defaults (no image, no embed) when caps are unknown.
-pub fn assemble_blocks(
-    text: &str,
+/// `ProtectedRange → MentionSpan` conversion (spec §3.4: the neutral
+/// core operates on `MentionSpan`s, never on TUI range types).
+fn mention_span_from_range(range: &ProtectedRange) -> MentionSpan {
+    MentionSpan::new(
+        range.start,
+        range.end,
+        range.name.clone(),
+        range.uri.clone(),
+    )
+}
+
+/// Resolve the TUI's image attachments into neutral [`SpecialSpan`]s,
+/// keyed by `(start, end)` byte range. Mirrors the pre-split
+/// `RangeKind::ImageRef` handling: caps without image support emit the
+/// label as placeholder text; encode failures surface inline; missing
+/// ids drop the span with a warning.
+fn image_specials(
     ranges: &[ProtectedRange],
     images: &[ImageAttachment],
-) -> Vec<ContentBlock> {
-    assemble_blocks_with_prompt_caps(text, ranges, images, PromptBlockCaps::default())
+    image_capable: bool,
+) -> HashMap<(usize, usize), SpecialSpan> {
+    let mut specials = HashMap::new();
+    for range in ranges {
+        if let RangeKind::ImageRef(id) = &range.kind {
+            let key = (range.start, range.end);
+            if !image_capable {
+                specials.insert(key, SpecialSpan::Text(range.name.clone()));
+                continue;
+            }
+            match images.iter().find(|att| att.id == *id) {
+                Some(att) => match encode_image_attachment(att) {
+                    Ok(block) => {
+                        specials.insert(key, SpecialSpan::Blocks(vec![block]));
+                    }
+                    Err(err) => {
+                        tracing::error!("image encode failed for id={id}: {err}");
+                        specials.insert(
+                            key,
+                            SpecialSpan::Text(format!("[image encode error: {err}]")),
+                        );
+                    }
+                },
+                None => {
+                    tracing::warn!("ImageRef(id={id}) not found in images list");
+                    specials.insert(key, SpecialSpan::Blocks(Vec::new()));
+                }
+            }
+        }
+    }
+    specials
 }
 
-pub fn assemble_blocks_with_prompt_caps(
-    text: &str,
+/// Resolve `graph://` code-mention ranges into neutral [`SpecialSpan`]s
+/// by expanding their registered payloads against `worktree_root`
+/// (`mentions::code_graph::expansion` — the `¬c_m` rule keeps this in
+/// the TUI). Payload misses stay unresolved so the neutral core emits
+/// its `MENTION_WARNING` framing.
+fn code_specials<'a>(
     ranges: &[ProtectedRange],
-    images: &[ImageAttachment],
-    caps: PromptBlockCaps,
-) -> Vec<ContentBlock> {
-    assemble_blocks_inner(text, ranges, images, None, caps)
+    worktree_root: &Path,
+    mut lookup_code_payload: impl FnMut(&str) -> Option<&'a spur_graph::CodeMentionPayload>,
+) -> HashMap<(usize, usize), SpecialSpan> {
+    use spur_graph::CodeMentionKind;
+
+    let mut specials = HashMap::new();
+    for range in ranges {
+        if matches!(range.kind, RangeKind::ImageRef(_)) || !range.uri.starts_with("graph://") {
+            continue;
+        }
+        let key = (range.start, range.end);
+        if let Some(payload) = lookup_code_payload(&range.uri) {
+            let is_symbol = matches!(payload.authoritative.kind, CodeMentionKind::Symbol);
+            match expand(payload, worktree_root) {
+                ExpandedMention::Body { text } => {
+                    specials.insert(
+                        key,
+                        SpecialSpan::Expansion {
+                            text,
+                            is_symbol_body: is_symbol,
+                        },
+                    );
+                }
+                ExpandedMention::Warning { text, .. } => {
+                    specials.insert(
+                        key,
+                        SpecialSpan::Expansion {
+                            text,
+                            is_symbol_body: false,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    specials
 }
-
-const CODE_SYMBOL_TOPOLOGY_HINT: &str =
-    "\ntopology_available_via_mcp_for_above_symbols: pass each MENTION's qualified_name OR path:line to code_callers / code_callees / code_subgraph(radius=1); use code_resolve for ambiguous names";
-
-struct CodeExpansion {
-    text: String,
-    is_symbol_body: bool,
-}
-
-type CodeExpansionLookup<'a> = Option<&'a mut dyn FnMut(&str) -> Option<CodeExpansion>>;
 
 pub fn assemble_blocks_with_code_mentions<'a>(
     text: &str,
     ranges: &[ProtectedRange],
     images: &[ImageAttachment],
     worktree_root: &Path,
-    lookup_code_payload: impl FnMut(&str) -> Option<&'a CodeMentionPayload>,
+    lookup_code_payload: impl FnMut(&str) -> Option<&'a spur_graph::CodeMentionPayload>,
 ) -> Vec<ContentBlock> {
     assemble_blocks_with_code_mentions_and_caps(
         text,
@@ -407,153 +326,31 @@ pub fn assemble_blocks_with_code_mentions_and_caps<'a>(
     ranges: &[ProtectedRange],
     images: &[ImageAttachment],
     worktree_root: &Path,
-    mut lookup_code_payload: impl FnMut(&str) -> Option<&'a CodeMentionPayload>,
+    lookup_code_payload: impl FnMut(&str) -> Option<&'a spur_graph::CodeMentionPayload>,
     caps: PromptBlockCaps,
 ) -> Vec<ContentBlock> {
-    let mut lookup = |uri: &str| {
-        lookup_code_payload(uri).map(|payload| {
-            let is_symbol = matches!(payload.authoritative.kind, CodeMentionKind::Symbol);
-            match expand(payload, worktree_root) {
-                ExpandedMention::Body { text } => CodeExpansion {
-                    text,
-                    is_symbol_body: is_symbol,
-                },
-                ExpandedMention::Warning { text, .. } => CodeExpansion {
-                    text,
-                    is_symbol_body: false,
-                },
-            }
-        })
-    };
-    assemble_blocks_inner(text, ranges, images, Some(&mut lookup), caps)
+    let spans: Vec<MentionSpan> = ranges.iter().map(mention_span_from_range).collect();
+    let mut specials = image_specials(ranges, images, caps.image);
+    specials.extend(code_specials(ranges, worktree_root, lookup_code_payload));
+    let mut lookup = |span: &MentionSpan| specials.get(&(span.start, span.end)).cloned();
+    assemble_blocks_with_special(text, &spans, caps, Some(&mut lookup))
 }
 
-fn assemble_blocks_inner(
+/// Image-aware assembly without code-mention expansion — mirrors the
+/// pre-split `assemble_blocks_with_prompt_caps` surface for the shell's
+/// in-file assembly tests (the `route_with_caps` Send path assembles
+/// through `classify` instead).
+#[cfg(test)]
+fn assemble_blocks_with_images(
     text: &str,
     ranges: &[ProtectedRange],
     images: &[ImageAttachment],
-    mut code_expansion_lookup: CodeExpansionLookup<'_>,
     caps: PromptBlockCaps,
 ) -> Vec<ContentBlock> {
-    let mut out: Vec<ContentBlock> = Vec::new();
-    let mut cursor = 0usize;
-    let mut code_expansion_bytes = 0usize;
-    let mut expanded_symbol_body = false;
-    for r in ranges {
-        if r.start > cursor {
-            out.push(ContentBlock::Text(TextContent::new(
-                text[cursor..r.start].to_string(),
-            )));
-        }
-        match &r.kind {
-            RangeKind::ImageRef(id) => {
-                if !caps.image {
-                    out.push(ContentBlock::Text(TextContent::new(r.name.clone())));
-                } else {
-                    match images.iter().find(|att| att.id == *id) {
-                        Some(att) => match encode_image_attachment(att) {
-                            Ok(block) => out.push(block),
-                            Err(err) => {
-                                tracing::error!("image encode failed for id={}: {err}", id);
-                                out.push(ContentBlock::Text(TextContent::new(format!(
-                                    "[image encode error: {err}]"
-                                ))));
-                            }
-                        },
-                        None => {
-                            tracing::warn!("ImageRef(id={}) not found in images list", id);
-                        }
-                    }
-                }
-            }
-            _ => {
-                if r.uri.starts_with("graph://") {
-                    if let Some(expansion) = code_expansion_lookup
-                        .as_deref_mut()
-                        .and_then(|lookup| lookup(&r.uri))
-                    {
-                        if code_expansion_bytes + expansion.text.len() > PER_PROMPT_CAP_BYTES {
-                            out.push(ContentBlock::Text(TextContent::new(format!(
-                                "MENTION_OMITTED {} (per-prompt cap)\n",
-                                r.uri
-                            ))));
-                        } else {
-                            code_expansion_bytes += expansion.text.len();
-                            expanded_symbol_body |= expansion.is_symbol_body;
-                            out.push(ContentBlock::Text(TextContent::new(expansion.text)));
-                        }
-                    } else {
-                        out.push(ContentBlock::Text(TextContent::new(format!(
-                            "MENTION_WARNING {}\nintended_uri:   {}\nfailure_reason: payload_not_in_registry\nreplaced_with:  dropped\n",
-                            r.name, r.uri
-                        ))));
-                    }
-                } else {
-                    out.push(mention_content_block(r, caps));
-                }
-            }
-        }
-        cursor = r.end;
-    }
-    if cursor < text.len() {
-        out.push(ContentBlock::Text(TextContent::new(
-            text[cursor..].to_string(),
-        )));
-    }
-    if out.is_empty() && ranges.is_empty() {
-        out.push(ContentBlock::Text(TextContent::new(text.to_string())));
-    }
-    if expanded_symbol_body {
-        out.push(ContentBlock::Text(TextContent::new(
-            CODE_SYMBOL_TOPOLOGY_HINT.to_string(),
-        )));
-    }
-    out
-}
-
-fn mention_content_block(range: &ProtectedRange, caps: PromptBlockCaps) -> ContentBlock {
-    if caps.embedded_context {
-        if let Some(block) = try_embed_file_mention(range) {
-            return block;
-        }
-    }
-    ContentBlock::ResourceLink(ResourceLink::new(range.name.clone(), range.uri.clone()))
-}
-
-fn try_embed_file_mention(range: &ProtectedRange) -> Option<ContentBlock> {
-    let path = range.uri.strip_prefix("file://")?;
-    let path = Path::new(path);
-    if !path.is_file() {
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.len() > PER_PROMPT_CAP_BYTES {
-        return None;
-    }
-    let text = String::from_utf8(bytes).ok()?;
-    Some(ContentBlock::Resource(EmbeddedResource::new(
-        EmbeddedResourceResource::TextResourceContents(
-            TextResourceContents::new(text, range.uri.clone())
-                .mime_type(Some(file_mention_mime(path).to_string())),
-        ),
-    )))
-}
-
-fn file_mention_mime(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("rs") => "text/x-rust",
-        Some("py") => "text/x-python",
-        Some("md") => "text/markdown",
-        Some("json") => "application/json",
-        Some("toml") => "text/x-toml",
-        Some("ts" | "tsx" | "js" | "jsx") => "text/javascript",
-        _ => "text/plain",
-    }
+    let spans: Vec<MentionSpan> = ranges.iter().map(mention_span_from_range).collect();
+    let specials = image_specials(ranges, images, caps.image);
+    let mut lookup = |span: &MentionSpan| specials.get(&(span.start, span.end)).cloned();
+    assemble_blocks_with_special(text, &spans, caps, Some(&mut lookup))
 }
 
 fn encode_image_attachment(att: &ImageAttachment) -> anyhow::Result<ContentBlock> {
@@ -584,67 +381,6 @@ fn encode_image_attachment(att: &ImageAttachment) -> anyhow::Result<ContentBlock
         "image/png",
     )))
 }
-
-/// Agent-facing worker/datasource framing. Local echo and history restore
-/// must not replay this as user-typed text — the mention already follows
-/// as a `ResourceLink` / `Resource`.
-const UI_HINT_PREFIX: &str = "[UI hint]";
-
-/// Flatten one outbound prompt block into the user-visible composer/trace
-/// form. Returns `None` for agent-only framing and for variants with no
-/// mention display (image/audio).
-pub fn flatten_prompt_block(block: &ContentBlock) -> Option<String> {
-    match block {
-        ContentBlock::Text(t) if t.text.starts_with(UI_HINT_PREFIX) => None,
-        ContentBlock::Text(t) => Some(t.text.clone()),
-        ContentBlock::ResourceLink(r) => Some(format!("@{}", r.name)),
-        ContentBlock::Resource(r) => Some(format!("@{}", resource_display_name(r))),
-        _ => None,
-    }
-}
-
-fn resource_display_name(resource: &spur_acp::EmbeddedResource) -> String {
-    use spur_acp::EmbeddedResourceResource;
-    let uri = match &resource.resource {
-        EmbeddedResourceResource::TextResourceContents(t) => t.uri.as_str(),
-        _ => return "resource".to_string(),
-    };
-    mention_name_from_uri(uri)
-}
-
-pub(crate) fn mention_name_from_uri(uri: &str) -> String {
-    let path = uri
-        .strip_prefix("file://")
-        .or_else(|| uri.split_once("://").map(|(_, rest)| rest))
-        .unwrap_or(uri);
-    path.rsplit(['/', '\\'])
-        .find(|seg| !seg.is_empty())
-        .unwrap_or(path)
-        .to_string()
-}
-
-/// Flatten blocks into a human-readable string for the local trace echo.
-///
-/// `Text` blocks concatenate their text except `[UI hint]` framing;
-/// `ResourceLink` / `Resource` blocks render as `@<name>`; other
-/// variants are skipped.
-pub fn blocks_preview(blocks: &[ContentBlock]) -> String {
-    let mut s = String::new();
-    for b in blocks {
-        if let Some(piece) = flatten_prompt_block(b) {
-            s.push_str(&piece);
-        }
-    }
-    s
-}
-
-/// Flatten blocks into a plain text string (e.g. for CLI that forwards text).
-/// Currently identical to `blocks_preview` — kept as a distinct entry point
-/// so future divergence (e.g. CLI-specific serialization) is cheap.
-pub fn blocks_to_text(blocks: &[ContentBlock]) -> String {
-    blocks_preview(blocks)
-}
-
 #[cfg(test)]
 mod image_block_tests {
     use super::*;
@@ -684,7 +420,7 @@ mod image_block_tests {
             name: label.to_string(),
         }];
 
-        let blocks = assemble_blocks_with_prompt_caps(
+        let blocks = assemble_blocks_with_images(
             &text,
             &ranges,
             &images,
@@ -818,7 +554,7 @@ mod image_block_tests {
             name: tmp.path().file_name().unwrap().to_string_lossy().into(),
         }];
 
-        let blocks = assemble_blocks_with_prompt_caps(
+        let blocks = assemble_blocks_with_images(
             &text,
             &ranges,
             &[],
@@ -864,8 +600,7 @@ mod image_block_tests {
             name: "lib.rs".into(),
         }];
 
-        let blocks =
-            assemble_blocks_with_prompt_caps(&text, &ranges, &[], PromptBlockCaps::default());
+        let blocks = assemble_blocks_with_images(&text, &ranges, &[], PromptBlockCaps::default());
 
         assert!(
             blocks.iter().any(|b| matches!(
@@ -895,7 +630,8 @@ mod image_block_tests {
         }];
         let images = vec![];
 
-        let blocks = assemble_blocks(&text, &ranges, &images);
+        let blocks =
+            assemble_blocks_with_images(&text, &ranges, &images, PromptBlockCaps::default());
 
         assert!(blocks
             .iter()

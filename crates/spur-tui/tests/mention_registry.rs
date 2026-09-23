@@ -3,7 +3,7 @@ use spur_acp::SessionId;
 use spur_acp::{Column, ContentBlock, DatasourceEntry, DatasourceKind, Table};
 use spur_graph::validation::compute_anchor_hash;
 use spur_graph::{artifact_from_facts, build_facts, write_artifact_parquet, WriteOptions};
-use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
+use spur_tui::commands::submit_shell::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::InputBar;
 use spur_tui::mentions::{
     CodeMentionKind, CodeMentionValidationSpec, CompletionScope, IssueMentionDescriptor,
