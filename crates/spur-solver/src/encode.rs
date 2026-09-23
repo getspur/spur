@@ -327,20 +327,17 @@ impl<'a> Encoder<'a> {
             return self.output.push_line(")");
         }
 
-        match constraint.id() {
-            Some(id) => {
-                // (! expr :named id) enables get-unsat-core mapping to surface ids.
-                self.output.push("(assert (! ")?;
-                self.write_expression(constraint.expr())?;
-                self.output.push(" :named ")?;
-                self.output.push(id)?;
-                self.output.push_line("))")
-            }
-            None => {
-                self.output.push("(assert ")?;
-                self.write_expression(constraint.expr())?;
-                self.output.push_line(")")
-            }
+        if let Some(id) = constraint.id() {
+            // (! expr :named id) enables get-unsat-core mapping to surface ids.
+            self.output.push("(assert (! ")?;
+            self.write_expression(constraint.expr())?;
+            self.output.push(" :named ")?;
+            self.output.push(id)?;
+            self.output.push_line("))")
+        } else {
+            self.output.push("(assert ")?;
+            self.write_expression(constraint.expr())?;
+            self.output.push_line(")")
         }
     }
 

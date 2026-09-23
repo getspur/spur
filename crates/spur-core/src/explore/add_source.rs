@@ -22,7 +22,7 @@ pub fn parse_git_url_repo(url: &str) -> Result<String, String> {
             .join("/")
     } else {
         // SSH: git@host:owner/repo
-        url.split(':').last().unwrap_or(url).to_string()
+        url.split(':').next_back().unwrap_or(url).to_string()
     };
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if parts.len() < 2 {

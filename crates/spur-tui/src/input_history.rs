@@ -140,7 +140,7 @@ impl InputStateSnapshot {
                 ContentBlock::Resource(r) => {
                     let start = text.len();
                     text.push_str(&piece);
-                    let (uri, name) = resource_atom_identity(r, &mention_name_from_uri);
+                    let (uri, name) = resource_atom_identity(r, mention_name_from_uri);
                     protected_ranges.push(ProtectedRange {
                         start,
                         end: text.len(),

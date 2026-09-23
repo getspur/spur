@@ -64,7 +64,7 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         .collect::<Result<Vec<_>, _>>()?;
     validate_facts(&input.facts, &input.unknowns)?;
     validate_expression_budget(&bindings, &input.facts)?;
-    let mut resolver = ConfigurationResolver::new(input.facts, &input.unknowns)?;
+    let mut resolver = ConfigurationResolver::new(input.facts, &input.unknowns);
     let mut rules = Vec::with_capacity(bindings.len());
     for (index, binding) in bindings.iter().enumerate() {
         rules.push(CompiledRule::new(
@@ -841,7 +841,7 @@ struct ConfigurationResolver {
 }
 
 impl ConfigurationResolver {
-    fn new(facts: ConfigurationFacts, unknowns: &[ConfigurationUnknown]) -> Result<Self, String> {
+    fn new(facts: ConfigurationFacts, unknowns: &[ConfigurationUnknown]) -> Self {
         let mut component_selected = BTreeMap::new();
         let mut group_active = BTreeMap::new();
         let mut attributes = BTreeMap::new();
@@ -911,7 +911,7 @@ impl ConfigurationResolver {
                 }
             }
         }
-        Ok(Self {
+        Self {
             facts,
             component_selected,
             group_active,
@@ -920,7 +920,7 @@ impl ConfigurationResolver {
             indicator_aliases: BTreeMap::new(),
             variables,
             projections,
-        })
+        }
     }
 
     fn component_selected(&self, component: &str) -> Result<ConstraintExpr, String> {
@@ -943,15 +943,14 @@ impl ConfigurationResolver {
 
     fn component_indicator(&mut self, component: &str) -> Result<Indicator, String> {
         let fixed = require_component(&self.facts, component)?.selected;
-        match fixed {
-            Some(value) => Ok(Indicator {
+        if let Some(value) = fixed {
+            Ok(Indicator {
                 value: int(i64::from(value)),
                 link: None,
-            }),
-            None => {
-                let selected = self.component_selected(component)?;
-                self.boolean_indicator(format!("component:{component}:selected"), selected)
-            }
+            })
+        } else {
+            let selected = self.component_selected(component)?;
+            self.boolean_indicator(format!("component:{component}:selected"), selected)
         }
     }
 
@@ -962,15 +961,14 @@ impl ConfigurationResolver {
             .get(group)
             .ok_or_else(|| format!("unknown configuration selection group `{group}`"))?
             .active;
-        match fixed {
-            Some(value) => Ok(Indicator {
+        if let Some(value) = fixed {
+            Ok(Indicator {
                 value: int(i64::from(value)),
                 link: None,
-            }),
-            None => {
-                let active = self.group_active(group)?;
-                self.boolean_indicator(format!("group:{group}:active"), active)
-            }
+            })
+        } else {
+            let active = self.group_active(group)?;
+            self.boolean_indicator(format!("group:{group}:active"), active)
         }
     }
 
@@ -1019,19 +1017,17 @@ impl ConfigurationResolver {
             .ok_or_else(|| {
                 format!("components.{component}.attributes.{attribute} is not declared")
             })?;
-        Ok(match value {
-            Some(value) => boolean(value == label),
-            None => {
-                let variable =
-                    self.attributes[&(component.to_owned(), attribute.to_owned())].clone();
-                eq(
-                    var(variable.clone()),
-                    ConstraintExpr::EnumLabel {
-                        var: variable,
-                        label: label.to_owned(),
-                    },
-                )
-            }
+        Ok(if let Some(value) = value {
+            boolean(value == label)
+        } else {
+            let variable = self.attributes[&(component.to_owned(), attribute.to_owned())].clone();
+            eq(
+                var(variable.clone()),
+                ConstraintExpr::EnumLabel {
+                    var: variable,
+                    label: label.to_owned(),
+                },
+            )
         })
     }
 

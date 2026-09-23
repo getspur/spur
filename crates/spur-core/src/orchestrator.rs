@@ -45,7 +45,7 @@ use crate::{DelegationChannel, DelegationRequest};
 use spur_blob_store::{
     ContentType, MeasuredOutcomeStore, OutcomeKey, OutcomeMetadata, OutcomeStore,
 };
-use spur_cost::CostTracker;
+use spur_cost::{CostTracker, TokenSessionEnd};
 use spur_license::SpurLicense;
 
 use dashmap::DashMap;
@@ -867,12 +867,14 @@ impl Orchestrator {
             let result = match prompt_usage.as_ref() {
                 Some(usage) => ct.end_session_with_tokens(
                     &session_id,
-                    status,
-                    duration,
-                    agent_config.cost_tier,
-                    prompt_usage_to_token_usage(usage),
-                    llm_model.as_deref(),
-                    num_turns,
+                    TokenSessionEnd {
+                        status,
+                        duration,
+                        cost_tier: agent_config.cost_tier,
+                        usage: prompt_usage_to_token_usage(usage),
+                        model: llm_model.as_deref(),
+                        num_turns,
+                    },
                 ),
                 None => ct.end_session(&session_id, status, duration, agent_config.cost_tier),
             };

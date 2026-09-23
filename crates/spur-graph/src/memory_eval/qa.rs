@@ -1568,8 +1568,8 @@ impl LongMemQaRecord {
 pub async fn evaluate_longmem(
     dataset: &BenchmarkDataset,
     rankings: &RankingSet,
-    backend: &mut dyn LongMemQaBackend,
-    cache: &mut dyn QaCache,
+    backend: &mut (dyn LongMemQaBackend + Send),
+    cache: &mut (dyn QaCache + Send),
     budget: &mut QaBudget,
 ) -> anyhow::Result<Vec<LongMemQaRecord>> {
     let mut records = Vec::with_capacity(rankings.len());
@@ -1817,8 +1817,8 @@ pub async fn evaluate_longmem(
 }
 
 async fn execute_cached_call(
-    backend: &mut dyn LongMemQaBackend,
-    cache: &mut dyn QaCache,
+    backend: &mut (dyn LongMemQaBackend + Send),
+    cache: &mut (dyn QaCache + Send),
     budget: &mut QaBudget,
     key: QaCacheKey,
     request: LongMemQaRequest,

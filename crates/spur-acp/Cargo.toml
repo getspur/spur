@@ -44,6 +44,7 @@ libproc = "0.14"
 # /proc reads are pure std::fs; no extra dep needed.
 
 [dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
 spur-acp = { path = ".", features = ["test-support"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 

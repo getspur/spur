@@ -1026,25 +1026,6 @@ pub fn read_artifact_parquet_slim(dir: &Path) -> anyhow::Result<GraphIndexArtifa
     Ok(artifact)
 }
 
-/// Read only the current symbol rows needed by the hot query index.
-///
-/// This intentionally excludes edges and every non-symbol payload so symbol
-/// search keeps the same shard-level error isolation as direct Parquet search.
-pub(crate) fn read_current_query_symbols_parquet(
-    dir: &Path,
-) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
-    let manifest = read_artifact_header_parquet(dir)?;
-    if !manifest.complete {
-        bail!(
-            "refusing to load incomplete Parquet artifact `{}`",
-            dir.display()
-        );
-    }
-    let nodes_path = dir.join("nodes.parquet");
-    let (symbols, _node_ids) = read_nodes(&nodes_path, manifest.row_counts.nodes)?;
-    Ok(symbols)
-}
-
 /// Read only current resolved and unresolved edges for the adjacency index.
 pub(crate) fn read_current_query_edges_parquet(
     dir: &Path,
@@ -2337,7 +2318,7 @@ fn writer_properties(
     {
         builder = builder.set_column_dictionary_enabled(ColumnPath::from(column), true);
     }
-    let bloom_ndv = u64::try_from(row_count.max(1).min(PARQUET_ROW_GROUP_SIZE))
+    let bloom_ndv = u64::try_from(row_count.clamp(1, PARQUET_ROW_GROUP_SIZE))
         .expect("row-group row count fits u64");
     for column in bloom_filter_columns
         .iter()

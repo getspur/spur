@@ -327,22 +327,21 @@ impl WorkflowResolver {
             SlotKind::State => trace_facts.states[index].as_deref(),
             SlotKind::Event => trace_facts.events[index].as_deref(),
         };
-        Ok(match fixed {
-            Some(value) => boolean(value == label),
-            None => {
-                let variable = self
-                    .unknown_variables
-                    .get(&(trace.to_owned(), kind, index))
-                    .expect("null workflow slots require validated unknowns")
-                    .clone();
-                eq(
-                    var(variable.clone()),
-                    ConstraintExpr::EnumLabel {
-                        var: variable,
-                        label: label.to_owned(),
-                    },
-                )
-            }
+        Ok(if let Some(value) = fixed {
+            boolean(value == label)
+        } else {
+            let variable = self
+                .unknown_variables
+                .get(&(trace.to_owned(), kind, index))
+                .expect("null workflow slots require validated unknowns")
+                .clone();
+            eq(
+                var(variable.clone()),
+                ConstraintExpr::EnumLabel {
+                    var: variable,
+                    label: label.to_owned(),
+                },
+            )
         })
     }
 

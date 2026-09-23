@@ -314,7 +314,9 @@ fn materialize_pi_mcp_config(repo_root: &std::path::Path, config: &SpurConfig) -
     if !added.is_empty() {
         std::fs::create_dir_all(path.parent().expect(".pi parent"))
             .map_err(|e| anyhow::anyhow!("failed to create .pi/: {e}"))?;
-        std::fs::write(&path, serde_json::to_string_pretty(&root)? + "\n")
+        let mut json = serde_json::to_string_pretty(&root)?;
+        json.push('\n');
+        std::fs::write(&path, json)
             .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
     }
 

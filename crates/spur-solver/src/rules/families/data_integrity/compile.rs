@@ -1076,8 +1076,9 @@ fn validate_unknowns(
 
 fn row_id(target: &UnknownTarget) -> &str {
     match target {
-        UnknownTarget::RowActive(_, row) => row,
-        UnknownTarget::CellPresent(_, row, _) | UnknownTarget::CellValue(_, row, _) => row,
+        UnknownTarget::RowActive(_, row)
+        | UnknownTarget::CellPresent(_, row, _)
+        | UnknownTarget::CellValue(_, row, _) => row,
     }
 }
 

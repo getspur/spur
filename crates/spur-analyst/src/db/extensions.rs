@@ -2,9 +2,9 @@ use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Primary env var for a vendored DuckDB extension tree.
+/// Primary env var for a vendored `DuckDB` extension tree.
 ///
-/// Layout DuckDB expects under this directory:
+/// Layout `DuckDB` expects under this directory:
 /// `{dir}/v<duckdb-version>/<platform>/<name>.duckdb_extension`
 pub const ANALYST_EXTENSION_DIR_ENV: &str = "SPUR_DUCKDB_EXTENSION_DIR";
 const CONTEXT_EXTENSION_DIR_ENV: &str = "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR";
@@ -24,7 +24,7 @@ const ANALYST_EXTENSIONS: &[(&str, bool)] = &[
 // paths and fallible in graph-path paths.
 static DUCKPGQ_INSTALLED: OnceLock<()> = OnceLock::new();
 
-/// Directory of vendored DuckDB extensions, if one is configured or shipped
+/// Directory of vendored `DuckDB` extensions, if one is configured or shipped
 /// next to the running binary.
 pub fn analyst_extension_directory() -> Option<PathBuf> {
     env_extension_dir(ANALYST_EXTENSION_DIR_ENV)
@@ -35,41 +35,40 @@ pub fn analyst_extension_directory() -> Option<PathBuf> {
 /// SQL that LOADs analyst extensions without hitting the CDN when a local
 /// extension directory is set (`autoinstall_known_extensions = false`).
 pub fn analyst_extension_bootstrap_sql() -> String {
-    match analyst_extension_directory() {
-        Some(dir) => {
-            let mut sql = extension_directory_prefix(&dir);
-            for (name, _) in ANALYST_EXTENSIONS {
-                sql.push_str("LOAD ");
-                sql.push_str(name);
-                sql.push_str(";\n");
-            }
-            sql
+    if let Some(dir) = analyst_extension_directory() {
+        let mut sql = extension_directory_prefix(&dir);
+        for (name, _) in ANALYST_EXTENSIONS {
+            sql.push_str("LOAD ");
+            sql.push_str(name);
+            sql.push_str(";\n");
         }
-        None => {
-            let mut sql = String::new();
-            for (name, community) in ANALYST_EXTENSIONS {
-                sql.push_str("INSTALL ");
-                sql.push_str(name);
-                if *community {
-                    sql.push_str(" FROM community");
-                }
-                sql.push_str(";\n");
+        sql
+    } else {
+        let mut sql = String::new();
+        for (name, community) in ANALYST_EXTENSIONS {
+            sql.push_str("INSTALL ");
+            sql.push_str(name);
+            if *community {
+                sql.push_str(" FROM community");
             }
-            for (name, _) in ANALYST_EXTENSIONS {
-                sql.push_str("LOAD ");
-                sql.push_str(name);
-                sql.push_str(";\n");
-            }
-            sql
+            sql.push_str(";\n");
         }
+        for (name, _) in ANALYST_EXTENSIONS {
+            sql.push_str("LOAD ");
+            sql.push_str(name);
+            sql.push_str(";\n");
+        }
+        sql
     }
 }
 
 /// INSTALL/LOAD SQL for a single extension, preferring a local directory.
 pub fn analyst_extension_load_sql(name: &str) -> String {
-    debug_assert!(name
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'));
+    debug_assert!(
+        name.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
+        "extension name `{name}` must be a bare identifier"
+    );
     let community = ANALYST_EXTENSIONS
         .iter()
         .find(|(candidate, _)| *candidate == name)
@@ -114,13 +113,13 @@ fn env_extension_dir(key: &str) -> Option<PathBuf> {
 fn bundled_extension_directory() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
-    [
+    let path = [
         exe_dir.join("duckdb-extensions"),
         share_extension_dir(exe_dir),
     ]
     .into_iter()
-    .find(|path| path.is_dir())
-    .and_then(|path| std::fs::canonicalize(path).ok())
+    .find(|path| path.is_dir())?;
+    std::fs::canonicalize(path).ok()
 }
 
 fn share_extension_dir(exe_dir: &Path) -> PathBuf {

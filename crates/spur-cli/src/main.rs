@@ -2295,10 +2295,6 @@ async fn load_orchestrator_with_pm(repo_root: PathBuf) -> Result<Orchestrator> {
 /// - `coding_agent` = ACP entry / registry agent (e.g. grok), **not** LLM id
 /// - `model_name` = LLM id when known and distinct from coding agent
 /// - Prefer cost.db session row when present (duration, tokens)
-fn opt_token(v: Option<i64>) -> Option<u64> {
-    v.map(|t| t.max(0) as u64)
-}
-
 fn format_cost_usd(cost: Option<f64>) -> String {
     match cost {
         Some(c) => format!("${c:.2}"),
@@ -2347,12 +2343,12 @@ fn print_spur_agent_metrics(
             if let Some(d) = s.duration_seconds {
                 runtime_ms = (d.max(0) as u64).saturating_mul(1000);
             }
-            input_tokens = opt_token(s.input_tokens);
-            output_tokens = opt_token(s.output_tokens);
-            cache_creation_tokens = opt_token(s.cache_creation_tokens);
-            cache_read_tokens = opt_token(s.cache_read_tokens);
+            input_tokens = s.input_tokens.map(|t| t.max(0) as u64);
+            output_tokens = s.output_tokens.map(|t| t.max(0) as u64);
+            cache_creation_tokens = s.cache_creation_tokens.map(|t| t.max(0) as u64);
+            cache_read_tokens = s.cache_read_tokens.map(|t| t.max(0) as u64);
             if num_turns.is_none() {
-                num_turns = opt_token(s.num_turns);
+                num_turns = s.num_turns.map(|t| t.max(0) as u64);
             }
             // Identity: never report coding-agent / runtime name as model_name.
             if let Some(m) = s.model {

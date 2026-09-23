@@ -176,7 +176,7 @@ fn panic_location_parts(
         .split("crates/")
         .nth(1)
         .and_then(|tail| tail.split('/').next())
-        .map(ToString::to_string);
+        .map(str::to_owned);
 
     let module = normalized
         .split("src/")

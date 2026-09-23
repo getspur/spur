@@ -285,12 +285,14 @@ impl Orchestrator {
             let result = match prompt_usage.as_ref() {
                 Some(usage) => ct.end_session_with_tokens(
                     &session_id,
-                    status,
-                    duration,
-                    brain_config.cost_tier,
-                    prompt_usage_to_token_usage(usage),
-                    Some(brain_config.name.as_str()),
-                    None,
+                    TokenSessionEnd {
+                        status,
+                        duration,
+                        cost_tier: brain_config.cost_tier,
+                        usage: prompt_usage_to_token_usage(usage),
+                        model: Some(brain_config.name.as_str()),
+                        num_turns: None,
+                    },
                 ),
                 None => ct.end_session(&session_id, status, duration, brain_config.cost_tier),
             };
