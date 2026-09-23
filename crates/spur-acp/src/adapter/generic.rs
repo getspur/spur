@@ -246,3 +246,61 @@ mod tests {
         }
     }
 }
+
+/// Packed terminal/create normalization for generic ACP agents.
+///
+/// Observed on goose 1.51.0 (`goose acp`): the shell tool emits the entire
+/// command line in `command` with `args` absent — e.g.
+/// `command = "echo hi"` — which is a valid ACP shape (`command` is a
+/// free-form string), but direct exec fails with ENOENT. These tests pin the
+/// packed-form routing through `/bin/bash -c` while split requests keep
+/// protocol-correct direct exec.
+#[cfg(all(test, unix))]
+mod terminal_command_tests {
+    use crate::adapter::{normalize_terminal_command, NormalizedTerminalCommand};
+    use crate::types::AgentKind;
+
+    fn normalize(command: &str, args: &[&str]) -> Option<NormalizedTerminalCommand> {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        normalize_terminal_command(AgentKind::Generic, command, &args)
+    }
+
+    #[test]
+    fn packed_shell_line_routes_through_bash_c() {
+        let normalized = normalize("echo SHELL_PROBE_OK_7231", &[]);
+        assert_eq!(
+            normalized,
+            Some(NormalizedTerminalCommand {
+                program: "/bin/bash",
+                args: vec!["-c".to_string(), "echo SHELL_PROBE_OK_7231".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn packed_command_is_preserved_verbatim() {
+        // Nested quoting from goose's retry form must survive untouched.
+        let normalized = normalize(r##"bash -c "echo 'kept intact'" > /tmp/out"##, &[]);
+        assert_eq!(
+            normalized,
+            Some(NormalizedTerminalCommand {
+                program: "/bin/bash",
+                args: vec![
+                    "-c".to_string(),
+                    r##"bash -c "echo 'kept intact'" > /tmp/out"##.to_string(),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn split_request_keeps_direct_exec() {
+        assert_eq!(normalize("/bin/bash", &["-lc", "printf hi"]), None);
+        assert_eq!(normalize("git", &["status", "--short"]), None);
+    }
+
+    #[test]
+    fn empty_command_keeps_error_path() {
+        assert_eq!(normalize("", &[]), None);
+    }
+}
