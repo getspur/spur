@@ -447,3 +447,67 @@ cargo check -p spur-core
 1. **Remove `SCCACHE_BASEDIRS` from `~/.zshrc`** — the wrapper now owns this logic. Keeping it in `.zshrc` is harmless but creates confusion about which config is authoritative.
 2. **Increase cache size** if still at cap — with cross-worktree deduplication working, the cache will grow more slowly, but 30–50 GiB may still be tight depending on dependency churn.
 3. **Monitor**: run the Verification Protocol (same-commit A/B between two worktrees) weekly to catch regressions.
+
+---
+
+## Addendum (2026-09-23): the verified sccache key model — what actually shares
+
+A source-level audit of sccache (`src/compiler/rust.rs`, v0.14.0 and v0.15.0,
+unchanged through current master) plus controlled A/B experiments on 0.15.0
+correct the mechanism this RCA assumed.
+
+### The Rust cache key (sccache 0.14.0 → current)
+
+| Input | In key? | Notes |
+|---|---|---|
+| argv minus `-L`, `--extern`, `--out-dir`, `--diagnostic-width`, `--check-cfg` | yes | source-path arg hashed **as given** |
+| contents of sources / extern rlibs / staticlibs | yes | content-only digests, path-independent |
+| **every `CARGO_*` env var** (except `CARGO_MAKEFLAGS`, `CARGO_REGISTRIES_*`, `CARGO_BUILD_JOBS`, `CARGO_ENCODED_RUSTFLAGS`) | yes | includes **`CARGO_TARGET_DIR`** and `CARGO_MANIFEST_DIR` (both confirmed exported to rustc) |
+| **cwd** | yes, **raw** | "9. The cwd of the compile. This will wind up in the rlib." — no normalization |
+| `SCCACHE_BASEDIRS` | **no effect on Rust keys** | `strip_basedirs` applies to C/C++ preprocessor output only; zero references in `rust.rs`. Upstream issue #2595 remains open. |
+
+Cargo runs each unit's rustc with **cwd = that crate's package dir**. Hence:
+
+- **Registry dependencies**: cwd is the shared `$CARGO_HOME/registry/src/<...>/<crate>-<ver>` — identical across all worktrees, the main repo, and (per builder) across the fleet → **shareable**. The 246 hits in the original verification were these.
+- **Workspace crates**: cwd is `<tree>/crates/<crate>` → unique per worktree → **not shareable while cwds differ**; `SCCACHE_BASEDIRS` cannot fix this.
+
+### What was actually broken on the spur-builder (and fixed 2026-09-23)
+
+1. **`CARGO_TARGET_DIR` leak (fixed)** — cloud-build `build.sh` exports a
+   per-worktree `CARGO_TARGET_DIR` on the VM; the SPUR wrapper did not unset it
+   before `exec sccache`, so *every* unit (registry deps included) keyed
+   per-worktree and a fresh `.spur/worktrees/<uuid>` build recompiled the whole
+   dependency graph. Fixed in `scripts/sccache-worktree.sh` (mirroring the
+   spur-notebook wrapper, commit a77ced09). Test:
+   `scripts/test-sccache-worktree.sh`.
+2. **Singular `SCCACHE_BASEDIR` in the VM's `sccache-cc`/`sccache-cxx` (fixed)** —
+   sccache ≥ 0.14 reads only the plural `SCCACHE_BASEDIRS`; the provisioned C/C++
+   wrappers performed no normalization at all. Fixed in
+   `spur-notebook/scripts/cloud-build/startup-aws.sh` + `startup.sh`
+   (test: `scripts/cloud-build/test/test_sccache_wrapper_paths.py`).
+3. **S3-default pollution on GCP fallback VMs (fixed)** — the wrapper's aws-my
+   S3 default now stands down when `SCCACHE_GCS_BUCKET` is already configured.
+4. **Stale comment**: "mozilla 0.15.0 ignores SCCACHE_MULTILEVEL_CHAIN" is wrong
+   — 0.15.0 parses `SCCACHE_MULTILEVEL_CHAIN` (src/config.rs) and implements
+   the chain (src/cache/multilevel.rs); the VM's `disk,s3` two-level cache with
+   per-namespace L0 (`/mnt/cargo/sccache/$USER/<ns>`) does work.
+
+### Remaining limitation + path to full cross-worktree sharing
+
+Workspace crates (26 crates / ~500k LOC) still key per-worktree because of the
+raw-cwd + `CARGO_MANIFEST_DIR` inputs (both legitimately embedded in rlibs —
+they cannot be unset). The structurally correct fix is **canonical, slot-stable
+build directories** on the VM: sync each in-flight worktree to
+`~/<ns>/slot-<k>` (k = admission slot, bounded by `SPUR_BUILD_SLOTS_PER_VM=3`)
+instead of `~/<ns>/worktrees/<uuid>`. That unifies cwd, `CARGO_MANIFEST_DIR`,
+and embedded span paths with zero sccache forks, bounding cache fan-out at
+×slots instead of ×worktrees. Local macOS builds keep registry-only sharing
+(cross-machine Rust sharing is triple-scoped anyway — macOS vs Linux objects
+never collide in the same bucket).
+
+### Verification protocol (unchanged, now with the right expectation)
+
+`sccache --zero-stats` → build a second worktree at the same commit →
+`Cache misses` delta must be ≈ workspace-crate count only (registry hits ≈ all
+of the 1124-crate registry graph). After canonical slots land: delta ≈ 0 for
+lib-type units.

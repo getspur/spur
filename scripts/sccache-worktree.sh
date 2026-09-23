@@ -1,23 +1,45 @@
 #!/usr/bin/env bash
 # sccache-worktree.sh
 #
-# rustc-wrapper that dynamically sets SCCACHE_BASEDIRS to the current git
-# worktree root so sccache normalizes workspace paths identically across all
-# worktrees and the main repo. Local builds default to a shared remote backend:
+# rustc-wrapper for local + remote (cloud-build) compiles. Two jobs:
+#   1. Keep per-worktree state OUT of the sccache Rust cache key: unsets
+#      CARGO_TARGET_DIR (sccache hashes every CARGO_* env var into the Rust
+#      key — src/compiler/rust.rs hash step 8 — and cloud-build build.sh
+#      exports a per-worktree CARGO_TARGET_DIR on the VM). Without this,
+#      every compile key diverges per .spur/worktrees/* and the shared
+#      L0 disk + L1 S3 cache never hits.
+#   2. Set SCCACHE_BASEDIRS for C/C++ compiles (via the VM's sccache-cc/-cxx
+#      and any cc-rs invocation that inherits this env). NOTE: SCCACHE_BASEDIRS
+#      does NOT affect Rust cache keys — sccache (0.14.0 → current) hashes the
+#      rustc cwd raw and never normalizes it (upstream issue #2595, open);
+#      strip_basedirs only rewrites C/C++ preprocessor output. Rust
+#      cross-worktree sharing comes from job 1 (env hygiene) + stable registry
+#      cwds; workspace crates additionally need canonical build dirs (see
+#      docs/rca/2026-04-27 addendum).
+#
+# Backend selection (local builds default to the aws-my-aligned shared L1):
 #   default             → two-level cache L0=local disk, L1=AWS S3
-#                         (SCCACHE_MULTILEVEL_CHAIN=disk,s3). Default bucket
-#                         wiilearn-spur-sccache-apne1 in ap-northeast-1.
+#                         (SCCACHE_MULTILEVEL_CHAIN=disk,s3; honored by
+#                         sccache 0.15.0). Default bucket
+#                         wiilearn-spur-sccache-apse5 in ap-southeast-5,
+#                         matching the aws-my primary builder.
 #   SPUR_SCCACHE_S3=0  → disable the default S3 backend.
 #   SPUR_SCCACHE_GCS=1 → two-level cache L0=local disk, L1=GCS (macOS-gated)
 #                         when SPUR_SCCACHE_S3 is unset or disabled.
-# Explicit S3 takes precedence when both are set. Each remote backend restarts
-# the sccache server via spur-cargo so the daemon picks up the multilevel config.
+# Explicit S3 takes precedence when both are set; an ambient SCCACHE_GCS_BUCKET
+# (GCP builder profile.d) defers to the GCS backend. Each remote backend
+# restarts the sccache server via spur-cargo so the daemon picks up the
+# multilevel config.
 #
-# Why: sccache 0.14.0 strips SCCACHE_BASEDIRS prefixes before hashing.
-# Without this wrapper, each worktree's unique subdirectory name remains in the
-# relative path, causing identical source files to hash differently.
+# Why (historical, corrected — see the RCA addendum): the original wrapper
+# relied on SCCACHE_BASEDIRS to equalize worktree paths in the Rust cache key.
+# That mechanism does not exist for Rust in sccache 0.14.0 → current (BASEDIRS
+# only rewrites C/C++ preprocessor output); the measured cross-worktree hits
+# were registry dependencies, whose rustc cwd is the shared
+# $CARGO_HOME/registry/src path. What actually equalizes Rust keys today:
+# unsetting CARGO_TARGET_DIR (above) + the shared registry home on the VM.
 #
-# See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md
+# See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md (2026-09-23 addendum)
 set -euo pipefail
 
 # Resolve the git toplevel of the current working directory. In a git worktree
