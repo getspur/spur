@@ -6,7 +6,12 @@ servers, and defaults to a handshake-only run (no billed prompt). Agent argv is
 supplied as one shell-like string so flags can be copied from configuration:
 
     python3 scripts/probe_acp_capabilities.py \\
-      --command goose --args "acp --stdio" --label goose
+      --command goose --args acp --label goose
+
+    # NOTE: goose dropped its `--stdio` flag in current releases
+    # (>= 1.5x); `goose acp` is stdio-only, so older
+    # `--args "acp --stdio"` spellings now fail with
+    # "unexpected argument '--stdio' found".
 
     # Kiro-style vendor notifications + optional active RPC probes
     python3 scripts/probe_acp_capabilities.py \\
