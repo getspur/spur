@@ -4491,6 +4491,11 @@ fn acp_thread_main(
 ///
 /// Fail-closed on a closed interactive channel (deny). `permission_tx = None`
 /// remains the product skip-permissions auto-approve path.
+///
+/// Interactive replies wait for the user without a wall-clock cap
+/// (`PERMISSION_REPLY_TIMEOUT`); a dropped reply channel still denies.
+const PERMISSION_REPLY_TIMEOUT: Option<std::time::Duration> = Some(std::time::Duration::from_secs(60));
+
 async fn handle_request_permission(
     args: RequestPermissionRequest,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
@@ -4528,8 +4533,19 @@ async fn handle_request_permission(
         "NativeAcpConnection: awaiting interactive permission response"
     );
 
-    match tokio::time::timeout(std::time::Duration::from_secs(60), reply_rx).await {
-        Ok(Ok(response)) => {
+    let awaited = match PERMISSION_REPLY_TIMEOUT {
+        Some(limit) => match tokio::time::timeout(limit, reply_rx).await {
+            Ok(resolved) => resolved,
+            Err(_) => {
+                tracing::warn!("NativeAcpConnection: permission timed out (safety cap)");
+                return auto_deny(&args);
+            }
+        },
+        None => reply_rx.await,
+    };
+
+    match awaited {
+        Ok(response) => {
             let Some(option) = args
                 .options
                 .iter()
@@ -4547,12 +4563,8 @@ async fn handle_request_permission(
                 RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
             ))
         }
-        Ok(Err(_)) => {
-            tracing::debug!("NativeAcpConnection: permission denied (channel dropped)");
-            auto_deny(&args)
-        }
         Err(_) => {
-            tracing::warn!("NativeAcpConnection: permission timed out (60s safety)");
+            tracing::debug!("NativeAcpConnection: permission denied (channel dropped)");
             auto_deny(&args)
         }
     }
@@ -5846,6 +5858,51 @@ mod native_helper_tests {
             .expect("permission task should not panic")
             .expect("permission handler should return auto-deny response");
         assert_cancelled(response);
+    }
+
+    #[test]
+    fn permission_reply_timeout_is_unbounded_for_interactive_users() {
+        // Users step away from the terminal; an unanswered prompt must wait
+        // for the user's reply rather than silently deny after a fixed cap.
+        assert!(
+            PERMISSION_REPLY_TIMEOUT.is_none(),
+            "interactive permission prompts must wait for the user's reply"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handle_request_permission_waits_beyond_legacy_deadline_for_reply() {
+        let (permission_tx, mut permission_rx) = mpsc::unbounded_channel();
+        let args = permission_request(vec![permission_option(
+            "allow_once",
+            PermissionOptionKind::AllowOnce,
+        )]);
+        let task = tokio::spawn(handle_request_permission(
+            args,
+            Some(permission_tx),
+            None,
+        ));
+
+        let request = permission_rx
+            .recv()
+            .await
+            .expect("permission request should be forwarded");
+
+        // Simulate the user answering 61s in — past the legacy 60s cap.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        request
+            .reply_tx
+            .send(crate::types::PermissionResponse {
+                option_id: "allow_once".to_string(),
+            })
+            .expect("permission handler should still be awaiting the reply");
+
+        let response = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("permission handler should finish")
+            .expect("permission task should not panic")
+            .expect("permission handler should return a response");
+        assert_eq!(selected_option_id(response), "allow_once");
     }
 
     #[test]
