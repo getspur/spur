@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spur_mcp::local_projects::{
     decorate_project_response, extract_project, with_optional_project_schema, LocalProjectAccess,
-    LocalProjectResolver,
+    LocalProjectResolver, ResolvedLocalProject,
 };
 
 use crate::git_blob_oid;
@@ -37,9 +37,6 @@ use crate::{
 };
 
 pub use spur_mcp::tools::McpHandlerError;
-
-type GraphDispatchFuture<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = CodeGraphResult> + Send + 'a>>;
 
 /// Metadata for a single graph-owned MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,16 +108,49 @@ impl GraphMcpModule {
 
     /// Dispatch a tool call by name. This is the inherent entry point used by
     /// the legacy spur-core dispatcher; the `spur_mcp::ToolModule` impl below
-    /// delegates here.
+    /// delegates here. Every MCP server that exposes `code_*` goes through
+    /// this call, which returns within [`DEFAULT_CODE_TOOL_TIMEOUT`].
     pub async fn dispatch(&self, name: &str, mut args: Value) -> CodeGraphResult {
         let project = extract_project(&mut args, &self.local_projects)?;
-        let dispatch: GraphDispatchFuture<'_> = Box::pin(self.dispatch_current_project(name, args));
-        let response = if let Some(project) = project.as_ref() {
-            with_worktree_root_for_request(project.root.clone(), dispatch).await?
-        } else {
-            dispatch.await?
-        };
-        Ok(decorate_project_response(response, project.as_ref()))
+        let inherited_root = project
+            .as_ref()
+            .map(|project| project.root.clone())
+            .or_else(scoped_worktree_root);
+        #[cfg(test)]
+        let scope_barrier = PROJECT_SCOPE_BARRIER_FOR_TEST.try_with(Arc::clone).ok();
+        let module = self.clone();
+        let tool_name = name.to_string();
+        let timeout = code_tool_timeout();
+        #[cfg(any(test, feature = "test-support"))]
+        let test_delay = CODE_TOOL_DELAY_OVERRIDE.try_with(|delay| *delay).ok();
+        let mut task = tokio::spawn({
+            let tool_name = tool_name.clone();
+            async move {
+                let run = async move {
+                    #[cfg(any(test, feature = "test-support"))]
+                    if let Some(delay) = test_delay.filter(|delay| !delay.is_zero()) {
+                        tokio::time::sleep(delay).await;
+                    }
+                    run_scoped_code_tool(module, &tool_name, args, inherited_root, project).await
+                };
+                #[cfg(test)]
+                if let Some(barrier) = scope_barrier {
+                    return PROJECT_SCOPE_BARRIER_FOR_TEST.scope(barrier, run).await;
+                }
+                run.await
+            }
+        });
+        match tokio::time::timeout(timeout, &mut task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(join_error)) => Err(McpHandlerError::Internal(format!(
+                "code graph tool `{tool_name}` task failed: {join_error}"
+            ))
+            .into()),
+            Err(_elapsed) => {
+                task.abort();
+                Err(code_tool_deadline_exceeded(&tool_name, timeout))
+            }
+        }
     }
 
     async fn dispatch_current_project(&self, name: &str, args: Value) -> CodeGraphResult {
@@ -1120,6 +1150,10 @@ const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
 const DEFAULT_GRAPH_REBUILD_LATENCY_BUDGET: Duration = Duration::from_millis(750);
 const COLD_OPEN_GRAPH_REBUILD_TIMEOUT: Duration = Duration::from_secs(120);
+/// Wall-clock budget for one `code_*` MCP tool call. Every server that
+/// dispatches these tools through [`GraphMcpModule::dispatch`] uses this
+/// default so a blocked query, lock, or overlay wait returns instead of hanging.
+pub const DEFAULT_CODE_TOOL_TIMEOUT: Duration = Duration::from_secs(15);
 pub const INCREMENTAL_FAILURES_BEFORE_FULL_REBUILD: u32 = 3;
 const MARKDOWN_OVERLAY_EXTENSIONS: &[&str] = &["md", "markdown"];
 
@@ -1130,6 +1164,16 @@ tokio::task_local! {
 #[cfg(test)]
 tokio::task_local! {
     static PROJECT_SCOPE_BARRIER_FOR_TEST: Arc<tokio::sync::Barrier>;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+tokio::task_local! {
+    static CODE_TOOL_TIMEOUT_OVERRIDE: Duration;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+tokio::task_local! {
+    static CODE_TOOL_DELAY_OVERRIDE: Duration;
 }
 
 #[cfg(test)]
@@ -1157,6 +1201,7 @@ const CODE_GRAPH_NOT_FOUND_ERROR_CODE: i64 = -32004;
 const CODE_GRAPH_DELETED_ERROR_CODE: i64 = -32005;
 const CODE_GRAPH_AMBIGUOUS_ERROR_CODE: i64 = -32006;
 const CODE_GRAPH_UNKNOWN_ERROR_CODE: i64 = -32007;
+const CODE_GRAPH_TIMEOUT_ERROR_CODE: i64 = -32008;
 
 pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
@@ -4843,6 +4888,43 @@ pub fn set_graph_rebuild_delay_for_test(delay: Duration) -> GraphRebuildDelayGua
     GraphRebuildDelayGuard { previous_ms }
 }
 
+fn code_tool_timeout() -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Ok(timeout) = CODE_TOOL_TIMEOUT_OVERRIDE.try_with(|timeout| *timeout) {
+        return timeout;
+    }
+    DEFAULT_CODE_TOOL_TIMEOUT
+}
+
+fn code_tool_deadline_exceeded(tool_name: &str, timeout: Duration) -> CodeGraphError {
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    CodeGraphError::with_temporal(
+        CODE_GRAPH_TIMEOUT_ERROR_CODE,
+        format!("code graph tool `{tool_name}` exceeded {timeout_ms}ms deadline"),
+        json!({
+            "kind": "timeout",
+            "timeout_ms": timeout_ms,
+        }),
+    )
+}
+
+async fn run_scoped_code_tool(
+    module: GraphMcpModule,
+    tool_name: &str,
+    args: Value,
+    inherited_root: Option<PathBuf>,
+    project: Option<ResolvedLocalProject>,
+) -> CodeGraphResult {
+    let response = match inherited_root {
+        Some(root) => {
+            with_worktree_root_for_request(root, module.dispatch_current_project(tool_name, args))
+                .await?
+        }
+        None => module.dispatch_current_project(tool_name, args).await?,
+    };
+    Ok(decorate_project_response(response, project.as_ref()))
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub struct IncrementalRebuildFailureGuard {
     previous_failures: usize,
@@ -8506,6 +8588,86 @@ mod tests {
 
     fn test_internal_error(message: impl Into<String>) -> CodeGraphError {
         CodeGraphError::without_metadata(McpHandlerError::Internal(message.into()))
+    }
+
+    #[test]
+    fn default_code_tool_timeout_is_fifteen_seconds() {
+        assert_eq!(DEFAULT_CODE_TOOL_TIMEOUT, Duration::from_secs(15));
+        assert_eq!(
+            DEFAULT_CODE_TOOL_TIMEOUT.as_millis(),
+            15_000,
+            "server deadline matches the solved wall_ms request"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_tool_dispatch_returns_when_the_call_exceeds_the_deadline() {
+        let module = GraphMcpModule::default();
+        let started = Instant::now();
+
+        let error = CODE_TOOL_TIMEOUT_OVERRIDE
+            .scope(Duration::from_millis(30), async {
+                CODE_TOOL_DELAY_OVERRIDE
+                    .scope(Duration::from_millis(250), async move {
+                        module
+                            .dispatch("code_resolve", json!({"selector": "missing_symbol"}))
+                            .await
+                    })
+                    .await
+            })
+            .await
+            .expect_err("a call past the deadline returns an error");
+        let response = error.into_error_response().await;
+
+        assert_eq!(response.code, CODE_GRAPH_TIMEOUT_ERROR_CODE);
+        assert!(
+            response.message.contains("code_resolve"),
+            "timeout names the tool: {}",
+            response.message
+        );
+        assert_eq!(
+            response.data.as_ref().and_then(|data| data.get("kind")),
+            Some(&json!("timeout"))
+        );
+        assert_eq!(
+            response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("timeout_ms")),
+            Some(&json!(30))
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "deadline returns before the blocked call finishes, elapsed {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn code_tool_dispatch_keeps_the_caller_worktree_under_the_deadline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = artifact_from_source(root, "pub fn deadline_scope_symbol() {}\n");
+        write_current_artifact(root, &artifact);
+        let module = GraphMcpModule::default();
+        let root = root.to_path_buf();
+
+        let body = with_worktree_root_for_request(root, async move {
+            module
+                .dispatch(
+                    "code_symbol_search",
+                    json!({"query": "deadline_scope_symbol", "mode": "exact"}),
+                )
+                .await
+        })
+        .await
+        .expect("scoped search returns inside the deadline");
+
+        assert_eq!(
+            body["candidates"][0]["entity_name"],
+            "deadline_scope_symbol"
+        );
     }
 
     #[tokio::test]
