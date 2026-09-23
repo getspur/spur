@@ -1264,7 +1264,7 @@ mod tests {
 
         use spur_acp::{ContentBlock, TextContent};
 
-        use crate::mentions::hint::prepend_worker_hint;
+        use crate::components::input_bar_mention_hint::prepend_worker_hint;
 
         use super::replace_trigger_token;
 

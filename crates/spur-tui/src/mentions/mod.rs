@@ -2,7 +2,6 @@ pub mod code_graph;
 pub mod datasource_source;
 pub mod entry;
 pub mod file_source;
-pub(crate) mod hint;
 pub mod issue_search;
 pub mod issue_source;
 pub mod registry;

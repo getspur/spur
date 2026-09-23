@@ -1775,7 +1775,7 @@ impl DashboardView {
                                 }
                                 if has_datasource_mentions {
                                     let mention_registry = self.mention_registry.borrow();
-                                    let _ = crate::mentions::hint::prepend_datasource_hint(
+                                    let _ = crate::components::input_bar_mention_hint::prepend_datasource_hint(
                                         &mut blocks,
                                         &ranges,
                                         |uri| {
@@ -1785,11 +1785,12 @@ impl DashboardView {
                                         },
                                     );
                                 }
-                                let _ = crate::mentions::hint::prepend_worker_hint(
-                                    &mut blocks,
-                                    &ranges,
-                                    &self.known_worker_names,
-                                );
+                                let _ =
+                                    crate::components::input_bar_mention_hint::prepend_worker_hint(
+                                        &mut blocks,
+                                        &ranges,
+                                        &self.known_worker_names,
+                                    );
                                 if self.session_attached {
                                     Some(Action::SendMessage {
                                         session: spur_acp::SessionId(String::new()),
