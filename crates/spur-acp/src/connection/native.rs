@@ -4494,7 +4494,7 @@ fn acp_thread_main(
 ///
 /// Interactive replies wait for the user without a wall-clock cap
 /// (`PERMISSION_REPLY_TIMEOUT`); a dropped reply channel still denies.
-const PERMISSION_REPLY_TIMEOUT: Option<std::time::Duration> = Some(std::time::Duration::from_secs(60));
+const PERMISSION_REPLY_TIMEOUT: Option<std::time::Duration> = None;
 
 async fn handle_request_permission(
     args: RequestPermissionRequest,
@@ -5877,11 +5877,7 @@ mod native_helper_tests {
             "allow_once",
             PermissionOptionKind::AllowOnce,
         )]);
-        let task = tokio::spawn(handle_request_permission(
-            args,
-            Some(permission_tx),
-            None,
-        ));
+        let task = tokio::spawn(handle_request_permission(args, Some(permission_tx), None));
 
         let request = permission_rx
             .recv()
