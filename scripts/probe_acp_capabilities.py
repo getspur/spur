@@ -2061,6 +2061,11 @@ class TerminalHost:
                     and words[1] in ("-lc", "-c")
                 ):
                     argv = words
+        elif not args and command and os.name == "posix":
+            # Mirror SPUR's generic packed-argv interop (goose 1.51): a
+            # terminal/create command string with no args is a full shell
+            # line; direct exec fails with ENOENT, so run it via /bin/bash -c.
+            argv = ["/bin/bash", "-c", command]
         limit = params.get("outputByteLimit")
         if limit is None:
             limit = 10 * 1024 * 1024
