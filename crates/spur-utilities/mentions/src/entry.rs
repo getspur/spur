@@ -12,6 +12,8 @@
 use std::fmt;
 use std::path::Path;
 
+use crate::profile::FilesystemProfile;
+
 /// Stable identifier of a neutral entry within one source snapshot.
 ///
 /// Ids are minted sequentially by the source (or engine) that builds a
@@ -105,11 +107,26 @@ impl SourceSnapshot {
 
 /// Query-independent inputs to a [`MentionSource::build`].
 ///
-/// Reserved for the M2 extraction: the filesystem traversal profile
-/// (hidden/directory/ignore-rule switches that also fingerprint the cache
-/// key) arrives here, so `build` never needs a per-frontend signature.
+/// The filesystem traversal profile (hidden/directory/ignore-rule/URI
+/// switches, fingerprinted into the engine cache key) arrives here, so
+/// `build` never needs a per-frontend signature. Defaults to the
+/// TUI-compatible profile.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SourceContext;
+pub struct SourceContext {
+    /// Traversal policy for filesystem-backed sources.
+    pub filesystem_profile: FilesystemProfile,
+}
+
+/// Category of a [`SourceBuildError`]; the engine maps traversal-typed
+/// failures to [`crate::MentionError::Traversal`] and everything else to
+/// [`crate::MentionError::SourceBuild`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBuildErrorKind {
+    /// Filesystem traversal failure.
+    Traversal,
+    /// Any other build failure.
+    Other,
+}
 
 /// Typed failure of one source's [`MentionSource::build`].
 ///
@@ -120,13 +137,24 @@ pub struct SourceContext;
 pub struct SourceBuildError {
     /// Stable diagnostic message. Paths stay caller-redacted.
     pub message: String,
+    /// Failure category.
+    pub kind: SourceBuildErrorKind,
 }
 
 impl SourceBuildError {
-    /// Build the error from a diagnostic message.
+    /// Build a generic (non-traversal) error from a diagnostic message.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            kind: SourceBuildErrorKind::Other,
+        }
+    }
+
+    /// Build a traversal-typed error from a diagnostic message.
+    pub fn traversal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: SourceBuildErrorKind::Traversal,
         }
     }
 }
@@ -149,6 +177,14 @@ impl std::error::Error for SourceBuildError {}
 pub trait MentionSource: Send {
     /// Stable key identifying this source in cache identity and diagnostics.
     fn key(&self) -> &str;
+
+    /// Data-revision token participating in the cache key: returning a new
+    /// value (e.g. a code-graph artifact identity) invalidates the cached
+    /// snapshot immediately. The default `0` means "no identity; the TTL
+    /// governs".
+    fn source_token(&self) -> u64 {
+        0
+    }
 
     /// Rebuild the snapshot from scratch for `root` under `context`.
     fn build(
@@ -181,6 +217,11 @@ mod tests {
     fn source_build_error_message_round_trips() {
         let error = SourceBuildError::new("no root");
         assert_eq!(error.message, "no root");
+        assert_eq!(error.kind, SourceBuildErrorKind::Other);
         assert_eq!(error.to_string(), "no root");
+        assert_eq!(
+            SourceBuildError::traversal("walk failed").kind,
+            SourceBuildErrorKind::Traversal
+        );
     }
 }

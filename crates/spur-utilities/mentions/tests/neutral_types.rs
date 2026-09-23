@@ -142,7 +142,7 @@ fn mention_source_trait_is_object_safe() {
     assert_eq!(source.key(), "fixture");
 
     let snapshot = source
-        .build(Path::new("/tmp"), &SourceContext)
+        .build(Path::new("/tmp"), &SourceContext::default())
         .expect("fixture build succeeds");
     assert_eq!(snapshot.generation, 3);
     assert_eq!(snapshot.entries[0].uri, "worker://claude");
@@ -155,7 +155,7 @@ fn source_build_failures_are_typed_not_flattened() {
         fail: true,
     });
     let error = failing
-        .build(Path::new("/tmp"), &SourceContext)
+        .build(Path::new("/tmp"), &SourceContext::default())
         .expect_err("fixture build must fail");
 
     assert_eq!(error, SourceBuildError::new("fixture cannot read /tmp"));
