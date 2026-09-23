@@ -139,6 +139,27 @@ jobs:
       - name: doctests
         run: cargo test --workspace --doc --locked
 
+      # Continuous dependency-topology hygiene gate (2026-09-23 spur-utilities
+      # decoupling spec, §5): default-features spur-mentions must contain
+      # neither spur-acp nor ratatui; --features code must contain neither
+      # ratatui nor spur-tui (spur-acp IS expected there, via
+      # spur-graph -> spur-mcp); spur-utilities must depend directly on
+      # exactly spur-commands + spur-mentions. `cargo xtask hygiene` skips
+      # crates that are not scaffolded yet, so this step stays green at every
+      # migration phase.
+      - name: cargo xtask hygiene (dependency topology)
+        run: cargo xtask hygiene
+
+      # The notebook consumes spur-mentions with default-features = false;
+      # --workspace builds never compile that configuration (feature
+      # unification turns `code` on), so it gets dedicated clippy + test
+      # gates (spec §5). Raw cargo on purpose: they turn on once the crate
+      # is scaffolded and stay unconditional from then on.
+      - name: cargo clippy -p spur-mentions --no-default-features
+        run: cargo clippy -p spur-mentions --no-default-features --locked -- -D warnings
+      - name: cargo test -p spur-mentions --no-default-features
+        run: cargo test -p spur-mentions --no-default-features --locked
+
       - name: Upload test results (JUnit)
         if: always()
         uses: actions/upload-artifact@v4
