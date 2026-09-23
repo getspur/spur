@@ -6,8 +6,7 @@ use crate::action::PermissionChoice;
 /// `None` waits for the user's reply (fail-closed paths — channel drop,
 /// session exit — still deny). A fixed cap silently denies users who step
 /// away from the terminal mid-prompt.
-const PENDING_PERMISSION_DEADLINE: Option<std::time::Duration> =
-    Some(std::time::Duration::from_secs(30));
+const PENDING_PERMISSION_DEADLINE: Option<std::time::Duration> = None;
 
 impl App {
     pub(super) fn process_permission(&mut self, choice: PermissionChoice) -> Option<Action> {
