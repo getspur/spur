@@ -31,7 +31,8 @@ use spur_graph::{CodeMentionKind, CodeMentionPayload};
 
 use super::advertised::pinned_route_for_command;
 use super::entry::{CommandSource, Dispatch};
-use super::registry::CommandRegistry;
+use super::spur_local::local_dispatch;
+use super::tui_registry::CommandRegistry;
 
 /// What the controller should do with an Enter-submitted InputBar.
 #[derive(Debug)]
@@ -112,86 +113,20 @@ pub fn route_with_caps(
 
     // /work <id> → issue WorkOn action
     if let Some(rest) = text.strip_prefix("/work ") {
-        let id = rest.trim().to_string();
-        if !id.is_empty() {
-            return SubmitDecision::Local {
-                action: Action::Issue(crate::action::IssueAction::WorkOn { id }),
-            };
+        if let Some(action) = local_dispatch("work", Some(rest)) {
+            return SubmitDecision::Local { action };
         }
     }
 
-    // /theme [<name>|reload] → carry the raw arg into Action::ThemeCommand.
-    // Intercepted ahead of the registry so the trailing arg is preserved
-    // (the registry-resolved variant in `spur_local` carries an empty arg
-    // and only services the bare `/theme` form).
-    if text == "/theme" {
-        return SubmitDecision::Local {
-            action: Action::ThemeCommand { arg: String::new() },
-        };
-    }
-    if let Some(rest) = text.strip_prefix("/theme ") {
-        return SubmitDecision::Local {
-            action: Action::ThemeCommand {
-                arg: rest.trim().to_string(),
-            },
-        };
-    }
-
-    // /brain [<name>] → Scope A hot-swap; preserve trailing arg.
-    if text == "/brain" {
-        return SubmitDecision::Local {
-            action: Action::BrainCommand { arg: String::new() },
-        };
-    }
-    if let Some(rest) = text.strip_prefix("/brain ") {
-        return SubmitDecision::Local {
-            action: Action::BrainCommand {
-                arg: rest.trim().to_string(),
-            },
-        };
-    }
-    if text == "/brains" {
-        return SubmitDecision::Local {
-            action: Action::ListBrains,
-        };
-    }
-
-    if text == "/notebook" {
-        return SubmitDecision::Local {
-            action: Action::NotebookCommand { arg: String::new() },
-        };
-    }
-    if let Some(rest) = text.strip_prefix("/notebook ") {
-        return SubmitDecision::Local {
-            action: Action::NotebookCommand {
-                arg: rest.trim().to_string(),
-            },
-        };
-    }
-
-    if text == "/configure" {
-        return SubmitDecision::Local {
-            action: Action::NavigateTo(crate::action::ViewId::AgentConfigBrowser {
-                preselect: None,
-            }),
-        };
-    }
-    if let Some(rest) = text.strip_prefix("/configure ") {
-        let preselect = rest.trim();
-        return SubmitDecision::Local {
-            action: Action::NavigateTo(crate::action::ViewId::AgentConfigBrowser {
-                preselect: (!preselect.is_empty()).then(|| preselect.to_string()),
-            }),
-        };
-    }
-
-    // /issue show <id> → issue ViewDetail action
-    if let Some(rest) = text.strip_prefix("/issue show ") {
-        let id = rest.trim().to_string();
-        if !id.is_empty() {
-            return SubmitDecision::Local {
-                action: Action::Issue(crate::action::IssueAction::ViewDetail { id }),
-            };
+    // Frontend-owned meta-command interceptions ahead of the registry:
+    // the trailing arg must ride into the Action (the registry-resolved
+    // layer only services the bare forms). All of them resolve through
+    // the same static `local_dispatch` table the registry layer uses.
+    for name in ["theme", "brain", "brains", "notebook", "configure", "issue"] {
+        if let Some(rest) = arg_after_command(text, name) {
+            if let Some(action) = local_dispatch(name, Some(rest)) {
+                return SubmitDecision::Local { action };
+            }
         }
     }
 
@@ -235,7 +170,16 @@ pub fn route_with_caps(
                 }
             }
             return match entry.dispatch {
-                Dispatch::SpurLocal(action) => SubmitDecision::Local { action },
+                Dispatch::Local { name } => {
+                    let rest = rest_after_first_token(text);
+                    let arg = (!rest.is_empty()).then_some(rest.as_str());
+                    match local_dispatch(&name, arg) {
+                        Some(action) => SubmitDecision::Local { action },
+                        // Unreachable for the TUI layer (every catalog name
+                        // resolves); fail closed rather than send garbage.
+                        None => SubmitDecision::Empty,
+                    }
+                }
                 Dispatch::PromptText { normalized } => {
                     let rest = rest_after_first_token(text);
                     let normalized_full = if rest.is_empty() {
@@ -397,6 +341,18 @@ fn rest_after_first_token(text: &str) -> String {
     match text.split_once(char::is_whitespace) {
         Some((_, rest)) => rest.trim_start().to_string(),
         None => String::new(),
+    }
+}
+
+/// `Some("")` for the bare `/<name>` form, `Some(" <rest>")` for
+/// `/<name> <rest>`, and `None` when `text` is not that command at all
+/// (including longer names sharing the prefix, e.g. `/brains` vs `/brain`).
+fn arg_after_command<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix('/')?.strip_prefix(name)?;
+    if rest.is_empty() || rest.starts_with(' ') {
+        Some(rest)
+    } else {
+        None
     }
 }
 
@@ -950,7 +906,7 @@ mod image_block_tests {
 #[cfg(test)]
 mod brain_slash_tests {
     use super::*;
-    use crate::commands::registry::CommandRegistry;
+    use crate::commands::CommandRegistry;
 
     #[test]
     fn slash_brain_bare_routes_to_brain_command_empty_arg() {
@@ -992,7 +948,7 @@ mod brain_slash_tests {
 #[cfg(test)]
 mod sessions_slash_tests {
     use super::*;
-    use crate::commands::registry::CommandRegistry;
+    use crate::commands::CommandRegistry;
     use spur_acp::capability_evidence::{
         CapabilityChoice, CapabilityKey, CapabilityKind, CliIdentity, EvidenceClaim, EvidenceEpoch,
         EvidenceEpochId, EvidenceProvenance, EvidenceRecord, EvidenceSessionScope, ObservationTime,

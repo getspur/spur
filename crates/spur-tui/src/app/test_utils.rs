@@ -329,7 +329,7 @@ impl App {
         name: &str,
         description: &str,
     ) {
-        use crate::commands::registry::CommandRegistry;
+        use crate::commands::CommandRegistry;
         use spur_acp::{AvailableCommand, CommandsConfig};
 
         let cfg = CommandsConfig::default();

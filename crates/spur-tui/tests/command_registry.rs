@@ -7,7 +7,9 @@ fn command_entry_constructs() {
         description: "Show spur keybindings".into(),
         hint: None,
         source: CommandSource::Spur,
-        dispatch: Dispatch::SpurLocal(spur_tui::action::Action::ShowHelp),
+        dispatch: Dispatch::Local {
+            name: "help".into(),
+        },
         arg_picker_spec: None,
     };
     assert_eq!(e.name, "help");
@@ -42,8 +44,8 @@ fn spur_local_source_exposes_only_unconditional_meta_commands() {
     for e in &entries {
         assert!(matches!(e.source, spur_tui::commands::CommandSource::Spur));
         assert!(matches!(
-            e.dispatch,
-            spur_tui::commands::Dispatch::SpurLocal(_)
+            &e.dispatch,
+            spur_tui::commands::Dispatch::Local { name } if name == &e.name
         ));
     }
 }
@@ -192,4 +194,68 @@ fn fuzzy_rank_empty_query_returns_input_order() {
     let ranked = rank(&entries, "");
     assert_eq!(ranked.len(), entries.len());
     assert_eq!(ranked[0].name, entries[0].name);
+}
+
+/// Every TUI-facing `CommandRegistry` constructor must install the full
+/// spur-local meta-command layer (injected `LocalLayer`): no constructor
+/// path may build a registry without `/clear` and friends. Spec
+/// 2026-09-23 §3.2 — injection test over every TUI constructor.
+fn assert_lists_full_spur_local_layer(registry: &CommandRegistry) {
+    let entries = registry.list();
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    for entry in spur_tui::commands::SpurLocalSource::entries() {
+        assert!(
+            names.contains(&entry.name.as_str()),
+            "constructor must list /{} (have {:?})",
+            entry.name,
+            names
+        );
+    }
+}
+
+#[test]
+fn tui_constructors_install_the_full_spur_local_layer() {
+    assert_lists_full_spur_local_layer(&CommandRegistry::new());
+    assert_lists_full_spur_local_layer(&CommandRegistry::default());
+
+    let mut cfg = spur_acp::AgentConfig::with_defaults("codex");
+    cfg.commands.static_commands = vec![spur_acp::StaticCommandDecl {
+        name: "compact".into(),
+        description: "compact desc".into(),
+        hint: None,
+    }];
+    let mut registry = CommandRegistry::from_configs(&[cfg]);
+    assert_lists_full_spur_local_layer(&registry);
+    // from_configs still merges agent statics alongside the layer.
+    let entries = registry.list();
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"compact"));
+}
+
+#[test]
+fn tui_registry_exclusive_names_shadow_agent_entries() {
+    for name in spur_tui::commands::SpurLocalSource::exclusive_names() {
+        let mut registry = CommandRegistry::new();
+        registry.set_agent_commands(
+            "kiro",
+            vec![agent_entry(
+                "kiro",
+                &acp_cmd(name, &format!("{name} agent-owned"), None),
+            )],
+        );
+        let survivors: Vec<_> = registry
+            .list()
+            .into_iter()
+            .filter(|e| e.name == *name)
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "exclusive /{name} must shadow the same-named agent entry"
+        );
+        assert!(
+            matches!(survivors[0].source, CommandSource::Spur),
+            "surviving /{name} must be the spur-local entry"
+        );
+    }
 }

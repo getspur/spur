@@ -271,7 +271,7 @@ fn legacy_candidate_rank(entry: &CommandEntry) -> (u8, String, String, String) {
         Dispatch::SetSessionMode => (1, "mode".to_owned()),
         Dispatch::VendorExec { command, .. } => (2, command.clone()),
         Dispatch::PromptText { normalized } => (3, normalized.clone()),
-        Dispatch::SpurLocal(_) => (4, String::new()),
+        Dispatch::Local { .. } => (4, String::new()),
     };
     (
         rank,

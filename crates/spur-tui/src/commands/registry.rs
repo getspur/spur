@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 
 use super::advertised::{normalize_command_name, AdvertisedEntries, PinnedCapabilityRoute};
 use super::entry::{CommandEntry, CommandSource, Dispatch};
-use super::spur_local::SpurLocalSource;
 use spur_acp::capability_evidence::DispatchRoute;
 use spur_acp::{AgentConfig, SpurAgentCaps};
 
@@ -11,6 +10,33 @@ use spur_acp::{AgentConfig, SpurAgentCaps};
 /// Agent prompt commands with these names stay hidden even before the
 /// capability catalog arrives, so they cannot bypass native validation.
 const CAPABILITY_OWNED_NAMES: &[&str] = &["mode"];
+
+/// The frontend-owned meta-command layer injected into the registry.
+///
+/// The registry's merge policy needs the frontend's meta-commands: they
+/// are listed first, and "exclusive" names shadow same-named static,
+/// dynamic, and advertised entries. Injecting the layer (instead of the
+/// registry reading a frontend catalog directly) keeps the registry
+/// neutral — the TUI installs its `spur_local` catalog layer through the
+/// `commands::CommandRegistry` newtype; other frontends may pass
+/// `LocalLayer::empty()` or their own layer.
+#[derive(Debug, Clone, Default)]
+pub struct LocalLayer {
+    /// Meta-command entries, listed ahead of agent entries in the merge.
+    pub entries: Vec<CommandEntry>,
+    /// Names that exclusively own their command name: same-named static,
+    /// dynamic, and advertised entries are suppressed.
+    pub exclusive_names: Vec<String>,
+}
+
+impl LocalLayer {
+    pub fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            exclusive_names: Vec::new(),
+        }
+    }
+}
 
 /// Merges spur-local, static (config), and dynamic (runtime) slash
 /// commands.
@@ -28,6 +54,8 @@ pub struct CommandRegistry {
     /// (e.g. NewSessionResponse.config_options). Shadowed by spur-local
     /// exclusive meta-commands; otherwise visible alongside dynamic.
     advertised_commands: Vec<(String, AdvertisedCommandSet)>,
+    /// Frontend-owned meta-command layer (TUI: spur-local slash commands).
+    local: LocalLayer,
     /// Lazy merged view. Rebuilt on any mutation.
     cache: RefCell<Option<CacheSnapshot>>,
 }
@@ -77,20 +105,24 @@ fn reduced_layer_priority(layer: RegistryLayer, route: DispatchRoute) -> u8 {
 }
 
 impl CommandRegistry {
-    pub fn new() -> Self {
+    /// Build an empty registry with the frontend's meta-command layer
+    /// injected. The layer's entries are listed first and its exclusive
+    /// names shadow same-named agent entries.
+    pub fn new(local: LocalLayer) -> Self {
         Self {
             static_commands: Vec::new(),
             dynamic_commands: Vec::new(),
             advertised_commands: Vec::new(),
+            local,
             cache: RefCell::new(None),
         }
     }
 
-    /// Build a registry pre-populated with static commands from `configs`.
-    /// Static commands become visible in the popup before any agent
-    /// connects; dynamic commands received later override these on
-    /// `(handle, name)` match.
-    pub fn from_configs(configs: &[AgentConfig]) -> Self {
+    /// Build a registry pre-populated with static commands from `configs`,
+    /// plus the injected frontend meta-command layer. Static commands
+    /// become visible in the popup before any agent connects; dynamic
+    /// commands received later override these on `(handle, name)` match.
+    pub fn from_configs(configs: &[AgentConfig], local: LocalLayer) -> Self {
         let static_commands = configs
             .iter()
             .filter(|c| !c.commands.static_commands.is_empty())
@@ -109,6 +141,7 @@ impl CommandRegistry {
             static_commands,
             dynamic_commands: Vec::new(),
             advertised_commands: Vec::new(),
+            local,
             cache: RefCell::new(None),
         }
     }
@@ -226,19 +259,22 @@ impl CommandRegistry {
             })
             .collect::<HashSet<_>>();
 
-        let spur_local_entries = SpurLocalSource::entries();
-
-        // Meta-command precedence: spur-local entries that are "exclusive"
-        // shadow any agent-advertised entry with the same name. See the
-        // module comment in `spur_local.rs` for the taxonomy rationale.
-        // Non-exclusive spur-local entries (e.g. /help) may still coexist
-        // with agent entries of the same name (collision-display applies).
-        let exclusive_names: HashSet<&str> =
-            SpurLocalSource::exclusive_names().iter().copied().collect();
+        // Meta-command precedence: injected local entries that are
+        // "exclusive" shadow any agent-advertised entry with the same
+        // name. See the module comment in `spur_local.rs` for the
+        // taxonomy rationale. Non-exclusive local entries (e.g. /help)
+        // may still coexist with agent entries of the same name
+        // (collision-display applies).
+        let exclusive_names: HashSet<&str> = self
+            .local
+            .exclusive_names
+            .iter()
+            .map(String::as_str)
+            .collect();
         let capability_owned_names: HashSet<&str> =
             CAPABILITY_OWNED_NAMES.iter().copied().collect();
 
-        let mut entries = spur_local_entries;
+        let mut entries = self.local.entries.clone();
         let mut reduced_entries = Vec::<(u8, CommandEntry)>::new();
         let mut reduced_index = HashMap::<(String, String), usize>::new();
 
@@ -377,7 +413,7 @@ impl CommandRegistry {
     ///   ⇒ require `caps.supports_set_config_option()`.
     /// * `Dispatch::SetSessionMode`
     ///   ⇒ require a non-empty advertised mode catalog.
-    /// * `Dispatch::SpurLocal`, `Dispatch::PromptText`, `Dispatch::VendorExec`
+    /// * `Dispatch::Local`, `Dispatch::PromptText`, `Dispatch::VendorExec`
     ///   ⇒ always allowed.
     pub fn available_commands_for_session(
         &self,
@@ -390,7 +426,7 @@ impl CommandRegistry {
         entries
             .into_iter()
             .filter(|e| match &e.dispatch {
-                Dispatch::SpurLocal(_)
+                Dispatch::Local { .. }
                 | Dispatch::PromptText { .. }
                 | Dispatch::VendorExec { .. }
                 | Dispatch::SetSessionModel
@@ -460,17 +496,30 @@ impl CommandRegistry {
     }
 }
 
-impl Default for CommandRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
     use spur_acp::{AgentConfig, CommandsConfig, DispatchKind, StaticCommandDecl};
+
+    /// Fixture local layer for the shadowing tests: one exclusive
+    /// meta-command (`/clear`), mirroring the TUI's real catalog shape
+    /// (`Dispatch::Local { name }` pointing back at its own entry name).
+    fn fixture_local_layer() -> LocalLayer {
+        LocalLayer {
+            entries: vec![CommandEntry {
+                name: "clear".into(),
+                description: "fixture local clear".into(),
+                hint: None,
+                source: CommandSource::Spur,
+                dispatch: Dispatch::Local {
+                    name: "clear".into(),
+                },
+                arg_picker_spec: None,
+            }],
+            exclusive_names: vec!["clear".into()],
+        }
+    }
 
     fn config_with_static(name: &str, handle: &str, statics: Vec<&str>) -> AgentConfig {
         let mut cfg = AgentConfig::with_defaults(name);
@@ -493,7 +542,7 @@ mod tests {
     #[test]
     fn from_configs_loads_static_commands_at_construction() {
         let cfg = config_with_static("codex", "codex", vec!["compact", "model"]);
-        let registry = CommandRegistry::from_configs(&[cfg]);
+        let registry = CommandRegistry::from_configs(&[cfg], LocalLayer::empty());
         let names: Vec<_> = registry.list().iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&"compact".to_string()));
         assert!(names.contains(&"model".to_string()));
@@ -502,7 +551,7 @@ mod tests {
     #[test]
     fn from_configs_without_statics_is_empty() {
         let cfg = AgentConfig::with_defaults("codex");
-        let registry = CommandRegistry::from_configs(&[cfg]);
+        let registry = CommandRegistry::from_configs(&[cfg], LocalLayer::empty());
         // Only spur-local commands present; no agent commands.
         assert!(registry
             .list()
@@ -513,7 +562,7 @@ mod tests {
     #[test]
     fn dynamic_overrides_static_on_same_handle_name() {
         let cfg = config_with_static("codex", "codex", vec!["compact"]);
-        let mut registry = CommandRegistry::from_configs(&[cfg]);
+        let mut registry = CommandRegistry::from_configs(&[cfg], LocalLayer::empty());
         let dynamic = CommandEntry {
             name: "compact".into(),
             description: "DYNAMIC DESC".into(),
@@ -543,7 +592,7 @@ mod tests {
     #[test]
     fn clearing_dynamic_reveals_static_again() {
         let cfg = config_with_static("codex", "codex", vec!["compact"]);
-        let mut registry = CommandRegistry::from_configs(&[cfg]);
+        let mut registry = CommandRegistry::from_configs(&[cfg], LocalLayer::empty());
         let dynamic = CommandEntry {
             name: "compact".into(),
             description: "DYNAMIC".into(),
@@ -573,7 +622,7 @@ mod tests {
     #[test]
     fn mode_is_hidden_until_an_agent_mode_catalog_is_available() {
         let cfg = config_with_static("codex", "codex", vec!["mode"]);
-        let registry = CommandRegistry::from_configs(&[cfg]);
+        let registry = CommandRegistry::from_configs(&[cfg], LocalLayer::empty());
 
         assert!(
             registry.list().iter().all(|entry| entry.name != "mode"),
@@ -584,7 +633,7 @@ mod tests {
     #[test]
     fn synthesized_mode_wins_over_same_handle_agent_command() {
         let cfg = config_with_static("codex", "codex", vec!["mode"]);
-        let mut registry = CommandRegistry::from_configs(&[cfg]);
+        let mut registry = CommandRegistry::from_configs(&[cfg], LocalLayer::empty());
         registry.set_agent_commands(
             "codex",
             vec![CommandEntry {
@@ -633,7 +682,7 @@ mod tests {
         // both agent entries survive into the registry and collide.
         let codex = config_with_static("codex", "codex", vec!["compact"]);
         let kiro = config_with_static("kiro", "kiro", vec!["compact"]);
-        let registry = CommandRegistry::from_configs(&[codex, kiro]);
+        let registry = CommandRegistry::from_configs(&[codex, kiro], LocalLayer::empty());
         let compact_entries: Vec<_> = registry
             .list()
             .into_iter()
@@ -655,7 +704,7 @@ mod tests {
         // Agent advertises /clear dynamically (kiro does this). The
         // spur-local /clear meta-command must take precedence and the
         // agent's /clear must NOT appear in the list.
-        let mut registry = CommandRegistry::new();
+        let mut registry = CommandRegistry::new(fixture_local_layer());
         let agent_clear = CommandEntry {
             name: "clear".into(),
             description: "agent's own clear".into(),
@@ -685,7 +734,7 @@ mod tests {
 
     #[test]
     fn advertised_commands_appear_in_cache() {
-        let mut reg = CommandRegistry::new();
+        let mut reg = CommandRegistry::new(LocalLayer::empty());
         let entry = CommandEntry {
             name: "model".into(),
             description: "Switch model".into(),
@@ -707,7 +756,7 @@ mod tests {
     fn spur_local_shadows_advertised_with_same_name() {
         // spur-local /clear is an exclusive meta-command (per SpurLocalSource).
         // Verify an advertised /clear from an agent is shadowed.
-        let mut reg = CommandRegistry::new();
+        let mut reg = CommandRegistry::new(fixture_local_layer());
         let advertised_clear = CommandEntry {
             name: "clear".into(),
             description: "agent's clear".into(),
@@ -740,7 +789,7 @@ mod tests {
     /// pickers visible (no regression).
     #[test]
     fn available_commands_for_session_with_none_caps_returns_all_entries() {
-        let mut reg = CommandRegistry::new();
+        let mut reg = CommandRegistry::new(LocalLayer::empty());
         reg.set_advertised_commands(
             "codex",
             vec![
@@ -799,7 +848,7 @@ mod tests {
         assert!(caps.supports_set_model());
         assert!(caps.supports_set_config_option());
 
-        let mut reg = CommandRegistry::new();
+        let mut reg = CommandRegistry::new(LocalLayer::empty());
         reg.set_advertised_commands(
             "codex",
             vec![CommandEntry {
@@ -831,7 +880,7 @@ mod tests {
         let new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
         let caps = spur_acp::SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::Generic);
         assert!(
-            !CommandRegistry::new()
+            !CommandRegistry::new(LocalLayer::empty())
                 .available_commands_for_session(Some(&caps))
                 .iter()
                 .any(|entry| entry.name == "mode"),
@@ -852,7 +901,7 @@ mod tests {
         assert!(!caps.supports_set_model());
         assert!(!caps.supports_set_config_option());
 
-        let mut reg = CommandRegistry::new();
+        let mut reg = CommandRegistry::new(LocalLayer::empty());
         reg.set_advertised_commands(
             "gemini",
             vec![
@@ -920,7 +969,7 @@ mod tests {
         assert!(caps.supports_set_model());
         assert!(caps.supports_set_config_option());
 
-        let mut reg = CommandRegistry::new();
+        let mut reg = CommandRegistry::new(LocalLayer::empty());
         reg.set_advertised_commands(
             "gemini",
             vec![CommandEntry {
@@ -960,7 +1009,7 @@ mod tests {
             spur_acp::AgentKind::Generic,
         );
 
-        let mut reg = CommandRegistry::new();
+        let mut reg = CommandRegistry::new(fixture_local_layer());
         reg.set_agent_commands(
             "kiro",
             vec![CommandEntry {
@@ -994,7 +1043,7 @@ mod tests {
 
     #[test]
     fn arg_picker_spec_returns_some_for_advertised_with_spec() {
-        let mut reg = CommandRegistry::new();
+        let mut reg = CommandRegistry::new(LocalLayer::empty());
         let entry = CommandEntry {
             name: "model".into(),
             description: "Switch".into(),

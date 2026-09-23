@@ -159,9 +159,7 @@ impl SessionDetailView {
     /// initializers in the same order as the struct definition for easy
     /// audit.
     #[cfg(any(test, debug_assertions))]
-    pub fn new_for_palette_test(
-        command_registry: crate::commands::registry::CommandRegistry,
-    ) -> Self {
+    pub fn new_for_palette_test(command_registry: crate::commands::CommandRegistry) -> Self {
         let mention_registry = crate::mentions::MentionRegistry::for_direct_session();
         Self {
             session_id: spur_acp::SessionId("palette-test".into()),
