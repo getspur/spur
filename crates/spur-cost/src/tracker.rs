@@ -83,6 +83,10 @@ impl CostTracker {
     ///
     /// Cost is tokens × published rates when `model` is in the registry.
     /// Otherwise NULL (not a duration stand-in).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public tracker API mirrors session-end fields"
+    )]
     pub fn end_session_with_tokens(
         &self,
         id: &SessionId,
