@@ -163,6 +163,16 @@ if [[ -n "${CODEX_SANDBOX:-}" && "$IS_SCCACHE_CONTROL" -eq 0 ]]; then
 fi
 
 if command -v sccache >/dev/null 2>&1; then
+    # Cargo has already resolved its artifact paths before invoking rustc, and
+    # rustc itself never reads CARGO_TARGET_DIR. But sccache hashes EVERY
+    # CARGO_* env var into the Rust cache key (sccache src/compiler/rust.rs,
+    # hash step 8), and cloud-build build.sh exports a per-worktree
+    # CARGO_TARGET_DIR (/mnt/cargo/targets/<ns>/worktrees/<uuid>) on the VM.
+    # Leaving it set makes every compile key diverge per worktree, so the
+    # shared L0 disk + L1 S3 cache never hits across .spur/worktrees/* on the
+    # spur-builder. Unset it so identical sources share cache entries.
+    # (Mirrors spur-notebook scripts/sccache-worktree.sh, commit a77ced09.)
+    unset CARGO_TARGET_DIR
     exec sccache "$@"
 fi
 
