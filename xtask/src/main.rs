@@ -1270,6 +1270,8 @@ fn remote_install_build_command(
         "-p",
         "spur-cli",
         "--no-default-features",
+        "--features",
+        "duckdb-bundled",
     ]);
     cmd.arg("--locked").current_dir(workspace_root);
     cmd
