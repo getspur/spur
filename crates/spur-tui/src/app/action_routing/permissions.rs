@@ -115,6 +115,147 @@ fn permission_presentation(args: &spur_acp::RequestPermissionRequest) -> (String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spur_acp::{PermissionOption, PermissionOptionId, PermissionOptionKind};
+    use tokio::sync::oneshot::{self, error::TryRecvError};
+
+    fn app_with_pending_permission() -> (
+        App,
+        tempfile::TempDir,
+        oneshot::Receiver<spur_acp::types::PermissionResponse>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new_with_metadata_path_for_test(temp.path().join("metadata.json"));
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: "codex".into(),
+            session: SessionId("original-session".into()),
+        }));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        app.handle_permission_request(spur_acp::types::PermissionRequest {
+            args: spur_acp::RequestPermissionRequest::new(
+                "original-session",
+                spur_acp::ToolCallUpdate::new("tool", spur_acp::ToolCallUpdateFields::new()),
+                vec![PermissionOption::new(
+                    "allow-once",
+                    "Allow once",
+                    PermissionOptionKind::AllowOnce,
+                )],
+            ),
+            reply_tx,
+            generation: 1,
+            operation_fence: 1,
+        });
+        (app, temp, reply_rx)
+    }
+
+    fn assert_permission_cancelled(
+        app: &App,
+        reply_rx: &mut oneshot::Receiver<spur_acp::types::PermissionResponse>,
+    ) {
+        assert!(
+            matches!(reply_rx.try_recv(), Err(TryRecvError::Closed)),
+            "destroying the prompt must close its reply channel without selecting an option"
+        );
+        assert!(app.pending_permission.is_none());
+    }
+
+    fn assert_permission_answerable(
+        app: &mut App,
+        reply_rx: &mut oneshot::Receiver<spur_acp::types::PermissionResponse>,
+    ) {
+        assert!(matches!(reply_rx.try_recv(), Err(TryRecvError::Empty)));
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_eq!(reply_rx.try_recv().unwrap().option_id, "allow-once");
+        assert!(app.pending_permission.is_none());
+    }
+
+    #[test]
+    fn pending_permission_is_cancelled_when_resuming_another_session() {
+        let (mut app, _temp, mut reply_rx) = app_with_pending_permission();
+        app.process_action(Action::ResumeSession {
+            session_id: "other-session".into(),
+        });
+        app.tick();
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_permission_cancelled(&app, &mut reply_rx);
+    }
+
+    #[test]
+    fn pending_permission_is_cancelled_when_clear_resets_the_view() {
+        let (mut app, _temp, mut reply_rx) = app_with_pending_permission();
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        app.user_input_tx = Some(input_tx);
+        app.process_action(Action::ClearSession);
+        assert!(matches!(
+            input_rx.try_recv().unwrap(),
+            UserInput::NewSessionWithMessage { .. }
+        ));
+        assert_permission_cancelled(&app, &mut reply_rx);
+    }
+
+    #[test]
+    fn pending_permission_is_cancelled_when_brain_spawn_replaces_the_view() {
+        let (mut app, _temp, mut reply_rx) = app_with_pending_permission();
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: "codex".into(),
+            session: SessionId("other-session".into()),
+        }));
+        assert_permission_cancelled(&app, &mut reply_rx);
+    }
+
+    #[test]
+    fn pending_permission_is_cancelled_when_retirement_clears_the_view() {
+        let (mut app, _temp, mut reply_rx) = app_with_pending_permission();
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::BrainRetired {
+            session: SessionId("original-session".into()),
+            reason: BrainRetireReason::UserClear,
+        }));
+        assert_permission_cancelled(&app, &mut reply_rx);
+    }
+
+    #[test]
+    fn pending_permission_remains_answerable_after_failed_clear() {
+        let (mut app, _temp, mut reply_rx) = app_with_pending_permission();
+        let (input_tx, input_rx) = mpsc::channel(1);
+        drop(input_rx);
+        app.user_input_tx = Some(input_tx);
+        app.process_action(Action::ClearSession);
+        assert_permission_answerable(&mut app, &mut reply_rx);
+    }
+
+    #[test]
+    fn pending_permission_remains_answerable_when_same_view_is_retained() {
+        let (mut app, _temp, mut reply_rx) = app_with_pending_permission();
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: "codex".into(),
+            session: SessionId("original-session".into()),
+        }));
+        app.tick();
+        assert_permission_answerable(&mut app, &mut reply_rx);
+    }
+
+    #[test]
+    fn unbounded_permission_prompt_does_not_advertise_auto_cancel() {
+        let (mut app, _temp, _reply_rx) = app_with_pending_permission();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains("PERMISSION"),
+            "permission prompt must be rendered: {rendered}"
+        );
+        assert!(rendered.contains("Select an advertised option"));
+        assert!(
+            !rendered.contains("auto-cancel"),
+            "an unbounded prompt must not advertise a cancellation deadline"
+        );
+    }
 
     #[test]
     fn pending_permission_deadline_is_unbounded() {
@@ -125,8 +266,6 @@ mod tests {
             "interactive permission prompts must wait for the user's reply"
         );
     }
-    use spur_acp::{PermissionOption, PermissionOptionId, PermissionOptionKind};
-
     #[test]
     fn every_permission_option_is_presented_with_its_numeric_identity() {
         let options = (1..=12)
