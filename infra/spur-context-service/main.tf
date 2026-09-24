@@ -675,8 +675,9 @@ resource "aws_cognito_user_pool" "context_service" {
   user_pool_tier      = "LITE"
   deletion_protection = var.cognito_user_pool_deletion_protection ? "ACTIVE" : "INACTIVE"
 
-  username_attributes = ["email"]
-  mfa_configuration   = "OPTIONAL"
+  username_attributes      = ["email"]
+  auto_verified_attributes = ["email"]
+  mfa_configuration        = "OPTIONAL"
 
   software_token_mfa_configuration {
     enabled = true
