@@ -196,6 +196,40 @@ fn profiles_preserve_file_directory_and_dangling_symlink_classification() {
 }
 
 #[test]
+#[cfg(unix)]
+fn tui_keeps_known_directory_type_when_metadata_lookup_is_denied() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tree = TempTree::new("known-directory-type");
+    let child = tree.dir("child");
+    // Read permits enumeration, but lack of search permission prevents stat
+    // of the child. The walker can still supply its directory-entry type.
+    std::fs::set_permissions(tree.root(), std::fs::Permissions::from_mode(0o400)).unwrap();
+    let metadata_denied = std::fs::metadata(&child)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied);
+    let walker_knows_directory = ignore::WalkBuilder::new(tree.root())
+        .build()
+        .filter_map(Result::ok)
+        .any(|entry| entry.path() == child && entry.file_type().is_some_and(|kind| kind.is_dir()));
+    let result = FileMentionSource::new().build(tree.root(), &SourceContext::default());
+    // Restore before assertions so fixture cleanup works even on failure.
+    std::fs::set_permissions(tree.root(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    if !metadata_denied || !walker_knows_directory {
+        // Privileged users bypass the restriction; some filesystems cannot
+        // supply directory-entry types without the denied metadata lookup.
+        return;
+    }
+    let snapshot = result.unwrap();
+    let child = snapshot
+        .entries
+        .iter()
+        .find(|row| row.display.trim_end_matches('/') == "child")
+        .unwrap();
+    assert_eq!(child.kind, MentionKind::Directory);
+    assert_eq!(child.display, "child/");
+}
+
+#[test]
 fn both_profiles_skip_the_root_itself() {
     let tree = sample_tree();
     for profile in [
