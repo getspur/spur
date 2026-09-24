@@ -66,8 +66,7 @@ pub fn dispatch_session_update<F: Fn() -> String>(
             }
         }
         SessionUpdate::UserMessageChunk(chunk) => {
-            if let Some(text) = crate::commands::submit_router::flatten_prompt_block(&chunk.content)
-            {
+            if let Some(text) = crate::commands::submit::flatten_prompt_block(&chunk.content) {
                 if !text.is_empty() {
                     trace.append_user_message(&text, (ctx.now_stamp)());
                 }

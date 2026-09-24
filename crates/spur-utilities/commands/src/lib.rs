@@ -1,8 +1,9 @@
 //! Neutral slash-command model shared by every spur frontend (spec
 //! 2026-09-23 §3): the entry/dispatch model, the merged command registry
 //! with an injected frontend [`LocalLayer`](registry::LocalLayer),
-//! advertised-entry synthesis, fuzzy ranking, Kiro skill discovery, and
-//! the pure entry builder.
+//! advertised-entry synthesis, fuzzy ranking, Kiro skill discovery, the
+//! pure entry builder, and the pure submit classifier
+//! ([`submit::classify`](submit::classify)).
 //!
 //! The crate is frontend-agnostic by construction: it depends only on
 //! `spur-acp` plus matching utilities. The TUI installs its meta-command
@@ -32,6 +33,7 @@ pub mod entry_builder;
 pub mod fuzzy;
 pub mod kiro_skills;
 pub mod registry;
+pub mod submit;
 
 pub use entry::{CommandEntry, CommandSource, Dispatch};
 pub use registry::{CommandRegistry, LocalLayer};

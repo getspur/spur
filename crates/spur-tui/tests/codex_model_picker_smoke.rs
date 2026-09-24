@@ -6,7 +6,7 @@
 //! Per-task tests already cover orchestrator caching + event emission
 //! (`spur-core/src/orchestrator.rs::replace_session_config_options_updates_cache_and_emits_event`),
 //! the `synthesize` allow-list (`spur-acp/src/adapter/config_options.rs`),
-//! `AdvertisedSource::entries`, and `submit_router::route` on the
+//! `AdvertisedSource::entries`, and `submit_shell::route` on the
 //! `SetSessionConfigOption` dispatch. This smoke composes those public
 //! surfaces into one happy path so a regression in any of them — wiring a
 //! cached config_options snapshot through to a typed wire dispatch —
@@ -21,7 +21,7 @@
 use spur_acp::{AgentKind, SessionId as SpurSessionId, SpurEvent, SpurEventBody};
 use spur_acp::{SessionConfigId, SessionConfigOption, SessionConfigSelectOption};
 use spur_tui::commands::advertised::AdvertisedSource;
-use spur_tui::commands::submit_router::{route, route_with_caps, SubmitDecision};
+use spur_tui::commands::submit_shell::{route, route_with_caps, SubmitDecision};
 use spur_tui::commands::CommandRegistry;
 use spur_tui::views::{session_detail::SessionDetailView, View};
 

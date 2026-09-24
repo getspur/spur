@@ -1,5 +1,5 @@
 //! Integration tests: a static command declared in config flows through
-//! Registry → submit_router → Action with the correct shape.
+//! Registry → submit_shell → Action with the correct shape.
 //!
 //! These tests exercise the full Spec 2 dispatch pipeline for both
 //! prompt_text (codex-shaped, zero-Rust onboarding) and vendor_exec
@@ -7,7 +7,8 @@
 //! round-trip to the agent is covered by session_update_handling.rs.
 
 use spur_acp::{AgentConfig, ArgsTemplateKind, CommandsConfig, DispatchKind, StaticCommandDecl};
-use spur_tui::commands::submit_router::{blocks_preview, route, SubmitDecision};
+use spur_tui::commands::submit::blocks_preview;
+use spur_tui::commands::submit_shell::{route, SubmitDecision};
 use spur_tui::commands::CommandRegistry;
 
 fn kiro_config_with_static_help() -> AgentConfig {

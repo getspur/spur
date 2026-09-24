@@ -41,7 +41,7 @@ impl SpurLocalSource {
     ///   forwarding it to the agent produces inconsistent or broken
     ///   results.
     /// - `/theme` — owned end-to-end by the TUI (palette + active
-    ///   `Arc<Theme>`). `submit_router::route` always intercepts it
+    ///   `Arc<Theme>`). `submit_shell::route` always intercepts it
     ///   ahead of the registry, but listing it here prevents collisions
     ///   if an agent ever advertises a `/theme` command and a future
     ///   route wires it through the registry path.
@@ -218,7 +218,7 @@ impl SpurLocalSource {
 /// Resolve a frontend-owned meta-command name (plus optional trimmed arg)
 /// to the `Action` the TUI fires for it. This is the static table behind
 /// every `Dispatch::Local { name }` in the registry layer and every local
-/// interception in `submit_router` — the single place mapping neutral
+/// interception in `submit_shell` — the single place mapping neutral
 /// names back to TUI actions.
 ///
 /// Serves every [`SpurLocalSource::entries`] name plus the submit-router

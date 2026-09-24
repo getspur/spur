@@ -55,7 +55,7 @@ impl App {
                     self.brain_status = BrainStatus::Thinking;
                 }
 
-                let preview = crate::commands::submit_router::blocks_preview(&blocks);
+                let preview = crate::commands::submit::blocks_preview(&blocks);
 
                 tracing::info!(
                     text_len = preview.len(),
@@ -159,7 +159,7 @@ impl App {
                     self.brain_status = BrainStatus::Thinking;
                 }
 
-                let preview = crate::commands::submit_router::blocks_preview(&blocks);
+                let preview = crate::commands::submit::blocks_preview(&blocks);
                 self.pending_first_user_message = if blocks.is_empty() || preview.is_empty() {
                     None
                 } else {

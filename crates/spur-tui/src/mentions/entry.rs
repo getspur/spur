@@ -4,19 +4,11 @@ use std::sync::Arc;
 use super::issue_source::IssueMentionDescriptor;
 use spur_acp::AgentKind;
 use spur_graph::CodeMentionPayload;
+use spur_mentions::code::source::CodeMentionCandidate;
 
-#[derive(Debug, Clone)]
-pub struct CodeMentionCandidate {
-    pub(crate) stable_symbol_id: Box<str>,
-    pub(crate) entity_name: Box<str>,
-    pub(crate) file_path: Arc<str>,
-    pub(crate) line_range: [usize; 2],
-    pub(crate) symbol_kind: Arc<str>,
-    pub(crate) enclosing_scope: Option<Arc<str>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum MentionKind {
+    #[default]
     File,
     Directory,
     CodeFile,
@@ -26,7 +18,7 @@ pub enum MentionKind {
     Datasource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MentionEntry {
     /// Optional synthetic section header marker (empty-query grouping rows).
     pub section_header: Option<&'static str>,
@@ -113,48 +105,4 @@ pub trait MentionSource: Send {
     fn datasource_hints(&self) -> &[(String, Arc<String>)] {
         &[]
     }
-}
-
-/// Convert an absolute path under cwd into a `MentionEntry`.
-/// Only produces `File` and `Directory` kinds; never `Worker`.
-pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
-    let rel = abs.strip_prefix(cwd).ok()?;
-    let rel_str = rel.to_str()?;
-    let kind = if abs.is_dir() {
-        MentionKind::Directory
-    } else {
-        MentionKind::File
-    };
-    let display = match kind {
-        MentionKind::Directory => format!("{}/", rel_str),
-        MentionKind::File => rel_str.to_string(),
-        MentionKind::CodeFile
-        | MentionKind::CodeSymbol
-        | MentionKind::Worker
-        | MentionKind::Issue
-        | MentionKind::Datasource => {
-            unreachable!("entry_for_path never builds non-file mentions")
-        }
-    };
-    let abs_str = abs.to_str()?;
-    let uri = format!("file://{}", abs_str);
-    Some(MentionEntry {
-        section_header: None,
-        kind,
-        uri,
-        display,
-        secondary: None,
-        agent: None,
-        model: None,
-        effort: None,
-        worker_kind: None,
-        worker_cli_identity: None,
-        code_path: None,
-        code_scope: None,
-        tag: None,
-        search_text: None,
-        atom_text: None,
-        unconsumed_suffix: None,
-        issue_preview: None,
-    })
 }

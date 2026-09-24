@@ -1710,7 +1710,7 @@ impl DashboardView {
                 self.completion
                     .handle_picker_key(picker_key, &mut self.input_bar)
                     .and_then(|accept| {
-                        crate::commands::submit_router::local_action_from_picker_accept(
+                        crate::commands::submit_shell::local_action_from_picker_accept(
                             accept,
                             &self.command_registry,
                             None,
@@ -1742,7 +1742,7 @@ impl DashboardView {
                             .input_bar
                             .take_submit_capture()
                             .unwrap_or_else(|| (text, Vec::new(), interrupt));
-                        use crate::commands::submit_router::{route, SubmitDecision};
+                        use crate::commands::submit_shell::{route, SubmitDecision};
                         match route(
                             &captured,
                             &ranges,
@@ -1765,7 +1765,7 @@ impl DashboardView {
                                     mention_registry.retain_code_payloads_for_uris(
                                         ranges.iter().map(|range| range.uri.as_str()),
                                     );
-                                    blocks = crate::commands::submit_router::assemble_blocks_with_code_mentions(
+                                    blocks = crate::commands::submit_shell::assemble_blocks_with_code_mentions(
                                         &captured,
                                         &ranges,
                                         &pending_images,

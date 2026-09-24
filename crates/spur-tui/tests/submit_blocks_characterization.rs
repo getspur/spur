@@ -1,5 +1,5 @@
 //! sud-m0 characterization: pins the ACP `ContentBlock`s that
-//! `spur_tui::commands::submit_router::{route, route_with_caps}` produce for
+//! `spur_tui::commands::submit_shell::{route, route_with_caps}` produce for
 //! text carrying file / worker / datasource / code mentions, plus the
 //! `blocks_preview` / `flatten_prompt_block` outputs, through public paths
 //! only. Send decisions only — the `Local` variant is deliberately not
@@ -12,9 +12,9 @@ use spur_acp::{
     SpurAgentCaps, TextContent, TextResourceContents,
 };
 use spur_graph::compute_anchor_hash;
-use spur_tui::commands::submit_router::{
-    assemble_blocks_with_code_mentions, blocks_preview, blocks_to_text, flatten_prompt_block,
-    route, route_with_caps, SubmitDecision,
+use spur_tui::commands::submit::{blocks_preview, blocks_to_text, flatten_prompt_block};
+use spur_tui::commands::submit_shell::{
+    assemble_blocks_with_code_mentions, route, route_with_caps, SubmitDecision,
 };
 use spur_tui::commands::CommandRegistry;
 use spur_tui::components::input_bar::{ProtectedRange, RangeKind};

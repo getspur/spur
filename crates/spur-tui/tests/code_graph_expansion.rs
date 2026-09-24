@@ -3,7 +3,7 @@ use std::fs;
 use spur_acp::ContentBlock;
 use spur_graph::validation::compute_anchor_hash;
 use spur_graph::{CodeMentionAuthoritative, CodeMentionDisplayMeta, CodeMentionExtractionHints};
-use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
+use spur_tui::commands::submit_shell::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::mentions::code_graph::expansion::{expand, ExpandedMention};
 use spur_tui::mentions::{CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec};

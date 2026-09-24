@@ -1,5 +1,13 @@
 //! Shared issue-search haystack construction used by the issue panel and
 //! `@`-mention issue source.
+//!
+//! sud-m3 decision (decoupling spec §8 Q2 — "`issue_search.rs` final
+//! home"): **stays in spur-tui.** Both consumers (the issues panel and
+//! `IssueMentionSource`) are TUI-side, and the haystack shape is coupled to
+//! `IssueSummary`/descriptor field policy (`spur-pm`), which the neutral
+//! crate must not absorb (spec §1.2: the `spur-pm` users stay in the TUI
+//! façade/adapters). Revisit only if a second frontend needs byte-identical
+//! issue ranking.
 
 use spur_pm::IssueSummary;
 

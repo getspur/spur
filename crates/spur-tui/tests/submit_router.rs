@@ -1,6 +1,6 @@
 use spur_acp::ContentBlock;
 use spur_tui::action::Action;
-use spur_tui::commands::submit_router::{route, SubmitDecision};
+use spur_tui::commands::submit_shell::{route, SubmitDecision};
 use spur_tui::commands::CommandRegistry;
 
 #[test]
@@ -89,7 +89,7 @@ fn interrupt_prefix_bang_is_preserved() {
 
 #[test]
 fn blocks_preview_roundtrips_text() {
-    use spur_tui::commands::submit_router::blocks_preview;
+    use spur_tui::commands::submit::blocks_preview;
     let blocks = vec![ContentBlock::Text(spur_acp::TextContent::new("hello"))];
     assert_eq!(blocks_preview(&blocks), "hello");
 }
@@ -97,7 +97,7 @@ fn blocks_preview_roundtrips_text() {
 #[test]
 fn blocks_preview_skips_ui_hint_and_keeps_resource_link_at_name() {
     use spur_acp::{ResourceLink, TextContent};
-    use spur_tui::commands::submit_router::blocks_preview;
+    use spur_tui::commands::submit::blocks_preview;
 
     let blocks = vec![
         ContentBlock::Text(TextContent::new(
@@ -112,7 +112,7 @@ fn blocks_preview_skips_ui_hint_and_keeps_resource_link_at_name() {
 #[test]
 fn blocks_preview_renders_embedded_resource_as_at_name() {
     use spur_acp::{EmbeddedResource, EmbeddedResourceResource, TextContent, TextResourceContents};
-    use spur_tui::commands::submit_router::blocks_preview;
+    use spur_tui::commands::submit::blocks_preview;
 
     let blocks = vec![
         ContentBlock::Text(TextContent::new("review ")),

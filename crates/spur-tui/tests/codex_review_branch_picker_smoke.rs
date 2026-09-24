@@ -4,7 +4,7 @@
 //! Composes the public surfaces in one happy path so a regression in
 //! any of `arg_picker_hint::parse`, `agents::build_entry` auto-derivation,
 //! `CommandRegistry::set_agent_commands` + `arg_picker_spec` lookup, or
-//! `submit_router::route` (PromptText path with arg) surfaces here.
+//! `submit_shell::route` (PromptText path with arg) surfaces here.
 //!
 //! Wire reality: codex-acp 0.12.0 emits an `available_commands_update`
 //! notification with /review-branch carrying `input.hint = "branch name"`
@@ -13,7 +13,7 @@
 use spur_acp::{
     AvailableCommand, AvailableCommandInput, CommandsConfig, DispatchKind, UnstructuredCommandInput,
 };
-use spur_tui::commands::submit_router::{route, SubmitDecision};
+use spur_tui::commands::submit_shell::{route, SubmitDecision};
 use spur_tui::commands::CommandRegistry;
 
 const HANDLE: &str = "codex";

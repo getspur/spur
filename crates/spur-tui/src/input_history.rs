@@ -116,7 +116,7 @@ impl InputStateSnapshot {
 
     /// Rebuild a restorable input snapshot from outbound content blocks.
     pub fn from_blocks(blocks: &[ContentBlock]) -> Self {
-        use crate::commands::submit_router::{flatten_prompt_block, mention_name_from_uri};
+        use crate::commands::submit::{flatten_prompt_block, mention_name_from_uri};
 
         let mut text = String::new();
         let mut protected_ranges = Vec::new();

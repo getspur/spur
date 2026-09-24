@@ -1,11 +1,16 @@
 //! Synthesizes CommandEntry rows from an agent's cached config_options.
-//! Vendor-neutral; calls into spur-acp's config-option synthesizers.
+//! Vendor-neutral; calls into spur-acp's config-option synthesizers. Also
+//! owns [`ModelEffortCatalog`], the single grok / kiro / standard-
+//! config-options precedence implementation every frontend advertises
+//! `/model` and `/effort` through (spec 2026-09-23 §3.5).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 use spur_acp::adapter::arg_picker_hint::{ArgPickerChoice, ArgPickerHint, ArgPickerSpec};
 use spur_acp::adapter::config_options::{synthesize, synthesize_advertised, AdvertisedCommand};
+use spur_acp::adapter::grok_session_display::GrokSessionDisplay;
+use spur_acp::adapter::kiro_session_display::KiroSessionDisplay;
 use spur_acp::capability_evidence::{
     CapabilityChoice, CapabilityKind, DispatchRoute, EvidenceEpochId, EvidenceProvenance,
     ReducedCapability,
@@ -13,6 +18,145 @@ use spur_acp::capability_evidence::{
 use spur_acp::{SessionConfigOption, SpurAgentCaps};
 
 use crate::entry::{CommandEntry, CommandSource, Dispatch};
+
+/// One selectable value in a [`ModelEffortCatalog`] plane (spec
+/// 2026-09-23 §3.5). Field-compatible with the notebook's
+/// `ChatConfigChoice` so its P2 mapping is a field-for-field copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogChoice {
+    /// Wire value (e.g. `modelId`, config-option select value).
+    pub value: String,
+    /// Human-readable picker label.
+    pub label: String,
+    /// Optional description from the agent catalog.
+    pub description: Option<String>,
+}
+
+/// The neutral model / reasoning-effort catalog synthesized from an
+/// agent's caps (spec 2026-09-23 §3.5) — the single grok / kiro /
+/// standard-config-options precedence implementation shared by every
+/// frontend. Frontends map this type to their own picker models; the
+/// `/model` and `/effort` [`CommandEntry`] mapping stays in this crate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelEffortCatalog {
+    /// Advertised models, in agent order.
+    pub models: Vec<CatalogChoice>,
+    /// Currently selected model id, when advertised.
+    pub current_model: Option<String>,
+    /// Advertised efforts, scoped to the current model where the vendor
+    /// catalog is model-scoped (Grok).
+    pub efforts: Vec<CatalogChoice>,
+    /// Currently selected effort id, when advertised.
+    pub current_effort: Option<String>,
+}
+
+impl ModelEffortCatalog {
+    /// Synthesize the catalog from a capability snapshot.
+    ///
+    /// Precedence: the standard config-option plane wins whenever it
+    /// advertises a model or effort select; otherwise Grok's proprietary
+    /// catalog, then Kiro's recovered models plane. An agent never has more
+    /// than one vendor plane, and both extractors are agent-kind gated, so
+    /// the vendor fallbacks are mutually exclusive in practice.
+    #[must_use]
+    pub fn from_caps(caps: &SpurAgentCaps) -> Self {
+        Self::vendor_from_caps(caps)
+            .unwrap_or_else(|| Self::from_config_options(&caps.config_options))
+    }
+
+    /// The vendor planes only — `None` when the standard config-option
+    /// plane won the precedence or no vendor plane exists. The guard is
+    /// [`Self::from_config_options`] itself, so [`Self::from_caps`] and
+    /// the `CommandEntry` synthesis below share one precedence rule and
+    /// the direct `SetSessionModel` / `SetSessionEffort` entries never
+    /// double-emit over the standard entries from `synthesize_advertised`.
+    pub(crate) fn vendor_from_caps(caps: &SpurAgentCaps) -> Option<Self> {
+        let standard = Self::from_config_options(&caps.config_options);
+        if !standard.models.is_empty() || !standard.efforts.is_empty() {
+            return None;
+        }
+        caps.grok_display
+            .as_ref()
+            .map(Self::from_grok_display)
+            .or_else(|| caps.kiro_display.as_ref().map(Self::from_kiro_display))
+    }
+
+    fn from_config_options(options: &[SessionConfigOption]) -> Self {
+        let mut catalog = Self::default();
+        for command in synthesize(options) {
+            let choices = command
+                .choices
+                .into_iter()
+                .map(|choice| CatalogChoice {
+                    value: choice.value,
+                    label: choice.label,
+                    description: choice.description,
+                })
+                .collect();
+            match command.name.as_str() {
+                "model" => {
+                    catalog.models = choices;
+                    catalog.current_model = command.current_value;
+                }
+                "effort" => {
+                    catalog.efforts = choices;
+                    catalog.current_effort = command.current_value;
+                }
+                _ => {}
+            }
+        }
+        catalog
+    }
+
+    fn from_grok_display(display: &GrokSessionDisplay) -> Self {
+        let current_model = display.model_id.clone();
+        let efforts = current_model
+            .as_deref()
+            .map(|model_id| {
+                display
+                    .efforts_for_model(model_id)
+                    .iter()
+                    .map(|effort| CatalogChoice {
+                        value: effort.id.clone(),
+                        label: effort.label.clone(),
+                        description: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            models: display
+                .models()
+                .iter()
+                .map(|model| CatalogChoice {
+                    value: model.id.clone(),
+                    label: model.label.clone(),
+                    description: None,
+                })
+                .collect(),
+            current_model,
+            efforts,
+            current_effort: display.effort_id.clone(),
+        }
+    }
+
+    fn from_kiro_display(display: &KiroSessionDisplay) -> Self {
+        Self {
+            models: display
+                .models()
+                .iter()
+                .map(|model| CatalogChoice {
+                    value: model.id.clone(),
+                    label: model.label.clone(),
+                    description: model.description.clone(),
+                })
+                .collect(),
+            current_model: display.model_id.clone(),
+            efforts: Vec::new(),
+            current_effort: None,
+        }
+    }
+}
 
 pub struct AdvertisedSource;
 
@@ -161,8 +305,7 @@ impl AdvertisedSource {
             };
         }
 
-        candidates.extend(grok_entries(handle, caps));
-        candidates.extend(kiro_entries(handle, caps));
+        candidates.extend(vendor_catalog_entries(handle, caps));
 
         let reduced = reduced_commands(caps);
         let routes = reduced
@@ -514,104 +657,72 @@ fn mode_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
     }]
 }
 
-fn grok_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
-    if !caps.supports_grok_set_model() {
-        return Vec::new();
-    }
-    let Some(display) = caps.grok_display.as_ref() else {
+/// Direct `/model` and `/effort` entries from the vendor planes of the
+/// unified [`ModelEffortCatalog`] (spec 2026-09-23 §3.5). The standard
+/// config-option entries are synthesized separately above, so the vendor
+/// planes only contribute when the standard plane is empty
+/// ([`ModelEffortCatalog::vendor_from_caps`]).
+fn vendor_catalog_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
+    let Some(catalog) = ModelEffortCatalog::vendor_from_caps(caps) else {
         return Vec::new();
     };
-    let source = || CommandSource::Advertised {
-        handle: handle.to_string(),
-    };
-    let picker = |choices: Vec<ArgPickerChoice>| {
-        Some(ArgPickerSpec {
+    let picker = |choices: &[CatalogChoice]| {
+        (!choices.is_empty()).then(|| ArgPickerSpec {
             free_text_hint: String::new(),
-            typed_hint: Some(ArgPickerHint::StaticChoices { choices }),
+            typed_hint: Some(ArgPickerHint::StaticChoices {
+                choices: choices
+                    .iter()
+                    .map(|choice| ArgPickerChoice {
+                        value: choice.value.clone(),
+                        label: choice.label.clone(),
+                        description: choice.description.clone(),
+                    })
+                    .collect(),
+            }),
         })
     };
-    let mut entries = vec![CommandEntry {
-        name: "model".to_string(),
-        description: "Switch model for this session".to_string(),
-        hint: display.model_label.clone(),
-        source: source(),
-        dispatch: Dispatch::SetSessionModel,
-        arg_picker_spec: picker(
-            display
-                .models()
-                .iter()
-                .map(|model| ArgPickerChoice {
-                    value: model.id.clone(),
-                    label: model.label.clone(),
-                    description: None,
-                })
-                .collect(),
-        ),
-    }];
-
-    let effort_choices = display
-        .model_id
-        .as_deref()
-        .map(|model_id| display.efforts_for_model(model_id))
-        .unwrap_or_default();
-    if !effort_choices.is_empty() {
+    let mut entries = Vec::new();
+    if !catalog.models.is_empty() {
+        entries.push(CommandEntry {
+            name: "model".to_string(),
+            description: "Switch model for this session".to_string(),
+            hint: catalog
+                .current_model
+                .as_deref()
+                .map(|value| current_choice_label(&catalog.models, value)),
+            source: CommandSource::Advertised {
+                handle: handle.to_string(),
+            },
+            dispatch: Dispatch::SetSessionModel,
+            arg_picker_spec: picker(&catalog.models),
+        });
+    }
+    if !catalog.efforts.is_empty() {
         entries.push(CommandEntry {
             name: "effort".to_string(),
             description: "Switch reasoning / thinking effort".to_string(),
-            hint: display.effort_label.clone(),
-            source: source(),
+            hint: catalog
+                .current_effort
+                .as_deref()
+                .map(|value| current_choice_label(&catalog.efforts, value)),
+            source: CommandSource::Advertised {
+                handle: handle.to_string(),
+            },
             dispatch: Dispatch::SetSessionEffort,
-            arg_picker_spec: picker(
-                effort_choices
-                    .iter()
-                    .map(|effort| ArgPickerChoice {
-                        value: effort.id.clone(),
-                        label: effort.label.clone(),
-                        description: None,
-                    })
-                    .collect(),
-            ),
+            arg_picker_spec: picker(&catalog.efforts),
         });
     }
     entries
 }
 
-/// Kiro `/model` from the recovered models plane (no effort surface).
-fn kiro_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
-    if !caps.supports_kiro_set_model() {
-        return Vec::new();
-    }
-    let Some(display) = caps.kiro_display.as_ref() else {
-        return Vec::new();
-    };
-    // Avoid double-emitting /model when configOptions already synthesized one
-    // (future Kiro builds that advertise a model select).
-    if caps.supports_set_model() {
-        return Vec::new();
-    }
-    vec![CommandEntry {
-        name: "model".to_string(),
-        description: "Switch model for this session".to_string(),
-        hint: display.model_label.clone(),
-        source: CommandSource::Advertised {
-            handle: handle.to_string(),
-        },
-        dispatch: Dispatch::SetSessionModel,
-        arg_picker_spec: Some(ArgPickerSpec {
-            free_text_hint: String::new(),
-            typed_hint: Some(ArgPickerHint::StaticChoices {
-                choices: display
-                    .models()
-                    .iter()
-                    .map(|model| ArgPickerChoice {
-                        value: model.id.clone(),
-                        label: model.label.clone(),
-                        description: model.description.clone(),
-                    })
-                    .collect(),
-            }),
-        }),
-    }]
+/// The current selection's display label, falling back to its raw value
+/// when the catalog carries no labeled choice for it.
+fn current_choice_label(choices: &[CatalogChoice], current: &str) -> String {
+    choices
+        .iter()
+        .find(|choice| choice.value == current)
+        .map(|choice| choice.label.clone())
+        .unwrap_or_else(|| current.to_owned())
 }
 
 #[cfg(test)]
@@ -701,20 +812,6 @@ mod tests {
         caps
     }
 
-    fn with_incomplete_evidence(mut caps: SpurAgentCaps) -> SpurAgentCaps {
-        let mut wire = serde_json::to_value(
-            caps.capability_evidence
-                .take()
-                .expect("test caps must include capability evidence"),
-        )
-        .expect("snapshot must serialize");
-        wire["completeness"] = serde_json::json!("incomplete");
-        caps.capability_evidence = Some(
-            serde_json::from_value(wire).expect("incomplete evidence snapshot must deserialize"),
-        );
-        caps
-    }
-
     fn caps_with_modes() -> SpurAgentCaps {
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
@@ -769,12 +866,12 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "model");
         assert!(matches!(
-            entries[0].source,
-            CommandSource::Advertised { ref handle } if handle == "codex"
+            &entries[0].source,
+            CommandSource::Advertised { handle } if handle == "codex"
         ));
         assert!(matches!(
-            entries[0].dispatch,
-            Dispatch::SetSessionConfigOption { ref config_id } if config_id == "model"
+            &entries[0].dispatch,
+            Dispatch::SetSessionConfigOption { config_id } if config_id == "model"
         ));
         assert!(entries[0].arg_picker_spec.is_some());
     }
@@ -1058,9 +1155,15 @@ mod tests {
 
         assert_eq!(models.len(), 1, "one reduced capability has one entry");
         assert!(matches!(
-            models[0].dispatch,
-            Dispatch::SetSessionConfigOption { .. } | Dispatch::SetSessionModel
+            &models[0].dispatch,
+            Dispatch::SetSessionConfigOption { config_id } if config_id == "model"
         ));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !matches!(entry.dispatch, Dispatch::SetSessionModel)),
+            "the vendor SetSessionModel entry stays suppressed while the standard plane won"
+        );
     }
 
     #[test]

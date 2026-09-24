@@ -9150,6 +9150,7 @@ dependencies = [
  "nucleo-matcher",
  "serde_json",
  "spur-acp",
+ "tempfile",
  "tracing",
 ]
 
@@ -9453,9 +9454,13 @@ dependencies = [
 name = "spur-mentions"
 version = "1.24.0"
 dependencies = [
+ "anyhow",
+ "filetime",
  "ignore",
  "nucleo-matcher",
+ "proptest",
  "spur-graph",
+ "tempfile",
  "tracing",
  "url",
 ]
@@ -9556,7 +9561,6 @@ dependencies = [
  "divan",
  "filetime",
  "futures 0.3.32",
- "ignore",
  "image 0.25.10",
  "libc",
  "mermaid-rs-renderer",
