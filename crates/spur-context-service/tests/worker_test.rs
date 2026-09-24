@@ -1363,9 +1363,26 @@ fn worker_image_builds_spur_cli_without_embedding_features() -> Result<()> {
 
     assert!(
         deploy_script.contains(
-            "build -p spur-cli --release --no-default-features --features worker-no-embed,duckdb-bundled"
+            "RUN scripts/spur-cargo build -p spur-cli --release --no-default-features --features worker-no-embed,duckdb-bundled"
         ),
-        "worker image spur CLI build must disable default embedding features"
+        "self-contained worker image spur CLI build must disable default embedding features and bundle DuckDB"
+    );
+    Ok(())
+}
+
+#[test]
+fn remote_worker_image_builds_spur_cli_without_embedding_features() -> Result<()> {
+    let deploy_script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/spur-context-service/deploy.sh");
+    let deploy_script = fs::read_to_string(&deploy_script)
+        .with_context(|| format!("read {}", deploy_script.display()))?;
+
+    assert!(
+        deploy_script.contains(
+            r#"run_graviton2_safe_cargo "spur CLI worker image dependency" \
+        build -p spur-cli --release --no-default-features --features worker-no-embed,duckdb-bundled"#,
+        ),
+        "remote worker image spur CLI build must disable default embedding features and bundle DuckDB"
     );
     Ok(())
 }
