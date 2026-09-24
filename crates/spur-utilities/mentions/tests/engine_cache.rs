@@ -145,6 +145,30 @@ fn invalidating_a_removed_alias_discards_the_canonical_snapshot() {
 }
 
 #[test]
+#[cfg(unix)]
+fn resolving_a_removed_alias_preserves_its_previous_identity_for_invalidation() {
+    let tree = TempTree::new("removed-alias-refresh");
+    let root = tree.dir("workspace");
+    let alias = tree.root().join("alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    let (source, _) = ScriptedSource::new("fixture", vec![vec![]]);
+    let mut engine = MentionEngine::new(Arc::new(ManualClock::new()));
+    engine.register_source(Box::new(source), false);
+    let options = QueryOptions::new();
+    engine.resolve_snapshot(&alias, "fixture", &options);
+
+    std::fs::remove_file(&alias).unwrap();
+    // The per-source seam permits unresolved roots. Refreshing one must not
+    // forget the identity that was cached before its symlink disappeared.
+    engine.resolve_snapshot(&alias, "fixture", &options);
+    engine.invalidate_root(&alias);
+    assert!(engine.cached_snapshot(&root, "fixture", &options).is_none());
+    assert!(engine
+        .cached_snapshot(&alias, "fixture", &options)
+        .is_none());
+}
+
+#[test]
 fn invalidation_also_discards_snapshots_published_for_unresolved_roots() {
     let tree = TempTree::new("unresolved-root");
     let root = tree.root().join("missing");

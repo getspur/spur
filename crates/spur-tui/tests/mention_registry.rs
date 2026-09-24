@@ -39,6 +39,54 @@ fn returning_to_cached_root_restores_its_rows_without_rebuilding() {
 }
 
 #[test]
+fn cached_code_rows_hydrate_from_their_original_root() {
+    for shared_ids in [false, true] {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        for (root, version) in [(a.path(), "root-a"), (b.path(), "root-b")] {
+            std::fs::create_dir(root.join(".git")).unwrap();
+            let mut fixture = graph_fixture_json();
+            fixture["header"]["graph_index_version"] = serde_json::json!(version);
+            if !shared_ids {
+                for symbol in fixture["symbols"].as_array_mut().unwrap() {
+                    symbol["stable_symbol_id"] = serde_json::json!(format!(
+                        "{version}-{}",
+                        symbol["stable_symbol_id"].as_str().unwrap()
+                    ));
+                }
+            }
+            write_graph_fixture(&root.join("graph"), fixture);
+        }
+        let mut registry = MentionRegistry::for_direct_session().with_code_graph("graph");
+        let first = registry.query(CompletionScope::PreSession, a.path(), "Config", 10);
+        let symbol = first
+            .iter()
+            .find(|row| row.kind == MentionKind::CodeSymbol)
+            .unwrap();
+        assert_eq!(
+            registry
+                .lookup_code_payload(&symbol.uri)
+                .unwrap()
+                .display_meta
+                .graph_index_version,
+            "root-a"
+        );
+        registry.query(CompletionScope::PreSession, b.path(), "Config", 10);
+
+        let again = registry.query(CompletionScope::PreSession, a.path(), "Config", 10);
+        assert_eq!(again, first, "shared symbol IDs: {shared_ids}");
+        assert_eq!(
+            registry
+                .lookup_code_payload(&symbol.uri)
+                .unwrap()
+                .display_meta
+                .graph_index_version,
+            "root-a"
+        );
+    }
+}
+
+#[test]
 fn file_mentions_index_and_fuzzy_match() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
