@@ -1618,6 +1618,8 @@ mod tests {
                 "-p".to_owned(),
                 "spur-cli".to_owned(),
                 "--no-default-features".to_owned(),
+                "--features".to_owned(),
+                "duckdb-bundled".to_owned(),
                 "--locked".to_owned(),
             ]
         );
@@ -1640,6 +1642,8 @@ mod tests {
                 "-p".to_owned(),
                 "spur-cli".to_owned(),
                 "--no-default-features".to_owned(),
+                "--features".to_owned(),
+                "duckdb-bundled".to_owned(),
                 "--locked".to_owned(),
             ]
         );
