@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use nucleo_matcher::{Config, Matcher};
 use spur_mentions::rank::{score_all, select_top_k, sort_ranked};
-use spur_mentions::{MentionEntry, MentionId, MentionKind, TierPolicy};
+use spur_mentions::{rank_top_k, MentionEntry, MentionId, MentionKind, RankOptions, TierPolicy};
 
 /// Typical picker windows (the TUI's typed-query result limit is ~20).
 const K_VALUES: [usize; 2] = [20, 100];
@@ -33,6 +33,7 @@ fn main() {
     );
     for size in SIZES {
         run_one(size);
+        run_queries(size);
     }
 }
 
@@ -104,8 +105,8 @@ fn run_one(count: usize) {
 
     // The selection phase copies the ranked-ref slice before each rep so
     // repetitions never start from an already-sorted slice. The copy cost
-    // is reported separately (black-boxed so LLVM cannot elide it) and the
-    // "net" columns subtract it.
+    // is reported separately (black-boxed so LLVM cannot elide it). The
+    // selection timers start AFTER copying, so do not subtract it again.
     let copy_us = median(&mut timed(TIMED_REPS, || {
         black_box(scored.clone());
     })) / 1_000;
@@ -141,23 +142,34 @@ fn run_one(count: usize) {
         count,
         matched,
         score_pass_us(&refs, query),
-        format!(
-            "{} (net {})",
-            full_sort_us,
-            full_sort_us.saturating_sub(copy_us)
-        ),
+        full_sort_us,
         copy_us,
-        format!(
-            "{} (net {})",
-            select_cells[0],
-            select_cells[0].saturating_sub(copy_us)
-        ),
-        format!(
-            "{} (net {})",
-            select_cells[1],
-            select_cells[1].saturating_sub(copy_us)
-        ),
+        select_cells[0],
+        select_cells[1],
     );
+}
+
+fn run_queries(count: usize) {
+    let entries = synthetic_entries(count);
+    let refs: Vec<_> = entries.iter().collect();
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    for query in ["", "src/file", "zzzz-no-match"] {
+        for limit in [0, 20] {
+            let options = RankOptions {
+                limit: Some(limit),
+                ..RankOptions::default()
+            };
+            let ns = median(&mut timed(TIMED_REPS, || {
+                black_box(rank_top_k(
+                    black_box(&refs),
+                    black_box(query),
+                    black_box(&options),
+                    &mut matcher,
+                ));
+            }));
+            println!("rank_total entries={count} query={query:?} limit={limit} median_ns={ns}");
+        }
+    }
 }
 
 /// Score cost is measured with fewer reps (it dominates and is stable).

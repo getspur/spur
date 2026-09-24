@@ -158,6 +158,44 @@ fn notebook_profile_includes_hidden_and_ignored_files_without_directories() {
 }
 
 #[test]
+#[cfg(unix)]
+fn profiles_preserve_file_directory_and_dangling_symlink_classification() {
+    let tree = TempTree::new("symlink-types");
+    tree.dir("directory");
+    tree.file("file.rs", "");
+    for (target, link) in [
+        ("directory", "dir-link"),
+        ("file.rs", "file-link"),
+        ("absent", "dangling"),
+    ] {
+        std::os::unix::fs::symlink(tree.root().join(target), tree.root().join(link)).unwrap();
+    }
+    for profile in [
+        FilesystemProfile::tui(),
+        FilesystemProfile::notebook_compat(),
+    ] {
+        let snapshot = build(profile, tree.root());
+        for display in ["file-link", "dangling"] {
+            let row = snapshot
+                .entries
+                .iter()
+                .find(|row| row.display == display)
+                .unwrap();
+            assert_eq!(row.kind, MentionKind::File);
+        }
+        let directory = snapshot
+            .entries
+            .iter()
+            .find(|row| row.display.trim_end_matches('/') == "dir-link");
+        assert_eq!(directory.is_some(), profile.include_directories);
+        if let Some(directory) = directory {
+            assert_eq!(directory.kind, MentionKind::Directory);
+            assert_eq!(directory.display, "dir-link/");
+        }
+    }
+}
+
+#[test]
 fn both_profiles_skip_the_root_itself() {
     let tree = sample_tree();
     for profile in [

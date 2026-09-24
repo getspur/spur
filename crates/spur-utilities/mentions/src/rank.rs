@@ -147,7 +147,7 @@ pub fn sort_ranked(scored: &mut [RankedRef<'_>]) {
 /// order — including runs of fully equal rows straddling the K boundary
 /// (pinned deterministically and by the proptest suite in
 /// `tests/rank_top_k.rs`). A comparator-call counter in the tests below
-/// proves the full sort never runs when `M > K`.
+/// checks selection against full sorting on the same shuffled workload.
 ///
 /// Expected cost after the `O(N)` scoring pass: `O(M)` select +
 /// `O(K log K)` prefix sort, one auxiliary `(index, row)` buffer of `M`
@@ -421,20 +421,24 @@ mod tests {
     }
 
     #[test]
-    fn bounded_selection_never_runs_a_full_sort_when_m_exceeds_k() {
-        // sud-m5 performance gate: the selection phase must not determine
-        // the full order of all M rows when only the top K are kept. Any
-        // comparison-based full sort of M distinct keys must make at least
-        // ceil(log2(M!)) comparator calls (information-theoretic lower
-        // bound); the bounded path makes ~c*M. Counting calls with distinct
-        // keys and asserting the observed count stays below the lower bound
-        // proves no full M log M sort ran, regardless of std internals.
+    fn bounded_selection_uses_fewer_comparisons_on_shuffled_input() {
+        // Compare actual work on this fixed input. log2(M!) bounds the
+        // worst-case decision-tree depth, not comparisons on every input:
+        // an adaptive full sort can use O(M) comparisons on a sorted run.
+        // This is a workload regression gate, not a universal complexity proof.
         const M: usize = 8192;
         const K: usize = 8;
         let keys = shuffled_keys(M, 0x9E3779B97F4A7C15);
         let entry = file_entry(0, "counted");
         let mut rows: Vec<RankedRef<'_>> =
             keys.iter().map(|&rank| ranked(&entry, rank, 0)).collect();
+
+        let mut reference = rows.clone();
+        let full_sort_calls = std::cell::Cell::new(0usize);
+        reference.sort_by(|a, b| {
+            full_sort_calls.set(full_sort_calls.get() + 1);
+            b.rank.cmp(&a.rank)
+        });
 
         let calls = std::cell::Cell::new(0usize);
         let kept = select_top_k_with(&mut rows, K, |a, b| {
@@ -444,17 +448,16 @@ mod tests {
         assert_eq!(kept, K);
 
         // The prefix is still exactly the K largest keys, ordered.
-        let mut expected = keys.clone();
-        expected.sort_unstable_by(|a, b| b.cmp(a));
+        let expected: Vec<u32> = reference.iter().map(|row| row.rank).collect();
         let selected: Vec<u32> = rows[..K].iter().map(|row| row.rank).collect();
         assert_eq!(selected, expected[..K]);
 
-        let full_sort_lower_bound = (2..=M).map(|n| (n as f64).log2()).sum::<f64>().ceil() as usize;
+        let full_sort_comparisons = full_sort_calls.get();
         let observed = calls.get();
         assert!(
-            observed < full_sort_lower_bound,
+            observed < full_sort_comparisons,
             "selection made {observed} comparator calls over {M} rows with K={K}; \
-             a full sort needs at least {full_sort_lower_bound} (log2(M!))"
+             full sorting the same input used {full_sort_comparisons}"
         );
     }
 
