@@ -4076,6 +4076,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nltk-porter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4258,6 +4270,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "futures 0.3.32",
  "half",
  "hashbrown 0.17.1",
  "num-bigint",
@@ -4266,6 +4279,7 @@ dependencies = [
  "paste",
  "seq-macro",
  "thrift",
+ "tokio",
  "twox-hash",
  "zstd",
 ]
@@ -4444,6 +4458,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "process-wrap"
+version = "9.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f95f6259ebd0640685b7cd26d635861f39208df0f89b2b61ff5cf76310fa54f6"
+dependencies = [
+ "futures 0.3.32",
+ "indexmap 2.14.0",
+ "nix",
+ "tokio",
+ "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -4841,6 +4869,7 @@ dependencies = [
  "http-body-util",
  "pastey",
  "pin-project-lite",
+ "process-wrap",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "rmcp-macros",
@@ -5495,7 +5524,7 @@ dependencies = [
 
 [[package]]
 name = "spur-acp"
-version = "1.21.0"
+version = "1.24.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -5537,8 +5566,10 @@ dependencies = [
  "aws-sdk-s3",
  "aws-sdk-secretsmanager",
  "aws-sdk-sfn",
+ "bytes",
  "clap",
  "duckdb",
+ "futures 0.3.32",
  "lambda_runtime",
  "parquet",
  "rand 0.8.7",
@@ -5558,23 +5589,25 @@ dependencies = [
 
 [[package]]
 name = "spur-context-source"
-version = "1.21.0"
+version = "1.24.0"
 
 [[package]]
 name = "spur-graph"
-version = "1.21.0"
+version = "1.24.0"
 dependencies = [
  "anyhow",
  "arc-swap",
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
+ "arrow-select",
  "async-trait",
  "base64",
  "blake3",
  "chrono",
  "clap",
  "fs2",
+ "futures 0.3.32",
  "gix",
  "globset",
  "ignore",
@@ -5597,8 +5630,10 @@ dependencies = [
  "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-cpp",
+ "tree-sitter-css",
  "tree-sitter-go",
  "tree-sitter-hcl",
+ "tree-sitter-html",
  "tree-sitter-json",
  "tree-sitter-lua",
  "tree-sitter-md",
@@ -5614,7 +5649,7 @@ dependencies = [
 
 [[package]]
 name = "spur-mcp"
-version = "1.21.0"
+version = "1.24.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5622,6 +5657,8 @@ dependencies = [
  "base64ct",
  "fs2",
  "hmac 0.12.1",
+ "hyper 1.10.1",
+ "hyper-util",
  "libc",
  "rmcp",
  "schemars 0.8.22",
@@ -5631,13 +5668,15 @@ dependencies = [
  "spur-acp",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util 0.7.18",
  "toml",
+ "tower",
  "tracing",
 ]
 
 [[package]]
 name = "spur-telemetry"
-version = "1.21.0"
+version = "1.24.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -6234,9 +6273,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.25.10"
+version = "0.26.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78f873475d258561b06f1c595d93308a7ed124d9977cb26b148c2084a4a3cc87"
+checksum = "17ebdd3a5a7e28a1890b876fdbd0c3c0fe0a6336cffaa104f11b9f720c9daa29"
 dependencies = [
  "cc",
  "regex",
@@ -6277,6 +6316,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-css"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5cbc5e18f29a2c6d6435891f42569525cf95435a3e01c2f1947abcde178686f"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-go"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6291,6 +6340,16 @@ name = "tree-sitter-hcl"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a7b2cc3d7121553b84309fab9d11b3ff3d420403eef9ae50f9fd1cd9d9cf012"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-html"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "261b708e5d92061ede329babaaa427b819329a9d427a1d710abb0f67bbef63ee"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -6726,6 +6785,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
+name = "windows"
+version = "0.62.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580"
+dependencies = [
+ "windows-collections",
+ "windows-core",
+ "windows-future",
+ "windows-numerics",
+]
+
+[[package]]
+name = "windows-collections"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b2d95af1a8a14a3c7367e1ed4fc9c20e0a26e79551b1454d72583c97cc6610"
+dependencies = [
+ "windows-core",
+]
+
+[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6736,6 +6816,17 @@ dependencies = [
  "windows-link",
  "windows-result",
  "windows-strings",
+]
+
+[[package]]
+name = "windows-future"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb"
+dependencies = [
+ "windows-core",
+ "windows-link",
+ "windows-threading",
 ]
 
 [[package]]
@@ -6765,6 +6856,16 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-numerics"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26"
+dependencies = [
+ "windows-core",
+ "windows-link",
+]
 
 [[package]]
 name = "windows-result"
@@ -6875,6 +6976,15 @@ dependencies = [
  "windows_x86_64_gnu 0.53.1",
  "windows_x86_64_gnullvm 0.53.1",
  "windows_x86_64_msvc 0.53.1",
+]
+
+[[package]]
+name = "windows-threading"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
+dependencies = [
+ "windows-link",
 ]
 
 [[package]]
