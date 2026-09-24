@@ -246,6 +246,105 @@ operator_user_id = 12345
 }
 
 #[test]
+fn init_keeps_user_cooldown_when_project_omits_it() {
+    let _g = LOCK.lock().unwrap();
+    let home = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    let user_path = home.path().join(".spur/config.toml");
+    fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+
+    let mut user_config = spur_acp::config::SpurConfig::default();
+    user_config.failover.cooldown_minutes = 10;
+    user_config.agents.entries.push(
+        spur_acp::config::load_seed_template()
+            .entries
+            .into_iter()
+            .find(|agent| agent.name == "claude-code")
+            .unwrap(),
+    );
+    fs::write(&user_path, toml::to_string_pretty(&user_config).unwrap()).unwrap();
+    stub_which(repo.path());
+    stub_binary(repo.path(), "npx");
+
+    let status = spur()
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env("PATH", controlled_path(repo.path()))
+        .arg("init")
+        .status()
+        .expect("spawn spur init");
+
+    assert!(status.success());
+    assert_eq!(
+        load_layered_with_home(repo.path(), home.path())
+            .failover
+            .cooldown_minutes,
+        10
+    );
+    let project: toml::Value =
+        toml::from_str(&fs::read_to_string(repo.path().join(".spur/config.toml")).unwrap())
+            .unwrap();
+    assert!(project.get("failover").is_none());
+}
+
+#[test]
+fn init_accepts_sparse_project_agent_override() {
+    let _g = LOCK.lock().unwrap();
+    let home = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    let user_path = home.path().join(".spur/config.toml");
+    fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(repo.path().join(".spur")).unwrap();
+
+    let mut user_config = spur_acp::config::SpurConfig::default();
+    user_config.agents.entries.push(
+        spur_acp::config::load_seed_template()
+            .entries
+            .into_iter()
+            .find(|agent| agent.name == "claude-code")
+            .unwrap(),
+    );
+    let inherited_command = user_config.agents.entries[0].command.clone();
+    fs::write(&user_path, toml::to_string_pretty(&user_config).unwrap()).unwrap();
+    fs::write(
+        repo.path().join(".spur/config.toml"),
+        "[[agents.entries]]\nname='claude-code'\ncapabilities=['project']\n",
+    )
+    .unwrap();
+    stub_which(repo.path());
+    stub_binary(repo.path(), "npx");
+
+    let status = spur()
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env("PATH", controlled_path(repo.path()))
+        .arg("init")
+        .status()
+        .expect("spawn spur init");
+
+    assert!(status.success());
+    let effective = load_layered_with_home(repo.path(), home.path());
+    let agent = effective
+        .agents
+        .entries
+        .iter()
+        .find(|agent| agent.name == "claude-code")
+        .unwrap();
+    assert_eq!(agent.command, inherited_command);
+    assert_eq!(agent.capabilities, vec!["project".to_string()]);
+    let project: toml::Value =
+        toml::from_str(&fs::read_to_string(repo.path().join(".spur/config.toml")).unwrap())
+            .unwrap();
+    let agent_overlay = project["agents"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some("claude-code"))
+        .unwrap();
+    assert!(agent_overlay.get("command").is_none());
+}
+
+#[test]
 fn init_with_force_resets_agents_preserves_non_agent_config() {
     let _g = LOCK.lock().unwrap();
     let tmp = TempDir::new().unwrap();

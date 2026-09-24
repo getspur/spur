@@ -381,6 +381,36 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_agent_names_in_first_layer_use_last_entry() {
+        let mut merged = Table::new();
+        merge_tables(
+            &mut merged,
+            t("[[agents.entries]]\nname='codex'\ncommand='old'\n\
+               [[agents.entries]]\nname='codex'\ncommand='new'\n"),
+        );
+
+        let entries = merged["agents"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["command"].as_str(), Some("new"));
+    }
+
+    #[test]
+    fn duplicate_project_agent_names_use_only_last_override() {
+        let mut merged =
+            t("[[agents.entries]]\nname='codex'\ncommand='user'\ncapabilities=['user']\n");
+        merge_tables(
+            &mut merged,
+            t("[[agents.entries]]\nname='codex'\ncapabilities=['first']\n\
+               [[agents.entries]]\nname='codex'\ncommand='project'\n"),
+        );
+
+        let entries = merged["agents"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["command"].as_str(), Some("project"));
+        assert_eq!(entries[0]["capabilities"][0].as_str(), Some("user"));
+    }
+
+    #[test]
     fn load_layered_merges_user_and_project_with_project_precedence() {
         let repo = tempfile::tempdir().unwrap();
         fs::create_dir_all(repo.path().join(".spur")).unwrap();
@@ -560,6 +590,29 @@ additional_directories = ["/tmp/spur-extra", "relative/root", "../parent"]
         assert_eq!(entries[0]["name"].as_str(), Some("claude-code"));
         assert_eq!(entries[0]["command"].as_str(), Some("claude-code"));
         assert_eq!(entries[1]["name"].as_str(), Some("gemini"));
+    }
+
+    #[test]
+    fn sparse_diff_changed_agent_keeps_only_changed_fields() {
+        let baseline = Value::Table(t(
+            "[[agents.entries]]\nname='codex'\ncommand='codex'\ncapabilities=['user']\n\
+             [agents.entries.permissions]\nskip=false\n",
+        ));
+        let config = Value::Table(t(
+            "[[agents.entries]]\nname='codex'\ncommand='codex'\ncapabilities=['project']\n\
+             [agents.entries.permissions]\nskip=false\n",
+        ));
+
+        let diff = sparse_diff(&config, &baseline);
+        let entry = &diff["agents"]["entries"][0];
+        assert_eq!(entry["name"].as_str(), Some("codex"));
+        assert_eq!(entry["capabilities"][0].as_str(), Some("project"));
+        assert!(entry.get("command").is_none());
+        assert!(entry.get("permissions").is_none());
+
+        let mut round_trip = baseline.as_table().unwrap().clone();
+        merge_tables(&mut round_trip, diff.as_table().unwrap().clone());
+        assert_eq!(Value::Table(round_trip), config);
     }
 
     #[test]
