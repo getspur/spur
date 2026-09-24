@@ -15,6 +15,30 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 const TEST_GRAPH_INDEX_VERSION: &str = "fixture-2026-05-11";
 
 #[test]
+fn returning_to_cached_root_restores_its_rows_without_rebuilding() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    std::fs::write(a.path().join("alpha_only.rs"), "a").unwrap();
+    std::fs::write(b.path().join("beta_only.rs"), "b").unwrap();
+    let mut registry = MentionRegistry::for_direct_session();
+
+    let first = registry.query(CompletionScope::PreSession, a.path(), "only", 20);
+    assert!(first.iter().any(|row| row.display == "alpha_only.rs"));
+    let other = registry.query(CompletionScope::PreSession, b.path(), "only", 20);
+    assert!(other.iter().any(|row| row.display == "beta_only.rs"));
+
+    // A is still fresh. A rebuild would see the replacement instead.
+    std::fs::remove_file(a.path().join("alpha_only.rs")).unwrap();
+    std::fs::write(a.path().join("replacement_only.rs"), "new").unwrap();
+    let again = registry.query(CompletionScope::PreSession, a.path(), "only", 20);
+    assert_eq!(again, first);
+    assert_eq!(
+        registry.query(CompletionScope::PreSession, b.path(), "only", 20),
+        other
+    );
+}
+
+#[test]
 fn file_mentions_index_and_fuzzy_match() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

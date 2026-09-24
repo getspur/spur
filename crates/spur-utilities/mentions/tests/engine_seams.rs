@@ -103,6 +103,35 @@ fn resolve_snapshot_builds_then_serves_fresh_within_ttl() {
 }
 
 #[test]
+fn retained_snapshot_keeps_expired_data_only_for_the_same_root_profile_and_token() {
+    let clock = Arc::new(spur_mentions::ManualClock::new());
+    let mut engine = MentionEngine::new(clock.clone());
+    let (source, handle) = ScriptedSource::new("s", vec![vec![]]);
+    engine.register_source(Box::new(source), false);
+    let root = Path::new("/retained-root");
+    let SnapshotResolution::Built(built) = engine.resolve_snapshot(root, "s", &options()) else {
+        panic!("first resolve must build");
+    };
+    clock.advance(engine.cache_ttl() + Duration::from_nanos(1));
+    assert!(engine.cached_snapshot(root, "s", &options()).is_none());
+    let retained = engine.retained_snapshot(root, "s", &options()).unwrap();
+    assert!(Arc::ptr_eq(&built, &retained));
+    assert!(engine
+        .retained_snapshot(Path::new("/other-root"), "s", &options())
+        .is_none());
+    let mut other_profile = options();
+    other_profile.filesystem_profile = spur_mentions::FilesystemProfile::notebook_compat();
+    assert!(engine
+        .retained_snapshot(root, "s", &other_profile)
+        .is_none());
+    handle.token.store(1, Ordering::Relaxed);
+    assert!(engine.retained_snapshot(root, "s", &options()).is_none());
+    handle.token.store(0, Ordering::Relaxed);
+    engine.invalidate_source("s");
+    assert!(engine.retained_snapshot(root, "s", &options()).is_none());
+}
+
+#[test]
 fn resolve_snapshot_passes_root_verbatim_and_shares_identity_across_spellings() {
     let clock = Arc::new(spur_mentions::ManualClock::new());
     let mut engine = MentionEngine::new(Arc::clone(&clock) as _);

@@ -4,6 +4,36 @@ use spur_tui::commands::submit_shell::{route, SubmitDecision};
 use spur_tui::commands::CommandRegistry;
 
 #[test]
+fn issue_show_requires_an_exact_subcommand_and_nonempty_id() {
+    let registry = CommandRegistry::new();
+    for text in [
+        "/issue showboat",
+        "/issue shows bd-1",
+        "/issue show",
+        "/issue show  ",
+    ] {
+        let decision = route(text, &[], &[], &registry, false);
+        assert!(
+            matches!(decision, SubmitDecision::Send { .. }),
+            "{text}: {decision:?}"
+        );
+    }
+    for text in [
+        "/issue show bd-1",
+        "/issue show   bd-1",
+        "/issue show\tbd-1",
+    ] {
+        let decision = route(text, &[], &[], &registry, false);
+        assert!(
+            matches!(decision, SubmitDecision::Local {
+                action: Action::Issue(spur_tui::action::IssueAction::ViewDetail { ref id })
+            } if id == "bd-1"),
+            "{text}: {decision:?}"
+        );
+    }
+}
+
+#[test]
 fn plain_text_routes_to_send() {
     let reg = CommandRegistry::new();
     let dec = route("hello world", &[], &[], &reg, false);

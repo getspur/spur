@@ -3479,6 +3479,130 @@ mod tests {
         entries: Vec<MentionEntry>,
     }
 
+    struct RootScopedSource {
+        fail: Arc<std::sync::atomic::AtomicBool>,
+        hints: Vec<(String, Arc<String>)>,
+    }
+
+    impl MentionSource for RootScopedSource {
+        fn name(&self) -> &'static str {
+            "code_graph"
+        }
+
+        fn build(&mut self, cwd: &Path) -> anyhow::Result<Vec<MentionEntry>> {
+            anyhow::ensure!(!self.fail.load(Ordering::Relaxed), "fixture build failure");
+            let root = cwd.display().to_string();
+            self.hints = vec![("datasource://shared".into(), Arc::new(root.clone()))];
+            Ok(vec![MentionEntry {
+                uri: "file:///shared".into(),
+                display: "shared".into(),
+                tag: Some(root),
+                ..MentionEntry::default()
+            }])
+        }
+
+        fn datasource_hints(&self) -> &[(String, Arc<String>)] {
+            &self.hints
+        }
+    }
+
+    fn root_scoped_registry() -> (
+        MentionRegistry,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<spur_mentions::ManualClock>,
+    ) {
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut registry = test_registry(vec![Box::new(RootScopedSource {
+            fail: Arc::clone(&fail),
+            hints: Vec::new(),
+        })]);
+        let clock = Arc::new(spur_mentions::ManualClock::new());
+        registry.engine = MentionEngine::new(clock.clone());
+        for source in &registry.sources {
+            registry
+                .engine
+                .register_source(source.engine_adapter(), false);
+        }
+        (registry, fail, clock)
+    }
+
+    #[test]
+    fn failed_rebuild_restores_the_matching_root_rows_and_hints() {
+        let (mut registry, fail, clock) = root_scoped_registry();
+        let a = Path::new("root-a");
+        let b = Path::new("root-b");
+        let first = registry.query(CompletionScope::PreSession, a, "shared", 10);
+        registry.query(CompletionScope::PreSession, b, "shared", 10);
+        clock.advance(registry.engine.cache_ttl() + std::time::Duration::from_nanos(1));
+        fail.store(true, Ordering::Relaxed);
+
+        let retained = registry.query(CompletionScope::PreSession, a, "shared", 10);
+        assert_eq!(retained, first);
+        assert_eq!(
+            registry.lookup_datasource_hint("datasource://shared"),
+            Some("root-a")
+        );
+    }
+
+    #[test]
+    fn failed_build_at_a_new_root_does_not_borrow_another_roots_rows() {
+        let (mut registry, fail, _) = root_scoped_registry();
+        registry.query(
+            CompletionScope::PreSession,
+            Path::new("root-a"),
+            "shared",
+            10,
+        );
+        fail.store(true, Ordering::Relaxed);
+        let rows = registry.query(
+            CompletionScope::PreSession,
+            Path::new("root-b"),
+            "shared",
+            10,
+        );
+        assert!(rows.is_empty(), "{rows:?}");
+        assert!(registry
+            .lookup_datasource_hint("datasource://shared")
+            .is_none());
+    }
+
+    #[test]
+    fn deferred_root_build_does_not_expose_another_roots_rows_or_hints() {
+        let (mut registry, _, _) = root_scoped_registry();
+        let a = Path::new("root-a");
+        let b = Path::new("root-b");
+        let first = registry.query(CompletionScope::PreSession, a, "shared", 10);
+        let MentionQueryPreparation::ReadyAndBuild { work, build } =
+            registry.prepare_query_work_nonblocking(CompletionScope::PreSession, b, "shared", 10)
+        else {
+            panic!("uncached code source must defer its build");
+        };
+        assert!(registry.run_query_work(work).entries.is_empty());
+        assert!(registry
+            .lookup_datasource_hint("datasource://shared")
+            .is_none());
+
+        assert_eq!(
+            registry.query(CompletionScope::PreSession, a, "shared", 10),
+            first
+        );
+        registry.apply_cache_build(build_mention_caches(build));
+        // An older background request may finish after the user changes root.
+        assert_eq!(
+            registry.lookup_datasource_hint("datasource://shared"),
+            Some("root-a")
+        );
+        assert_eq!(
+            registry.query(CompletionScope::PreSession, a, "shared", 10),
+            first
+        );
+        registry.query(CompletionScope::PreSession, b, "shared", 10);
+        assert_eq!(
+            registry.lookup_datasource_hint("datasource://shared"),
+            Some("root-b")
+        );
+    }
+
     impl MentionSource for StaticSource {
         fn build(&mut self, _cwd: &Path) -> anyhow::Result<Vec<MentionEntry>> {
             Ok(self.entries.clone())

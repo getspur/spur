@@ -111,6 +111,60 @@ fn distinct_canonical_roots_have_distinct_cache_keys() {
 }
 
 #[test]
+fn invalidating_a_removed_root_discards_its_previous_snapshot() {
+    let tree = TempTree::new("removed-root");
+    let root = tree.dir("workspace");
+    let (source, handle) = ScriptedSource::new("fixture", vec![vec![]]);
+    let mut engine = MentionEngine::new(Arc::new(ManualClock::new()));
+    engine.register_source(Box::new(source), true);
+    query(&mut engine, &root);
+
+    std::fs::remove_dir(&root).unwrap();
+    engine.invalidate_root(&root);
+    std::fs::create_dir(&root).unwrap();
+    query(&mut engine, &root);
+    assert_eq!(handle.builds.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+#[cfg(unix)]
+fn invalidating_a_removed_alias_discards_the_canonical_snapshot() {
+    let tree = TempTree::new("removed-alias");
+    let root = tree.dir("workspace");
+    let alias = tree.root().join("alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    let (source, handle) = ScriptedSource::new("fixture", vec![vec![]]);
+    let mut engine = MentionEngine::new(Arc::new(ManualClock::new()));
+    engine.register_source(Box::new(source), true);
+    query(&mut engine, &alias);
+
+    std::fs::remove_file(&alias).unwrap();
+    engine.invalidate_root(&alias);
+    query(&mut engine, &root);
+    assert_eq!(handle.builds.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn invalidation_also_discards_snapshots_published_for_unresolved_roots() {
+    let tree = TempTree::new("unresolved-root");
+    let root = tree.root().join("missing");
+    let (source, _) = ScriptedSource::new("fixture", vec![vec![]]);
+    let mut engine = MentionEngine::new(Arc::new(ManualClock::new()));
+    engine.register_source(Box::new(source), false);
+    let options = QueryOptions::new();
+    engine.publish_snapshot(
+        &root,
+        "fixture",
+        &options,
+        spur_mentions::SourceSnapshot::new(vec![], 0),
+    );
+    assert!(engine.cached_snapshot(&root, "fixture", &options).is_some());
+
+    engine.invalidate_root(&root);
+    assert!(engine.cached_snapshot(&root, "fixture", &options).is_none());
+}
+
+#[test]
 #[cfg(unix)]
 fn symlinked_root_shares_the_canonical_entry() {
     let tree = TempTree::new("root-symlink");
