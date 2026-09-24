@@ -904,6 +904,16 @@ mod file_oid_cache {
         Unknown,
     }
 
+    impl FileOidMatch {
+        fn as_bool(&self) -> Option<bool> {
+            match self {
+                Self::Match => Some(true),
+                Self::Mismatch { .. } => Some(false),
+                Self::Unknown => None,
+            }
+        }
+    }
+
     #[derive(Debug)]
     pub(super) struct FileOidAggregateReport {
         pub verdict: Option<bool>,
