@@ -1,4 +1,4 @@
-use crate::config::SpurConfig;
+use crate::config::{AgentConfig, SpurConfig};
 use anyhow::{anyhow, Result};
 use directories::BaseDirs;
 use std::collections::BTreeMap;
@@ -21,13 +21,25 @@ pub fn merge_tables(base: &mut Table, over: Table) {
 fn merge_at(base: &mut Table, over: Table, path: &[&str]) {
     for (key, over_value) in over {
         let is_agents_entries = path == ["agents"] && key == "entries";
+        let over_value = match over_value {
+            Value::Array(entries) if is_agents_entries => Value::Array(last_wins_agents(entries)),
+            other => other,
+        };
         match (base.get_mut(&key), over_value) {
             (Some(Value::Table(base_table)), Value::Table(over_table)) => {
                 let mut child_path = path.to_vec();
                 child_path.push(key.as_str());
                 merge_at(base_table, over_table, &child_path);
             }
+            (_, Value::Table(over_table)) => {
+                let mut child_path = path.to_vec();
+                child_path.push(key.as_str());
+                let mut replacement = Table::new();
+                merge_at(&mut replacement, over_table, &child_path);
+                base.insert(key, Value::Table(replacement));
+            }
             (Some(Value::Array(base_array)), Value::Array(over_array)) if is_agents_entries => {
+                *base_array = last_wins_agents(std::mem::take(base_array));
                 merge_agents(base_array, over_array);
             }
             (_, over_value) => {
@@ -35,6 +47,24 @@ fn merge_at(base: &mut Table, over: Table, path: &[&str]) {
             }
         }
     }
+}
+
+fn last_wins_agents(entries: Vec<Value>) -> Vec<Value> {
+    let mut unique = Vec::<Value>::new();
+    for entry in entries {
+        let name = entry.get("name").and_then(Value::as_str);
+        let existing = name.and_then(|name| {
+            unique
+                .iter()
+                .position(|candidate| candidate.get("name").and_then(Value::as_str) == Some(name))
+        });
+        if let Some(index) = existing {
+            unique[index] = entry;
+        } else {
+            unique.push(entry);
+        }
+    }
+    unique
 }
 
 fn merge_agents(base: &mut Vec<Value>, over: Vec<Value>) {
@@ -214,17 +244,51 @@ fn sparse_diff_at(config: &Value, baseline: &Value, path: &[&str]) -> Value {
 fn sparse_agents(config: &[Value], baseline: &[Value]) -> Vec<Value> {
     config
         .iter()
-        .filter(|config_value| {
+        .filter_map(|config_value| {
             let name = config_value.get("name").and_then(Value::as_str);
             match baseline
                 .iter()
                 .find(|baseline_value| baseline_value.get("name").and_then(Value::as_str) == name)
             {
-                Some(baseline_value) => baseline_value != *config_value,
-                None => true,
+                Some(baseline_value) if baseline_value == config_value => None,
+                Some(baseline_value)
+                    if name.is_some() && config_value.is_table() && baseline_value.is_table() =>
+                {
+                    let mut completed_baseline = baseline_value.clone();
+                    let mut supplied_required = Vec::new();
+                    for field in ["command", "transport"] {
+                        if completed_baseline.get(field).is_none() {
+                            if let Some(value) = config_value.get(field) {
+                                completed_baseline
+                                    .as_table_mut()
+                                    .unwrap()
+                                    .insert(field.to_owned(), value.clone());
+                                supplied_required.push((field, value.clone()));
+                            }
+                        }
+                    }
+                    let parsed: std::result::Result<AgentConfig, _> =
+                        completed_baseline.clone().try_into();
+                    if let Ok(agent) = parsed {
+                        if let Ok(value) = Value::try_from(agent) {
+                            completed_baseline = value;
+                        }
+                    }
+                    let mut diff = sparse_diff_at(config_value, &completed_baseline, &[]);
+                    let table = diff.as_table_mut().unwrap();
+                    for (field, value) in supplied_required {
+                        table.insert(field.to_owned(), value);
+                    }
+                    if table.is_empty() {
+                        None
+                    } else {
+                        table.insert("name".to_owned(), Value::String(name.unwrap().to_owned()));
+                        Some(diff)
+                    }
+                }
+                _ => Some(config_value.clone()),
             }
         })
-        .cloned()
         .collect()
 }
 
@@ -256,7 +320,15 @@ pub fn default_user_baseline(_repo_root: &Path) -> Result<Value> {
     if let Some(user_path) = user_path.as_ref().filter(|path| path.exists()) {
         merge_tables(&mut base, read_table(user_path)?);
     }
-    Ok(Value::Table(base))
+    let raw = Value::Table(base);
+    let parsed: std::result::Result<SpurConfig, _> = raw.clone().try_into();
+    if let Ok(mut config) = parsed {
+        super::sanitize_agent_additional_directories(&mut config);
+        return Ok(Value::try_from(config)?);
+    }
+    // A user agent may get required fields from the project layer. Keep the
+    // raw baseline until the project overlay completes the effective config.
+    Ok(raw)
 }
 
 #[cfg(test)]
@@ -576,7 +648,7 @@ additional_directories = ["/tmp/spur-extra", "relative/root", "../parent"]
     }
 
     #[test]
-    fn sparse_diff_agents_entries_drops_equal_keeps_changed_whole() {
+    fn sparse_diff_agents_entries_drops_equal_keeps_changed() {
         let base = Value::Table(t("[[agents.entries]]\nname='codex'\ncommand='codex'\n\
              [[agents.entries]]\nname='claude-code'\ncommand='claude'\n"));
         let config = Value::Table(t("[[agents.entries]]\nname='codex'\ncommand='codex'\n\
@@ -613,6 +685,29 @@ additional_directories = ["/tmp/spur-extra", "relative/root", "../parent"]
         let mut round_trip = baseline.as_table().unwrap().clone();
         merge_tables(&mut round_trip, diff.as_table().unwrap().clone());
         assert_eq!(Value::Table(round_trip), config);
+    }
+
+    #[test]
+    fn sparse_diff_partial_user_agent_omits_optional_defaults() {
+        let user = Value::Table(t(
+            "[[agents.entries]]\nname='codex'\ncapabilities=['user']\n",
+        ));
+        let mut merged = user.as_table().unwrap().clone();
+        merge_tables(
+            &mut merged,
+            t("[[agents.entries]]\nname='codex'\ncommand='codex'\ntransport='acp'\n"),
+        );
+        let effective: SpurConfig = Value::Table(merged).try_into().unwrap();
+        let full = Value::try_from(effective).unwrap();
+
+        let diff = sparse_diff(&full, &user);
+        let entry = &diff["agents"]["entries"][0];
+        assert_eq!(entry["name"].as_str(), Some("codex"));
+        assert_eq!(entry["command"].as_str(), Some("codex"));
+        assert_eq!(entry["transport"].as_str(), Some("acp"));
+        assert!(entry.get("capabilities").is_none());
+        assert!(entry.get("role").is_none());
+        assert!(entry.get("permissions").is_none());
     }
 
     #[test]
