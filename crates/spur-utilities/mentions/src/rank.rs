@@ -224,12 +224,18 @@ pub fn rank_full_sort(
 /// output is byte-identical to the first K rows of [`rank_full_sort`]
 /// under the same options — ties, duplicate scores and fully equal rows
 /// included (`tests/rank_top_k.rs`).
+/// A zero limit returns immediately without scoring or allocating.
 pub fn rank_top_k(
     entries: &[&MentionEntry],
     query: &str,
     options: &RankOptions,
     matcher: &mut Matcher,
 ) -> Vec<MentionEntry> {
+    // No candidate can contribute to a zero-row result. In particular, avoid
+    // parsing the pattern and allocating/scoring an intermediate match set.
+    if options.limit == Some(0) {
+        return Vec::new();
+    }
     let mut scored = score_all(entries, query, &options.tiers, matcher);
     let kept = select_top_k(&mut scored, options.limit);
     scored.truncate(kept);

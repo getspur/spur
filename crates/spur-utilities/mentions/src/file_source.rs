@@ -6,10 +6,12 @@
 //! [`FilesystemProfile`] carried by [`SourceContext`], so `build` needs no
 //! per-frontend signature.
 //!
-//! The TUI-compatible profile is pinned byte-for-byte to today's
-//! `spur-tui/src/mentions/file_source.rs`: same walker flags, same
-//! directory display (`rel/`), same legacy `format!("file://{abs}")` URIs,
+//! The TUI-compatible profile retains the legacy source's walker flags,
+//! directory display (`rel/`), legacy `format!("file://{abs}")` URIs,
 //! and the same silent flattening of walk errors.
+//! Ordinary entry kinds now come from the walker: a known directory stays a
+//! directory even if a separate metadata lookup would be denied. Symlinks
+//! still use target metadata so directory links keep their trailing slash.
 
 use std::path::Path;
 
@@ -81,7 +83,13 @@ impl MentionSource for FileMentionSource {
             if path == root {
                 continue;
             }
-            let is_directory = path.is_dir();
+            // The walker already knows ordinary entry types. Only symlinks
+            // (whose target determines the row kind) and unavailable types
+            // need another metadata lookup. Keep dangling links as file rows.
+            let is_directory = dent
+                .file_type()
+                .filter(|kind| !kind.is_symlink())
+                .map_or_else(|| path.is_dir(), |kind| kind.is_dir());
             if is_directory && !profile.include_directories {
                 continue;
             }

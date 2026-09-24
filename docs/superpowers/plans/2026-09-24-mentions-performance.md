@@ -1,6 +1,7 @@
 # Mentions Performance Implementation Plan
 
-> Direct execution under beads issue `bd-1kyu9`; no worker dispatch.
+> Direct implementation under beads issue `bd-1kyu9`;
+> independent review tracked by `bd-1ibzs`.
 
 **Source spec:** `docs/superpowers/specs/2026-09-24-mentions-performance.md`
 
