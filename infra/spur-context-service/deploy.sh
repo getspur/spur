@@ -74,7 +74,16 @@ SOURCE_FETCHER_LAMBDA_ECR_REPO="spur-context-source-fetcher"
 IMAGE_TAG="${SPUR_CONTEXT_SERVICE_IMAGE_TAG:-$(resolve_image_tag)}"
 WORKER_IMAGE_TAG="$IMAGE_TAG"
 LATEST_IMAGE_TAG="latest"
-AWS_REGION_VAL="$(cd "$INFRA_DIR" && terraform output -raw aws_region 2>/dev/null || echo ap-southeast-5)"
+
+resolve_terraform_aws_region() {
+    local region="${SPUR_CONTEXT_SERVICE_AWS_REGION:-}"
+    if [[ -z "$region" ]]; then
+        region="$(cd "$INFRA_DIR" && terraform output -raw aws_region 2>/dev/null || true)"
+    fi
+    printf '%s\n' "${region:-ap-southeast-5}"
+}
+
+AWS_REGION_VAL="$(resolve_terraform_aws_region)"
 WORKER_IMAGE_URI=""
 WORKER_LAMBDA_IMAGE_URI=""
 SOURCE_FETCHER_LAMBDA_IMAGE_URI=""
@@ -998,7 +1007,12 @@ main() {
 
     terraform init -upgrade -backend-config="$backend_config"
 
-    local tf_vars=(-var-file="$var_file" -var "code_lambda_zip_path=$tf_code_zip_path" -var "knowledge_lambda_zip_path=$tf_knowledge_zip_path")
+    local tf_vars=(
+        -var-file="$var_file"
+        -var "lambda_zip_path=$tf_knowledge_zip_path"
+        -var "code_lambda_zip_path=$tf_code_zip_path"
+        -var "knowledge_lambda_zip_path=$tf_knowledge_zip_path"
+    )
     if [[ -n "$worker_image_uri" ]]; then
         tf_vars+=(-var "worker_ecr_image=$worker_image_uri")
     else

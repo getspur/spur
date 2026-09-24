@@ -1067,6 +1067,7 @@ def test_deploy_rebuilds_distinct_serving_lambda_zips_by_default():
     assert 'tf_knowledge_zip_path="$local_knowledge_zip"' in script
     assert '-var "code_lambda_zip_path=$tf_code_zip_path"' in script
     assert '-var "knowledge_lambda_zip_path=$tf_knowledge_zip_path"' in script
+    assert '-var "lambda_zip_path=$tf_knowledge_zip_path"' in script
     assert 'elif [[ ! -f "$code_zip_path" ]]' not in script
     assert 'elif [[ ! -f "$knowledge_zip_path" ]]' not in script
     assert 'rm -f "$code_zip_path" "$knowledge_zip_path"' in script
@@ -1741,6 +1742,7 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
     assert "memory_size   = var.worker_lambda_memory_mb" in worker
     assert "ephemeral_storage" in worker
     assert terraform_assignment(worker, "role") == "aws_iam_role.worker_lambda.arn"
+    assert "aws_iam_role_policy.worker_lambda_runtime" in worker
     assert "AWS_REGION" not in lambda_tf
     assert "worker_lambda_memory_mb" in variables_tf
     assert "default     = 3008" in variables_tf
@@ -1754,6 +1756,36 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
     assert terraform_assignment(worker_s3_policy, "role") == "aws_iam_role.worker_lambda.id"
     assert "prevent_destroy = true" in worker_s3_policy
     assert "ignore_changes  = all" in worker_s3_policy
+
+    worker_runtime = terraform_resource_block(
+        iam_tf, "aws_iam_role_policy", "worker_lambda_runtime"
+    )
+    assert terraform_assignment(worker_runtime, "role") == "aws_iam_role.worker_lambda.id"
+    for required_action in (
+        "logs:PutLogEvents",
+        "xray:PutTraceSegments",
+        "ec2:CreateNetworkInterface",
+        "ec2:DescribeSubnets",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "dynamodb:UpdateItem",
+    ):
+        assert f'"{required_action}"' in worker_runtime
+
+
+def test_worker_backends_use_the_deployed_bucket_for_medallion_objects():
+    lambda_tf = (INFRA_DIR / "lambda_worker.tf").read_text()
+    ecs_tf = (INFRA_DIR / "ecs.tf").read_text()
+
+    for variable_name in (
+        "SPUR_CONTEXT_BRONZE_BUCKET",
+        "SPUR_CONTEXT_SILVER_BUCKET",
+    ):
+        assert re.search(
+            rf"{variable_name}\s*=\s*aws_s3_bucket\.data\.bucket", lambda_tf
+        )
+        assert f'name  = "{variable_name}"' in ecs_tf
+    assert ecs_tf.count("value = aws_s3_bucket.data.bucket") >= 2
 
 
 def test_nat_free_worker_vpc_endpoints_are_declared():

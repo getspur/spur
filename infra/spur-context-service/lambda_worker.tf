@@ -39,6 +39,8 @@ resource "aws_lambda_function" "worker" {
       SPUR_CATALOG_DSN                 = local.aurora_catalog_dsn
       SPUR_CATALOG_PASSWORD_SECRET_ARN = local.aurora_master_secret_arn
       SPUR_CONTEXT_DUCKLAKE_DATA_PATH  = local.context_ducklake_data_path
+      SPUR_CONTEXT_BRONZE_BUCKET       = aws_s3_bucket.data.bucket
+      SPUR_CONTEXT_SILVER_BUCKET       = aws_s3_bucket.data.bucket
       SPUR_CONTEXT_WORKER_LAMBDA_MODE  = "1"
       SPUR_CONTEXT_MAX_TARBALL_BYTES   = tostring(var.context_max_tarball_bytes)
       SPUR_CONTEXT_MAX_GIT_BYTES       = tostring(var.context_max_git_bytes)
@@ -47,9 +49,8 @@ resource "aws_lambda_function" "worker" {
   }
 
   depends_on = [
-    aws_iam_role_policy_attachment.lambda_basic,
-    aws_iam_role_policy_attachment.lambda_vpc_access,
-    aws_iam_role_policy.shared_lambda_catalog_secret,
+    aws_iam_role_policy.worker_lambda_runtime,
+    aws_iam_role_policy.lambda_catalog_secret,
     aws_cloudwatch_log_group.worker_lambda,
   ]
 }

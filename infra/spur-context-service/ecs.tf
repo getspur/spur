@@ -82,6 +82,14 @@ resource "aws_ecs_task_definition" "worker" {
           value = local.context_ducklake_data_path
         },
         {
+          name  = "SPUR_CONTEXT_BRONZE_BUCKET"
+          value = aws_s3_bucket.data.bucket
+        },
+        {
+          name  = "SPUR_CONTEXT_SILVER_BUCKET"
+          value = aws_s3_bucket.data.bucket
+        },
+        {
           name  = "SPUR_CONTEXT_MAX_TARBALL_BYTES"
           value = tostring(var.context_max_tarball_bytes)
         },

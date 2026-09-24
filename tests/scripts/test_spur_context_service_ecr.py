@@ -64,6 +64,27 @@ printf 'put_calls=%s\\n' "$put_calls"
     return subprocess.run(["bash", "-c", harness], text=True, capture_output=True)
 
 
+def run_region_resolution_harness(*, terraform_output: str, explicit_region: str = ""):
+    source = deploy_source()
+    resolver = shell_function(source, "resolve_terraform_aws_region")
+    harness = f"""
+set -euo pipefail
+INFRA_DIR=/tmp
+SPUR_CONTEXT_SERVICE_AWS_REGION={explicit_region!r}
+terraform() {{
+    if [[ "$1 $2 $3" == "output -raw aws_region" ]]; then
+        printf '%s' {terraform_output!r}
+        return 0
+    fi
+    return 99
+}}
+resolve_terraform_aws_region() {{
+{resolver}
+resolve_terraform_aws_region
+"""
+    return subprocess.run(["bash", "-c", harness], text=True, capture_output=True)
+
+
 def test_all_ecr_repositories_are_reconciled_with_scanning_enabled():
     source = deploy_source()
     ensure_one = shell_function(source, "ensure_ecr_repository")
@@ -131,6 +152,23 @@ def test_region_preflight_precedes_ecr_and_terraform_mutations():
         "ensure_ecr_repositories"
     )
     assert main.index("assert_selected_aws_region") < main.index("terraform apply")
+
+
+def test_region_resolution_falls_back_when_new_state_has_no_outputs():
+    result = run_region_resolution_harness(terraform_output="")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ap-southeast-5\n"
+
+
+def test_region_resolution_accepts_explicit_new_stack_region():
+    result = run_region_resolution_harness(
+        terraform_output="",
+        explicit_region="ap-southeast-5",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ap-southeast-5\n"
 
 
 def test_aws_cli_capability_preflight_is_read_only_and_precedes_mutations():

@@ -125,6 +125,76 @@ resource "aws_iam_role_policy" "knowledge_lambda_runtime" {
   })
 }
 
+# The worker role address is retained for state compatibility, but fresh
+# stacks do not have the historical inline policy documents that are frozen in
+# legacy_compatibility.tf. Keep the active worker permissions in one normally
+# managed policy so both migrated and brand-new stacks receive the same runtime
+# contract.
+resource "aws_iam_role_policy" "worker_lambda_runtime" {
+  name = "WorkerLambdaRuntimeAccess"
+  role = aws_iam_role.worker_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "WorkerObservability"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "WorkerVpcNetworkInterfaces"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeSubnets",
+          "ec2:DeleteNetworkInterface",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "WorkerS3BuildAccess"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:PutObject",
+          "s3:ListBucket",
+          "s3:DeleteObject"
+        ]
+        Resource = [
+          aws_s3_bucket.data.arn,
+          "${aws_s3_bucket.data.arn}/*"
+        ]
+      },
+      {
+        Sid    = "WorkerDynamoDbBuildAccess"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:TransactWriteItems"
+        ]
+        Resource = [
+          aws_dynamodb_table.index_jobs.arn,
+          aws_dynamodb_table.catalog_leases.arn
+        ]
+      }
+    ]
+  })
+}
+
 # Code can read only the shared pointer, immutable serving registries, and
 # immutable Silver graph/source artifacts. It cannot list or mutate the bucket.
 resource "aws_iam_role_policy" "code_s3_read" {

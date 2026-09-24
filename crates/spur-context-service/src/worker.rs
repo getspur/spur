@@ -1695,9 +1695,18 @@ impl BronzeArchiveStore for S3BronzeArchiveStore {
             .body(ByteStream::from(data))
             .send()
             .await
-            .map_err(|error| WorkerError::Fetch(format!("upload bronze archive: {error}")))?;
+            .map_err(|error| {
+                WorkerError::Fetch(format_aws_sdk_error("upload bronze archive", &error))
+            })?;
         Ok(format!("s3://{}/{key}", self.bucket))
     }
+}
+
+fn format_aws_sdk_error(
+    context: &str,
+    error: &(impl std::fmt::Display + std::fmt::Debug),
+) -> String {
+    format!("{context}: {error}; debug={error:?}")
 }
 
 #[derive(Debug, Clone)]
@@ -4606,12 +4615,30 @@ struct Checkpoint<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt;
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_env() -> MutexGuard<'static, ()> {
         ENV_LOCK.lock().expect("env lock should not be poisoned")
+    }
+
+    #[derive(Debug)]
+    struct OpaqueServiceError;
+
+    impl fmt::Display for OpaqueServiceError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("service error")
+        }
+    }
+
+    #[test]
+    fn aws_sdk_error_message_preserves_debug_details() {
+        assert_eq!(
+            format_aws_sdk_error("upload bronze archive", &OpaqueServiceError),
+            "upload bronze archive: service error; debug=OpaqueServiceError"
+        );
     }
 
     #[test]
