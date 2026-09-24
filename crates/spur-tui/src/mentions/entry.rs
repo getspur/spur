@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::issue_source::IssueMentionDescriptor;
 use spur_acp::AgentKind;
 use spur_graph::CodeMentionPayload;
-use spur_mentions::code::source::CodeMentionCandidate;
+use spur_mentions::code::source::{CodeMentionCandidate, CodePayloadSnapshot};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum MentionKind {
@@ -93,6 +93,13 @@ pub trait MentionSource: Send {
 
     fn code_candidates(&self) -> Arc<Vec<CodeMentionCandidate>> {
         Arc::default()
+    }
+
+    /// Capture the backend belonging to the current candidates. Sources whose
+    /// hydration state changes on rebuild must provide a snapshot; returning
+    /// `None` preserves the source-based fallback for static custom sources.
+    fn code_payload_snapshot(&self) -> Option<CodePayloadSnapshot> {
+        None
     }
 
     fn hydrate_code_payloads(

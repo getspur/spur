@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
 use nucleo_matcher::{
@@ -35,7 +35,7 @@ use spur_mentions::{
 };
 
 use super::code_graph::source::{
-    entry_for_candidate, CodeGraphMentionSource, CodeMentionCandidate,
+    entry_for_candidate, CodeGraphMentionSource, CodeMentionCandidate, CodePayloadSnapshot,
 };
 use super::datasource_source::DatasourceMentionSource;
 use super::entry::{MentionEntry, MentionKind, MentionSource};
@@ -61,8 +61,8 @@ const CODE_CAP: usize = 3;
 /// Facade-side materialization of one source snapshot: the TUI rows plus
 /// the adapter-owned extras (code payloads/candidates, datasource prompt
 /// hints) that travel with them. Freshness, cache identity, and TTL are
-/// the engine's concern; the data here is adopted exactly when the engine
-/// builds or publishes a snapshot for the source.
+/// the engine's concern; each materialization belongs to the exact engine
+/// snapshot that produced it, including its sidecar and payload stores.
 struct SourceSnapshotData {
     entries: Arc<Vec<MentionEntry>>,
     code_payloads: HashMap<String, Arc<CodeMentionPayload>>,
@@ -70,9 +70,75 @@ struct SourceSnapshotData {
     datasource_hints: HashMap<String, Arc<String>>,
 }
 
+/// Retain frontend data for each engine generation, and expose only the
+/// generations selected for the current query. Weak references let replaced
+/// or invalidated engine snapshots release their materializations too.
+#[derive(Default)]
+struct SnapshotMaterializations {
+    active: HashMap<&'static str, u64>,
+    generations: HashMap<(&'static str, u64), (Weak<SourceSnapshot>, SourceSnapshotData)>,
+}
+
+impl SnapshotMaterializations {
+    fn begin_query(&mut self) {
+        self.active.clear();
+        self.generations
+            .retain(|_, (snapshot, _)| snapshot.strong_count() > 0);
+    }
+
+    fn insert(
+        &mut self,
+        name: &'static str,
+        snapshot: &Arc<SourceSnapshot>,
+        data: SourceSnapshotData,
+    ) {
+        self.generations.insert(
+            (name, snapshot.generation),
+            (Arc::downgrade(snapshot), data),
+        );
+    }
+
+    fn select(&mut self, name: &'static str, snapshot: &SourceSnapshot) {
+        self.active.insert(name, snapshot.generation);
+    }
+
+    fn get(&self, name: &str) -> Option<&SourceSnapshotData> {
+        let (&name, &generation) = self.active.get_key_value(name)?;
+        self.generations
+            .get(&(name, generation))
+            .map(|(_, data)| data)
+    }
+
+    fn get_mut(&mut self, name: &str) -> Option<&mut SourceSnapshotData> {
+        let (&name, &generation) = self.active.get_key_value(name)?;
+        self.generations
+            .get_mut(&(name, generation))
+            .map(|(_, data)| data)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &SourceSnapshotData> {
+        self.active.keys().filter_map(|name| self.get(name))
+    }
+
+    fn all_values_mut(&mut self) -> impl Iterator<Item = &mut SourceSnapshotData> {
+        self.generations.values_mut().map(|(_, data)| data)
+    }
+
+    fn clear(&mut self) {
+        self.active.clear();
+        self.generations.clear();
+    }
+
+    fn remove(&mut self, name: &str) {
+        self.active.remove(name);
+        self.generations.retain(|(key, _), _| *key != name);
+    }
+}
+
 #[derive(Clone)]
 struct CodeQueryIndex {
     candidates: Arc<Vec<CodeMentionCandidate>>,
+    payload_snapshot: Option<CodePayloadSnapshot>,
     source: Arc<Mutex<Box<dyn MentionSource>>>,
 }
 
@@ -312,9 +378,8 @@ pub struct MentionRegistry {
     /// cache identity (canonical root + source key + profile + token), and
     /// invalidation all run through the per-source seams here.
     engine: MentionEngine,
-    /// Facade-side materializations adopted from engine builds/publishes,
-    /// keyed by source name.
-    snapshots: HashMap<&'static str, SourceSnapshotData>,
+    /// Facade-side materializations selected by the engine's snapshot identity.
+    snapshots: SnapshotMaterializations,
     retained_code_payloads: HashMap<String, Arc<CodeMentionPayload>>,
     pinned_code_payload_uris: HashSet<String>,
     code_graph_hint: Option<&'static str>,
@@ -429,7 +494,7 @@ impl MentionRegistry {
         Self {
             sources: slots,
             engine,
-            snapshots: HashMap::new(),
+            snapshots: SnapshotMaterializations::default(),
             retained_code_payloads: HashMap::new(),
             pinned_code_payload_uris: HashSet::new(),
             code_graph_hint: None,
@@ -650,7 +715,7 @@ impl MentionRegistry {
         self.retained_code_payloads
             .retain(|uri, _| keep.contains(uri.as_str()));
         self.pinned_code_payload_uris.clear();
-        for cached in self.snapshots.values_mut() {
+        for cached in self.snapshots.all_values_mut() {
             cached
                 .code_payloads
                 .retain(|uri, _| !is_graph_symbol_uri(uri) || keep.contains(uri.as_str()));
@@ -815,36 +880,33 @@ impl MentionRegistry {
         // TTL-driven rebuilds are cheap because the source's content-hash
         // cache short-circuits artifact reloads, and results are identical.)
         let options = engine_query_options();
-        let stale_sources: Vec<MentionSourceSlot> = self
-            .sources
-            .iter()
-            .filter(|slot| {
-                self.engine
-                    .cached_snapshot(cwd, slot.name, &options)
-                    .is_none()
-            })
-            .cloned()
-            .collect();
-        let (deferred_sources, inline_sources): (Vec<_>, Vec<_>) = stale_sources
-            .into_iter()
-            .partition(|source| defer_code_graph_build && source.name == "code_graph");
-        for source in inline_sources {
+        self.snapshots.begin_query();
+        let mut deferred_sources = Vec::new();
+        for source in &self.sources {
+            if let Some(snapshot) = self.engine.cached_snapshot(cwd, source.name, &options) {
+                self.snapshots.select(source.name, &snapshot);
+                continue;
+            }
+            if defer_code_graph_build && source.name == "code_graph" {
+                // Only this identity's previous generation may serve while
+                // its replacement is being built in the background.
+                if let Some(snapshot) = self.engine.retained_snapshot(cwd, source.name, &options) {
+                    self.snapshots.select(source.name, &snapshot);
+                }
+                deferred_sources.push(source.clone());
+                continue;
+            }
             match self.engine.resolve_snapshot(cwd, source.name, &options) {
-                // The engine built through this slot: adopt the facade-side
-                // materialization (TUI-flavor slots read the adapter-parked
-                // rows; session-flavor slots rejoin the neutral entries with
-                // the sidecar their source wrote). Fresh hits, retained
-                // snapshots after a failed optional rebuild, and hard
-                // failures all keep whatever the facade already holds —
-                // the same degradation policy as the fused query path.
                 SnapshotResolution::Built(snapshot) => {
                     if let Some(data) = source.adopt_built(&snapshot) {
-                        self.snapshots.insert(source.name, data);
+                        self.snapshots.insert(source.name, &snapshot, data);
                     }
+                    self.snapshots.select(source.name, &snapshot);
                 }
-                SnapshotResolution::Fresh(_)
-                | SnapshotResolution::Retained(_)
-                | SnapshotResolution::Failed(_) => {}
+                SnapshotResolution::Fresh(snapshot) | SnapshotResolution::Retained(snapshot) => {
+                    self.snapshots.select(source.name, &snapshot);
+                }
+                SnapshotResolution::Failed(_) => {}
             }
         }
         let composed = if query.is_empty() {
@@ -915,20 +977,22 @@ impl MentionRegistry {
                 continue;
             }
             // Publish the deferred build engine-side (stamping the next
-            // generation under the caller's root identity), then adopt the
-            // TUI-side rows it produced.
+            // generation under the caller's root identity), then retain its
+            // materialization. Selection happens on the next query: a late
+            // background result must not change the currently visible root.
             let snapshot = SourceSnapshot::new(neutral_entries_of(&update.data.entries), 0);
-            if self
-                .engine
-                .publish_snapshot(&cwd, update.source.name, &options, snapshot)
-                .is_none()
+            if let Some(snapshot) =
+                self.engine
+                    .publish_snapshot(&cwd, update.source.name, &options, snapshot)
             {
+                self.snapshots
+                    .insert(update.source.name, &snapshot, update.data);
+            } else {
                 tracing::warn!(
                     source = update.source.name,
                     "deferred mention build published for an unregistered source"
                 );
             }
-            self.snapshots.insert(update.source.name, update.data);
         }
     }
 
@@ -969,7 +1033,7 @@ impl MentionRegistry {
         cwd: &Path,
         entries: &[&MentionEntry],
         query: &str,
-        snapshots: &HashMap<&'static str, SourceSnapshotData>,
+        snapshots: &SnapshotMaterializations,
         catalog_path: Option<&PathBuf>,
         pending_probe_requests: &mut HashSet<String>,
         matcher: &mut Matcher,
@@ -1197,10 +1261,7 @@ impl MentionRegistry {
         })
     }
 
-    fn worker_kind(
-        snapshots: &HashMap<&'static str, SourceSnapshotData>,
-        worker_name: &str,
-    ) -> spur_acp::AgentKind {
+    fn worker_kind(snapshots: &SnapshotMaterializations, worker_name: &str) -> spur_acp::AgentKind {
         snapshots
             .get("worker")
             .and_then(|cached| {
@@ -1655,6 +1716,7 @@ fn build_source_snapshot_data(
     let code_candidates = builder.code_candidates();
     let code_index = (!code_candidates.is_empty()).then(|| CodeQueryIndex {
         candidates: code_candidates,
+        payload_snapshot: builder.code_payload_snapshot(),
         source: Arc::clone(source),
     });
     let datasource_hints = builder
@@ -2105,14 +2167,19 @@ fn hydrate_code_rows(
         let Some(index) = code_indexes.get(source_index) else {
             continue;
         };
-        let source = match index.source.lock() {
-            Ok(source) => source,
-            Err(error) => {
-                tracing::warn!(error = %error, "code mention payload source lock poisoned");
-                continue;
-            }
+        let hydrated = if let Some(snapshot) = &index.payload_snapshot {
+            snapshot.hydrate_code_payloads(&stable_ids)
+        } else {
+            let source = match index.source.lock() {
+                Ok(source) => source,
+                Err(error) => {
+                    tracing::warn!(error = %error, "code mention payload source lock poisoned");
+                    continue;
+                }
+            };
+            source.hydrate_code_payloads(&stable_ids)
         };
-        match source.hydrate_code_payloads(&stable_ids) {
+        match hydrated {
             Ok(hydrated) => payloads.extend(hydrated),
             Err(error) => {
                 tracing::warn!(error = %error, "code mention payload hydration failed");

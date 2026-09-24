@@ -23,7 +23,7 @@
 //! the profile fingerprint, counts, and durations — never paths, URIs, or
 //! query text.
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
 use std::path::Path;
 use std::sync::Arc;
@@ -131,6 +131,9 @@ struct SourceSlot {
 pub struct MentionEngine {
     sources: Vec<SourceSlot>,
     cache: SnapshotCache,
+    /// Root spellings observed by queries/builds, kept independently of the
+    /// filesystem so explicit invalidation still works after removal.
+    root_aliases: HashMap<PathBuf, HashSet<PathBuf>>,
     clock: Arc<dyn Clock>,
     ttl: Duration,
     matcher: Matcher,
@@ -148,6 +151,7 @@ impl MentionEngine {
         Self {
             sources: Vec::new(),
             cache: SnapshotCache::default(),
+            root_aliases: HashMap::new(),
             clock,
             ttl,
             matcher: Matcher::new(Config::DEFAULT),
@@ -198,6 +202,7 @@ impl MentionEngine {
     /// generation counters keep advancing.
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+        self.root_aliases.clear();
     }
 
     /// Drop every cached snapshot for one source key (all roots): the
@@ -224,17 +229,39 @@ impl MentionEngine {
         source_key: &str,
         options: &QueryOptions,
     ) -> Option<Arc<SourceSnapshot>> {
+        let key = self.snapshot_key(root, source_key, options)?;
+        self.cache.get_fresh(&key, self.clock.now(), self.ttl)
+    }
+
+    /// Look up the last snapshot for exactly this root/profile/source token,
+    /// regardless of TTL. Frontends may serve it while a deferred rebuild is
+    /// pending; this does not refresh its age or treat it as a fresh cache hit.
+    pub fn retained_snapshot(
+        &self,
+        root: &Path,
+        source_key: &str,
+        options: &QueryOptions,
+    ) -> Option<Arc<SourceSnapshot>> {
+        self.cache
+            .get_any(&self.snapshot_key(root, source_key, options)?)
+    }
+
+    fn snapshot_key(
+        &self,
+        root: &Path,
+        source_key: &str,
+        options: &QueryOptions,
+    ) -> Option<CacheKey> {
         let slot = self
             .sources
             .iter()
             .find(|slot| slot.source.key() == source_key)?;
-        let key = CacheKey::new(
+        Some(CacheKey::new(
             identity_root(root),
             slot.source.key(),
             options.filesystem_profile.fingerprint(),
             slot.source.source_token(),
-        );
-        self.cache.get_fresh(&key, self.clock.now(), self.ttl)
+        ))
     }
 
     /// Resolve one source's snapshot: fresh cache hit, or build and publish
@@ -287,12 +314,14 @@ impl MentionEngine {
         snapshot: SourceSnapshot,
     ) -> Option<Arc<SourceSnapshot>> {
         let pos = self.slot_index(source_key)?;
+        let canonical_root = identity_root(root);
+        self.remember_root(root, &canonical_root);
         let slot = &mut self.sources[pos];
         slot.last_generation += 1;
         let mut snapshot = snapshot;
         snapshot.generation = slot.last_generation;
         let key = CacheKey::new(
-            identity_root(root),
+            canonical_root,
             slot.source.key(),
             options.filesystem_profile.fingerprint(),
             slot.source.source_token(),
@@ -310,9 +339,11 @@ impl MentionEngine {
     /// miss. `root` is passed to the source verbatim; only the cache key
     /// uses the canonical identity form.
     fn resolve_slot(&mut self, pos: usize, root: &Path, options: &QueryOptions) -> SlotOutcome {
+        let canonical_root = identity_root(root);
+        self.remember_root(root, &canonical_root);
         let slot = &mut self.sources[pos];
         let key = CacheKey::new(
-            identity_root(root),
+            canonical_root,
             slot.source.key(),
             options.filesystem_profile.fingerprint(),
             slot.source.source_token(),
@@ -346,12 +377,30 @@ impl MentionEngine {
         }
     }
 
-    /// Explicitly invalidate every snapshot for `root` (canonicalized),
-    /// independent of the TTL.
+    /// Explicitly invalidate every snapshot for `root`, independent of TTL.
+    /// Previously observed aliases still invalidate their canonical identity
+    /// after the directory or symlink has been removed. Unresolved roots used
+    /// through the per-source seams are invalidated by their stored spelling.
     pub fn invalidate_root(&mut self, root: &Path) {
-        if let Ok(canonical) = root.canonicalize() {
-            self.cache.invalidate_root(&canonical);
+        let mut identities = self
+            .root_aliases
+            .remove(&root_alias(root))
+            .unwrap_or_default();
+        identities.insert(identity_root(root));
+        for identity in &identities {
+            self.cache.invalidate_root(identity);
         }
+        self.root_aliases.retain(|_, remembered| {
+            remembered.retain(|identity| !identities.contains(identity));
+            !remembered.is_empty()
+        });
+    }
+
+    fn remember_root(&mut self, root: &Path, identity: &Path) {
+        self.root_aliases
+            .entry(root_alias(root))
+            .or_default()
+            .insert(identity.to_path_buf());
     }
 
     /// Run one completion query: resolve or rebuild each source snapshot,
@@ -395,6 +444,9 @@ impl MentionEngine {
                 "canonical root is not a directory",
             )));
         }
+        // The fused query passes the canonical path to source builds. Retain
+        // the caller's original spelling as well, including symlink aliases.
+        self.remember_root(root, &canonical_root);
         let root_hash_hex = format!("{:016x}", root_hash(&canonical_root));
         span.record("root_hash", root_hash_hex.as_str());
         span.record(
@@ -509,6 +561,13 @@ impl MentionEngine {
 /// is normalized so alternate spellings of one directory share a snapshot.
 fn identity_root(root: &Path) -> PathBuf {
     root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+}
+
+/// Resolve relative spellings against the current directory without needing
+/// the root itself to exist. This keeps remembered aliases independent of
+/// later changes to the process working directory.
+fn root_alias(root: &Path) -> PathBuf {
+    std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
 /// Redacted root identity for spans: a 64-bit hash of the canonical path.

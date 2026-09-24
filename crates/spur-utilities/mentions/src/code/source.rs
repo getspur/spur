@@ -62,7 +62,7 @@ pub struct CodeGraphMentionSource {
     cached_entries: Vec<MentionEntry>,
     payloads: Vec<(String, Arc<CodeMentionPayload>)>,
     candidates: Arc<Vec<CodeMentionCandidate>>,
-    payload_backend: Option<CodePayloadBackend>,
+    payload_backend: Option<CodePayloadSnapshot>,
     #[cfg(test)]
     reload_count: usize,
 }
@@ -77,6 +77,13 @@ enum CodePayloadBackend {
         graph_index_version: String,
     },
 }
+
+/// Lazy payload hydration for one loaded graph generation. Cloning this
+/// handle shares its backend, independently of later source rebuilds. Parquet
+/// handles retain their canonical artifact directory and reader metadata;
+/// artifact files must continue to obey the graph publication contract.
+#[derive(Clone)]
+pub struct CodePayloadSnapshot(Arc<CodePayloadBackend>);
 
 impl CodeGraphMentionSource {
     pub fn new(artifact_path: impl Into<PathBuf>) -> Self {
@@ -131,6 +138,11 @@ impl CodeGraphMentionSource {
         Arc::clone(&self.candidates)
     }
 
+    /// Capture the hydration backend belonging to the current candidates.
+    pub fn code_payload_snapshot(&self) -> Option<CodePayloadSnapshot> {
+        self.payload_backend.clone()
+    }
+
     /// Hydrate payloads for just the selected stable symbol ids (parquet
     /// backend: a bounded column read; slim backend: a map lookup).
     pub fn hydrate_code_payloads(
@@ -140,7 +152,17 @@ impl CodeGraphMentionSource {
         let Some(backend) = &self.payload_backend else {
             return Ok(Vec::new());
         };
-        let (symbols, graph_index_version) = match backend {
+        backend.hydrate_code_payloads(stable_symbol_ids)
+    }
+}
+
+impl CodePayloadSnapshot {
+    /// Hydrate only the selected IDs using this generation's backend.
+    pub fn hydrate_code_payloads(
+        &self,
+        stable_symbol_ids: &[String],
+    ) -> anyhow::Result<Vec<(String, Arc<CodeMentionPayload>)>> {
+        let (symbols, graph_index_version) = match self.0.as_ref() {
             CodePayloadBackend::Parquet {
                 client,
                 graph_index_version,
@@ -278,7 +300,7 @@ impl MentionSource for CodeGraphMentionSource {
         });
         self.payloads = payloads;
         self.candidates = Arc::new(compact_candidates(loaded.candidates));
-        self.payload_backend = Some(loaded.payload_backend);
+        self.payload_backend = Some(CodePayloadSnapshot(Arc::new(loaded.payload_backend)));
         self.cached_entries = entries.clone();
         tracing::info!(
             path = %resolved.path.display(),

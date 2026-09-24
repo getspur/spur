@@ -252,15 +252,12 @@ pub fn local_dispatch(name: &str, arg: Option<&str>) -> Option<Action> {
         "explore" => Some(Action::NavigateTo(ViewId::ExploreBrowser)),
         // Submit-router-only names (not popup entries).
         "work" => arg.map(|id| Action::Issue(IssueAction::WorkOn { id: id.to_string() })),
-        "issue" => match arg? {
-            // `issue show <id>` → issue ViewDetail action.
-            rest if rest.starts_with("show") => {
-                let id = rest.strip_prefix("show")?.trim();
-                (!id.is_empty())
-                    .then(|| Action::Issue(IssueAction::ViewDetail { id: id.to_string() }))
-            }
-            _ => None,
-        },
+        "issue" => {
+            let (subcommand, rest) = arg?.split_once(char::is_whitespace)?;
+            let id = rest.trim();
+            (subcommand == "show" && !id.is_empty())
+                .then(|| Action::Issue(IssueAction::ViewDetail { id: id.to_string() }))
+        }
         _ => None,
     }
 }

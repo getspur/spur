@@ -27,7 +27,9 @@ use spur_mentions::{
 
 use crate::mentions::entry::{MentionEntry, MentionKind, MentionSource};
 
-pub use spur_mentions::code::source::{CodeGraphMentionSource, CodeMentionCandidate};
+pub use spur_mentions::code::source::{
+    CodeGraphMentionSource, CodeMentionCandidate, CodePayloadSnapshot,
+};
 
 impl MentionSource for CodeGraphMentionSource {
     fn name(&self) -> &'static str {
@@ -56,6 +58,10 @@ impl MentionSource for CodeGraphMentionSource {
         stable_symbol_ids: &[String],
     ) -> anyhow::Result<Vec<(String, Arc<CodeMentionPayload>)>> {
         SharedCodeGraphSource::hydrate_code_payloads(self, stable_symbol_ids)
+    }
+
+    fn code_payload_snapshot(&self) -> Option<CodePayloadSnapshot> {
+        SharedCodeGraphSource::code_payload_snapshot(self)
     }
 }
 
