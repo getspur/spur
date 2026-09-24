@@ -511,3 +511,31 @@ never collide in the same bucket).
 `Cache misses` delta must be ≈ workspace-crate count only (registry hits ≈ all
 of the 1124-crate registry graph). After canonical slots land: delta ≈ 0 for
 lib-type units.
+
+### Addendum (2026-09-23, later): zig cross-compiles cannot count on sccache
+
+Confirmed live on the aws-my builder (probe crate + zig argv shim, private
+sccache namespace):
+
+1. **Rust units in zigbuild legs DO count.** `RUSTC_WRAPPER` chains intact on
+   every leg — including the darwin leg, where `spur-darwin-rustc-wrapper` execs
+   `$SPUR_LIBPROC_NEXT_WRAPPER` (set to the sccache wrapper by build.sh).
+   Probe: 4 Rust misses recorded through the chain.
+2. **C/C++ units for cross targets bypass sccache entirely.** cargo-zigbuild
+   overwrites `TARGET_CC`/`CC_<triple>`/`TARGET_CXX` with bare
+   `zig cc -target <triple> ...` for build scripts; the profile.d
+   `CC=/usr/local/bin/sccache-cc` never runs. Captured invocation:
+   `zig cc -g -fno-sanitize=all -target x86_64-linux-gnu -E ...`.
+3. **It could not be counted even if routed.** sccache has no zig compiler
+   support — `sccache zig cc` fails with "Compiler not supported" on the pinned
+   0.15.0, and `src/compiler/` on current sccache main (v0.18.0) still has no
+   `zig.rs`. Cross-target C/C++ (duckdb-sys where prebuilts don't apply, ring,
+   zlib, …) therefore recompiles from scratch on every zigbuild leg and is
+   invisible in sccache stats.
+
+Mitigation ladder: (a) route cross C compiles through clang + a sysroot when
+one exists (sccache supports clang; keys normalize via the plural-BASEDIRS
+sccache-cc fixed today); (b) extend prebuilt bundles for heavy C deps (the
+duckdb prebuilt path is the template); (c) watch upstream for zig compiler
+support. Do not try to wrap `zig cc` with sccache — capability blocker, not
+configuration.

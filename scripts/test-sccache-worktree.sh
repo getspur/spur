@@ -49,6 +49,8 @@ cat > "$STUB" <<'EOF'
   printf 'target_dir=%s\n' "${CARGO_TARGET_DIR:-}"
   printf 'bucket=%s\n' "${SCCACHE_BUCKET:-}"
   printf 'chain=%s\n' "${SCCACHE_MULTILEVEL_CHAIN:-}"
+  printf 'srv_uds=%s\n' "${SCCACHE_SERVER_UDS:-}"
+  printf 'idle=%s\n' "${SCCACHE_IDLE_TIMEOUT:-}"
 } >> "$SCCACHE_CAPTURE"
 exit 0
 EOF
@@ -92,9 +94,9 @@ if [[ -s "$CAPTURE" ]]; then
         fail "CARGO_TARGET_DIR leaked to sccache: '$target_dir' — every VM compile key diverges per worktree (sccache hashes all CARGO_* vars)"
     fi
 
-    [[ "$bucket" == "wiilearn-spur-sccache-apse5" ]] \
-        && pass "default L1 bucket = aws-my Malaysia (wiilearn-spur-sccache-apse5)" \
-        || fail "default bucket: got '$bucket', want wiilearn-spur-sccache-apse5 (aws-my)"
+    [[ "$bucket" == "spurlab-591950085580-spur-sccache-apse5" ]] \
+        && pass "default L1 bucket = aws-my Malaysia (spurlab-591950085580-spur-sccache-apse5)" \
+        || fail "default bucket: got '$bucket', want spurlab-591950085580-spur-sccache-apse5 (aws-my)"
 
     [[ "$chain" == "disk,s3" ]] \
         && pass "default SCCACHE_MULTILEVEL_CHAIN=disk,s3" \
@@ -141,9 +143,33 @@ chain=$(sed -n 's/^chain=//p' "$CAPTURE")
 ( cd "$WT" && SCCACHE_GCS_BUCKET=wiilearn-spur-sccache-asia SPUR_SCCACHE_S3=1 "$WRAPPER" rustc - --crate-name x ) \
     >/dev/null 2>&1
 bucket=$(sed -n 's/^bucket=//p' "$CAPTURE")
-[[ "$bucket" == "wiilearn-spur-sccache-apse5" ]] \
+[[ "$bucket" == "spurlab-591950085580-spur-sccache-apse5" ]] \
     && pass "explicit SPUR_SCCACHE_S3=1 wins over ambient GCS config" \
     || fail "explicit S3 override broken under ambient GCS: bucket='$bucket'"
+
+# ---- case 8: macOS server-binding hygiene ------------------------------------
+# macOS (homebrew) sccache clients IGNORE SCCACHE_SERVER_UDS and always connect
+# via TCP 4226. Exporting the UDS there only spawns orphan UDS-bound servers that
+# serve nobody while disk-only TCP servers churn via auto-spawn. On Darwin the
+# wrapper must NOT export the UDS, and must pin the idle timeout so a
+# multilevel-configured server stays resident between builds.
+: > "$CAPTURE"
+( cd "$WT" && "$WRAPPER" rustc - --crate-name x ) >/dev/null 2>&1
+srv_uds=$(sed -n 's/^srv_uds=//p' "$CAPTURE")
+idle=$(sed -n 's/^idle=//p' "$CAPTURE")
+if [[ "$(uname)" == "Darwin" ]]; then
+    if [[ -z "$srv_uds" ]]; then
+        pass "Darwin: no SCCACHE_SERVER_UDS export (clients use TCP 4226)"
+    else
+        fail "Darwin: SCCACHE_SERVER_UDS exported ('$srv_uds') — orphan-UDS server bug"
+    fi
+else
+    [[ -n "$srv_uds" ]] && pass "non-Darwin: UDS export preserved ($srv_uds)" \
+        || fail "non-Darwin: expected UDS export, got none"
+fi
+[[ "$idle" == "0" ]] \
+    && pass "SCCACHE_IDLE_TIMEOUT=0 (multilevel server stays resident)" \
+    || fail "idle timeout not pinned: got '${idle:-unset}'"
 
 echo
 if [[ $FAILURES -eq 0 ]]; then
