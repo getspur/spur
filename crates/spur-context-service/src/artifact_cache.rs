@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -25,12 +25,34 @@ pub type ArtifactStream = Pin<Box<dyn AsyncRead + Send + 'static>>;
 #[error("{message}")]
 pub struct ArtifactFetchError {
     message: String,
+    kind: ArtifactFetchErrorKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArtifactFetchErrorKind {
+    Unavailable,
+    IntegrityMismatch,
 }
 
 impl ArtifactFetchError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            kind: ArtifactFetchErrorKind::Unavailable,
+        }
+    }
+
+    pub fn integrity_mismatch(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ArtifactFetchErrorKind::IntegrityMismatch,
+        }
+    }
+
+    fn cache_error(&self) -> ArtifactCacheError {
+        match self.kind {
+            ArtifactFetchErrorKind::Unavailable => ArtifactCacheError::Unavailable,
+            ArtifactFetchErrorKind::IntegrityMismatch => ArtifactCacheError::IntegrityMismatch,
         }
     }
 }
@@ -38,6 +60,30 @@ impl ArtifactFetchError {
 #[async_trait]
 pub trait ArtifactFetcher: Send + Sync {
     async fn fetch(&self, uri: &str) -> Result<ArtifactStream, ArtifactFetchError>;
+
+    async fn fetch_range(
+        &self,
+        uri: &str,
+        range: Range<u64>,
+        _expected_etag: Option<&str>,
+    ) -> Result<Vec<u8>, ArtifactFetchError> {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut stream = self.fetch(uri).await?;
+        let mut body = Vec::new();
+        stream
+            .read_to_end(&mut body)
+            .await
+            .map_err(|error| ArtifactFetchError::new(error.to_string()))?;
+        let start = usize::try_from(range.start)
+            .map_err(|error| ArtifactFetchError::integrity_mismatch(error.to_string()))?;
+        let end = usize::try_from(range.end)
+            .map_err(|error| ArtifactFetchError::integrity_mismatch(error.to_string()))?;
+        let bytes = body.get(start..end).ok_or_else(|| {
+            ArtifactFetchError::integrity_mismatch("artifact range is outside the object")
+        })?;
+        Ok(bytes.to_vec())
+    }
 }
 
 #[async_trait]
@@ -108,6 +154,58 @@ impl ArtifactFetcher for S3ArtifactFetcher {
             .await
             .map_err(|error| ArtifactFetchError::new(error.to_string()))?;
         Ok(Box::pin(output.body.into_async_read()))
+    }
+
+    async fn fetch_range(
+        &self,
+        uri: &str,
+        range: Range<u64>,
+        expected_etag: Option<&str>,
+    ) -> Result<Vec<u8>, ArtifactFetchError> {
+        let (bucket, key) = parse_s3_uri(uri).ok_or_else(|| {
+            ArtifactFetchError::new("artifact URI is not a complete S3 object URI")
+        })?;
+        if range.start > range.end {
+            return Err(ArtifactFetchError::integrity_mismatch(
+                "artifact byte range is invalid",
+            ));
+        }
+        if range.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut request = self
+            .client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .range(format!("bytes={}-{}", range.start, range.end - 1));
+        if let Some(etag) = expected_etag.filter(|etag| !etag.trim().is_empty()) {
+            request = request.if_match(etag);
+        }
+        let output = request.send().await.map_err(|error| {
+            let status = error
+                .raw_response()
+                .map(|response| response.status().as_u16());
+            if matches!(status, Some(412 | 416)) {
+                ArtifactFetchError::integrity_mismatch(error.to_string())
+            } else {
+                ArtifactFetchError::new(error.to_string())
+            }
+        })?;
+        let body = output
+            .body
+            .collect()
+            .await
+            .map_err(|error| ArtifactFetchError::new(error.to_string()))?
+            .into_bytes();
+        let expected_len = usize::try_from(range.end - range.start)
+            .map_err(|error| ArtifactFetchError::integrity_mismatch(error.to_string()))?;
+        if body.len() != expected_len {
+            return Err(ArtifactFetchError::integrity_mismatch(
+                "artifact range response has an unexpected length",
+            ));
+        }
+        Ok(body.to_vec())
     }
 }
 
@@ -382,9 +480,10 @@ impl CacheKey {
     }
 }
 
-struct ValidatedBundleMember {
-    relative_path: String,
-    identity: ArtifactIdentity,
+pub(crate) struct ValidatedBundleMember {
+    pub(crate) relative_path: String,
+    pub(crate) identity: ArtifactIdentity,
+    pub(crate) etag: String,
 }
 
 impl ArtifactCache {
@@ -565,6 +664,19 @@ impl ArtifactCache {
             self.final_path(identity),
         )
         .await
+    }
+
+    pub(crate) async fn fetch_range(
+        &self,
+        uri: &str,
+        range: Range<u64>,
+        expected_etag: Option<&str>,
+    ) -> Result<Vec<u8>, ArtifactCacheError> {
+        self.inner
+            .fetcher
+            .fetch_range(uri, range, expected_etag)
+            .await
+            .map_err(|error| error.cache_error())
     }
 
     pub async fn materialize_bundle(
@@ -847,7 +959,9 @@ impl ArtifactCache {
     }
 }
 
-fn validate_bundle_identity(bundle: &ArtifactBundleIdentity) -> Result<(), ArtifactCacheError> {
+pub(crate) fn validate_bundle_identity(
+    bundle: &ArtifactBundleIdentity,
+) -> Result<(), ArtifactCacheError> {
     validate_identity(&bundle.root)?;
     let prefix = bundle
         .graph_prefix
@@ -868,7 +982,7 @@ fn validate_bundle_identity(bundle: &ArtifactBundleIdentity) -> Result<(), Artif
     Ok(())
 }
 
-fn validate_bundle_members(
+pub(crate) fn validate_bundle_members(
     bundle: &ArtifactBundleIdentity,
     manifest: &SilverManifest,
 ) -> Result<Vec<ValidatedBundleMember>, ArtifactCacheError> {
@@ -876,6 +990,9 @@ fn validate_bundle_members(
     let mut members = Vec::with_capacity(manifest.files.len());
     for file in &manifest.files {
         validate_relative_path(&file.path)?;
+        if file.etag.trim().is_empty() {
+            return Err(ArtifactCacheError::InvalidIdentity);
+        }
         if !paths.insert(file.path.clone()) {
             return Err(ArtifactCacheError::InvalidIdentity);
         }
@@ -894,6 +1011,7 @@ fn validate_bundle_members(
         members.push(ValidatedBundleMember {
             relative_path: file.path.clone(),
             identity,
+            etag: file.etag.clone(),
         });
     }
 

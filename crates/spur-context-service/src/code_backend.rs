@@ -1,13 +1,19 @@
 //! Immutable Parquet-backed MCP code surface.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::ops::Range;
+use std::sync::{Arc, Mutex as StdMutex};
 
+use bytes::Bytes;
+use futures::future::{try_join_all, BoxFuture, FutureExt as _};
+use parquet::arrow::async_reader::AsyncFileReader;
+use parquet::errors::{ParquetError, Result as ParquetResult};
+use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use serde_json::{json, Value};
 use spur_graph::{
     graph_edge_kind_or_default, CodeSelectorResolution, GraphEdgeArtifact, GraphEdgeKind,
     GraphQueryClient, GraphSymbolArtifact, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient,
-    SearchFilters, SearchMode, SearchOptions,
+    ParquetSearchIndex, SearchFilters, SearchMode, SearchOptions,
 };
 use thiserror::Error;
 use tokio::sync::{Mutex, OnceCell};
@@ -20,9 +26,10 @@ use tokio::sync::{Mutex, OnceCell};
 mod source_sidecar;
 
 use crate::artifact_cache::{
-    ArtifactBundleIdentity, ArtifactCache, ArtifactCacheError, ArtifactIdentity,
-    MaterializedArtifactBundle,
+    validate_bundle_identity, validate_bundle_members, ArtifactBundleIdentity, ArtifactCache,
+    ArtifactCacheError, ArtifactIdentity, MaterializedArtifact, MaterializedArtifactBundle,
 };
+use crate::medallion::SilverManifest;
 use crate::serving_registry::{ServingPackage, ServingRegistry};
 use source_sidecar::{read_verified_source, SourceSidecarReadError, SOURCE_SIDECAR_FILENAME};
 
@@ -138,12 +145,105 @@ pub struct CodeBackend {
     cache: ArtifactCache,
     generation_active: Arc<OnceCell<()>>,
     opened: Arc<Mutex<Option<Arc<OpenedPackage>>>>,
+    opened_search: Arc<Mutex<Option<Arc<OpenedSearch>>>>,
+    search_init: Arc<Mutex<()>>,
 }
 
 struct OpenedPackage {
     package: ServingPackage,
     client: ParquetClient,
     _bundle: MaterializedArtifactBundle,
+}
+
+struct OpenedSearch {
+    package: ServingPackage,
+    index: ParquetSearchIndex,
+    _manifest: MaterializedArtifact,
+}
+
+#[derive(Clone)]
+struct ArtifactRangeReader {
+    cache: ArtifactCache,
+    uri: String,
+    bytes: u64,
+    etag: String,
+    failure: Arc<StdMutex<Option<ArtifactCacheError>>>,
+}
+
+impl ArtifactRangeReader {
+    fn validate_range(&self, range: &Range<u64>) -> ParquetResult<()> {
+        if range.start > range.end || range.end > self.bytes {
+            return Err(ParquetError::General(format!(
+                "invalid artifact range {}..{} for {} bytes",
+                range.start, range.end, self.bytes
+            )));
+        }
+        Ok(())
+    }
+
+    async fn read_range(&self, range: Range<u64>) -> ParquetResult<Bytes> {
+        self.validate_range(&range)?;
+        let bytes = match self
+            .cache
+            .fetch_range(&self.uri, range.clone(), Some(&self.etag))
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let mut failure = self
+                    .failure
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                failure.get_or_insert(error);
+                return Err(ParquetError::External(Box::new(error)));
+            }
+        };
+        let expected = usize::try_from(range.end - range.start)
+            .map_err(|error| ParquetError::External(Box::new(error)))?;
+        if bytes.len() != expected {
+            return Err(ParquetError::General(
+                "artifact range response has an unexpected length".to_owned(),
+            ));
+        }
+        Ok(Bytes::from(bytes))
+    }
+}
+
+impl AsyncFileReader for ArtifactRangeReader {
+    fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, ParquetResult<Bytes>> {
+        async move { self.read_range(range).await }.boxed()
+    }
+
+    fn get_byte_ranges(
+        &mut self,
+        ranges: Vec<Range<u64>>,
+    ) -> BoxFuture<'_, ParquetResult<Vec<Bytes>>> {
+        async move {
+            for range in &ranges {
+                self.validate_range(range)?;
+            }
+            try_join_all(ranges.into_iter().map(|range| {
+                let reader = self.clone();
+                async move { reader.read_range(range).await }
+            }))
+            .await
+        }
+        .boxed()
+    }
+
+    fn get_metadata<'a>(
+        &'a mut self,
+        _options: Option<&'a parquet::arrow::arrow_reader::ArrowReaderOptions>,
+    ) -> BoxFuture<'a, ParquetResult<Arc<ParquetMetaData>>> {
+        let file_size = self.bytes;
+        async move {
+            let metadata = ParquetMetaDataReader::new()
+                .load_and_finish(&mut *self, file_size)
+                .await?;
+            Ok(Arc::new(metadata))
+        }
+        .boxed()
+    }
 }
 
 impl CodeBackend {
@@ -156,6 +256,8 @@ impl CodeBackend {
             cache,
             generation_active: Arc::new(OnceCell::new()),
             opened: Arc::new(Mutex::new(None)),
+            opened_search: Arc::new(Mutex::new(None)),
+            search_init: Arc::new(Mutex::new(())),
         })
     }
 
@@ -191,25 +293,22 @@ impl CodeBackend {
 
     pub async fn search(&self, request: CodeSearchRequest) -> Result<Value, CodeBackendError> {
         let opened = self
-            .open_selected(
+            .open_search_selected(
                 &request.source,
                 &request.package,
                 request.revision_or_ref.as_deref(),
             )
             .await?;
-        let result = opened
-            .client
-            .search_symbols(&SearchOptions {
-                query: request.query,
-                mode: SearchMode::Substring,
-                filters: SearchFilters {
-                    symbol_kind: request.symbol_kind,
-                    file: None,
-                    file_glob: None,
-                },
-                limit: request.limit,
-            })
-            .map_err(|_| CodeBackendError::ArtifactQuery)?;
+        let result = opened.index.search_symbols(&SearchOptions {
+            query: request.query,
+            mode: SearchMode::Substring,
+            filters: SearchFilters {
+                symbol_kind: request.symbol_kind,
+                file: None,
+                file_glob: None,
+            },
+            limit: request.limit,
+        });
         let catalog_generation = opened.package.generation;
         let candidates = result
             .candidates
@@ -501,6 +600,99 @@ impl CodeBackend {
             .map_err(|_| CodeBackendError::InvalidRegistry)?
             .ok_or(CodeBackendError::PackageUnavailable)?;
         self.open(selected).await
+    }
+
+    async fn open_search_selected(
+        &self,
+        source: &str,
+        package: &str,
+        revision_or_ref: Option<&str>,
+    ) -> Result<Arc<OpenedSearch>, CodeBackendError> {
+        let selected = self
+            .registry
+            .resolve_revision_or_ref(source, package, revision_or_ref.unwrap_or("latest"))
+            .map(|package| package.cloned())
+            .map_err(|_| CodeBackendError::InvalidRegistry)?
+            .ok_or(CodeBackendError::PackageUnavailable)?;
+        self.open_search(selected).await
+    }
+
+    async fn open_search(
+        &self,
+        package: ServingPackage,
+    ) -> Result<Arc<OpenedSearch>, CodeBackendError> {
+        self.generation_active
+            .get_or_try_init(|| async {
+                self.cache
+                    .activate_generation(self.registry.generation)
+                    .await
+            })
+            .await?;
+        if let Some(opened) = self
+            .opened_search
+            .lock()
+            .await
+            .as_ref()
+            .filter(|opened| opened.package == package)
+            .cloned()
+        {
+            return Ok(opened);
+        }
+        let _initializing = self.search_init.lock().await;
+        if let Some(opened) = self
+            .opened_search
+            .lock()
+            .await
+            .as_ref()
+            .filter(|opened| opened.package == package)
+            .cloned()
+        {
+            return Ok(opened);
+        }
+
+        let bundle = ArtifactBundleIdentity {
+            root: ArtifactIdentity {
+                generation: package.generation,
+                source: package.source.clone(),
+                package: package.package.clone(),
+                revision: package.revision.clone(),
+                artifact: package.graph_manifest.clone(),
+            },
+            graph_prefix: package.graph_prefix_uri.clone(),
+        };
+        validate_bundle_identity(&bundle)?;
+        let manifest_lease = self.cache.materialize(&bundle.root).await?;
+        let manifest_bytes = tokio::fs::read(manifest_lease.path())
+            .await
+            .map_err(|_| ArtifactCacheError::Filesystem)?;
+        let manifest: SilverManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|_| ArtifactCacheError::InvalidIdentity)?;
+        let nodes = validate_bundle_members(&bundle, &manifest)?
+            .into_iter()
+            .find(|member| member.relative_path == "nodes.parquet")
+            .ok_or(ArtifactCacheError::InvalidIdentity)?;
+        let reader = ArtifactRangeReader {
+            cache: self.cache.clone(),
+            uri: nodes.identity.artifact.uri,
+            bytes: nodes.identity.artifact.bytes,
+            etag: nodes.etag,
+            failure: Arc::new(StdMutex::new(None)),
+        };
+        let range_failure = Arc::clone(&reader.failure);
+        let index = ParquetSearchIndex::read_async(reader).await.map_err(|_| {
+            let failure = range_failure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            failure.unwrap_or(ArtifactCacheError::IntegrityMismatch)
+        })?;
+        let opened = Arc::new(OpenedSearch {
+            package,
+            index,
+            _manifest: manifest_lease,
+        });
+        let mut cached = self.opened_search.lock().await;
+        *cached = Some(Arc::clone(&opened));
+        Ok(opened)
     }
 
     async fn resolve_external_selector(

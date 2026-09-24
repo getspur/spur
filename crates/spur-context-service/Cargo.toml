@@ -72,7 +72,7 @@ service = [
     "dep:duckdb",
     "dep:spur-context-source",
 ]
-code-backend = ["parquet-io", "dep:spur-graph"]
+code-backend = ["parquet-io", "dep:bytes", "dep:futures", "dep:spur-graph"]
 analyst = ["service"]
 artifact-cache-s3 = ["dep:aws-sdk-s3"]
 lambda-http = ["dep:lambda_runtime"]
@@ -90,6 +90,7 @@ anyhow = { version = "1", optional = true }
 arrow-array = { version = "58", optional = true }
 arrow-schema = { version = "58", optional = true }
 async-trait = "0.1"
+bytes = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 aws-sdk-dynamodb = "1"
 aws-sdk-s3 = { version = "1", optional = true }
@@ -99,8 +100,9 @@ clap = { version = "4", features = ["derive", "env"], optional = true }
 # DuckDB v1.5.4 (crate 1.10504.0) — DuckLake 1.0 with S3 write support.
 # Isolated from the workspace's duckdb v1.4.4 (needed by spur-analyst for DuckPGQ).
 duckdb = { version = "=1.10504.0", features = ["bundled"], optional = true }
+futures = { version = "0.3", optional = true }
 lambda_runtime = { version = "1.2.1", optional = true, features = ["concurrency-tokio"] }
-parquet = { version = "58", default-features = false, features = ["arrow", "zstd"], optional = true }
+parquet = { version = "58", default-features = false, features = ["arrow", "async", "zstd"], optional = true }
 rand = "0.8"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

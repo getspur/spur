@@ -20,10 +20,13 @@ use arrow_array::{
     Array as _, BooleanArray, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
 };
 use arrow_schema::ArrowError;
+use arrow_select::concat::concat_batches;
+use futures::TryStreamExt as _;
 use globset::Glob;
 use parquet::arrow::arrow_reader::{
     ArrowPredicateFn, ArrowReaderMetadata, ParquetRecordBatchReaderBuilder, RowFilter,
 };
+use parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStreamBuilder};
 use parquet::arrow::ProjectionMask;
 use parquet::schema::types::SchemaDescriptor;
 
@@ -932,6 +935,62 @@ const SYMBOL_COLUMNS: [&str; 11] = [
     "anchor_hash",
     "enclosing_scope",
 ];
+
+/// Search-only index constructed from an asynchronous Parquet byte-range reader.
+///
+/// This preserves the same ranking and result semantics as [`ParquetClient`]
+/// without requiring the complete Parquet object to exist on a local filesystem.
+pub struct ParquetSearchIndex {
+    inner: HotQueryIndex,
+}
+
+impl ParquetSearchIndex {
+    pub async fn read_async<T>(reader: T) -> anyhow::Result<Self>
+    where
+        T: AsyncFileReader + Send + Unpin + 'static,
+    {
+        let builder = ParquetRecordBatchStreamBuilder::new(reader)
+            .await
+            .context("failed to read remote nodes.parquet metadata")?;
+        let row_count =
+            builder
+                .metadata()
+                .row_groups()
+                .iter()
+                .try_fold(0_usize, |total, row_group| {
+                    let rows = usize::try_from(row_group.num_rows())
+                        .context("remote nodes.parquet row count exceeds usize")?;
+                    total
+                        .checked_add(rows)
+                        .context("remote nodes.parquet row count overflow")
+                })?;
+        let projection = ProjectionMask::columns(builder.parquet_schema(), SYMBOL_COLUMNS);
+        let stream = builder
+            .with_batch_size(row_count.max(1))
+            .with_projection(projection)
+            .build()
+            .context("failed to build remote nodes.parquet reader")?;
+        let schema = stream.schema().clone();
+        let mut batches = stream
+            .try_collect::<Vec<_>>()
+            .await
+            .context("failed to decode remote nodes.parquet")?;
+        let batch = match batches.len() {
+            0 => RecordBatch::new_empty(schema),
+            1 => batches.remove(0),
+            _ => concat_batches(&schema, &batches)
+                .context("failed to combine remote nodes.parquet row groups")?,
+        };
+        drop(batches);
+        Ok(Self {
+            inner: HotQueryIndex::new(batch)?,
+        })
+    }
+
+    pub fn search_symbols(&self, options: &SearchOptions) -> SearchResult {
+        self.inner.search_symbols(options)
+    }
+}
 
 #[cfg(test)]
 static PARQUET_HOT_QUERY_INDEX_BUILDS_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
@@ -2299,11 +2358,97 @@ mod tests {
     };
     use arrow_array::ArrayRef;
     use arrow_schema::{DataType, Field, Schema};
+    use bytes::Bytes;
+    use futures::future::{BoxFuture, FutureExt as _};
     use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+    use parquet::arrow::async_reader::AsyncFileReader;
+    use parquet::arrow::ArrowWriter;
+    use parquet::errors::{ParquetError, Result as ParquetResult};
     use parquet::file::metadata::PageIndexPolicy;
+    use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
+    use parquet::file::properties::WriterProperties;
     use std::collections::BTreeMap;
     use std::fs::OpenOptions;
     use std::io::{Seek as _, SeekFrom, Write as _};
+    use std::ops::Range;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Clone)]
+    struct RecordingRangeReader {
+        bytes: Bytes,
+        ranges: Arc<StdMutex<Vec<Range<u64>>>>,
+    }
+
+    impl RecordingRangeReader {
+        fn new(bytes: Bytes) -> Self {
+            Self {
+                bytes,
+                ranges: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+
+        fn observed_ranges(&self) -> Vec<Range<u64>> {
+            self.ranges.lock().expect("range log lock").clone()
+        }
+    }
+
+    impl AsyncFileReader for RecordingRangeReader {
+        fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, ParquetResult<Bytes>> {
+            self.ranges
+                .lock()
+                .expect("range log lock")
+                .push(range.clone());
+            let start = usize::try_from(range.start);
+            let end = usize::try_from(range.end);
+            let bytes = self.bytes.clone();
+            async move {
+                let start = start.map_err(|error| ParquetError::External(Box::new(error)))?;
+                let end = end.map_err(|error| ParquetError::External(Box::new(error)))?;
+                if start > end || end > bytes.len() {
+                    return Err(ParquetError::General(format!(
+                        "invalid byte range {start}..{end} for {} bytes",
+                        bytes.len()
+                    )));
+                }
+                Ok(bytes.slice(start..end))
+            }
+            .boxed()
+        }
+
+        fn get_metadata<'a>(
+            &'a mut self,
+            _options: Option<&'a parquet::arrow::arrow_reader::ArrowReaderOptions>,
+        ) -> BoxFuture<'a, ParquetResult<Arc<ParquetMetaData>>> {
+            let file_size = self.bytes.len() as u64;
+            async move {
+                let metadata = ParquetMetaDataReader::new()
+                    .load_and_finish(&mut *self, file_size)
+                    .await?;
+                Ok(Arc::new(metadata))
+            }
+            .boxed()
+        }
+    }
+
+    fn covered_range_bytes(ranges: &[Range<u64>]) -> u64 {
+        let mut ranges = ranges.to_vec();
+        ranges.sort_by_key(|range| (range.start, range.end));
+        let mut covered = 0_u64;
+        let mut current: Option<Range<u64>> = None;
+        for range in ranges {
+            match &mut current {
+                Some(active) if range.start <= active.end => {
+                    active.end = active.end.max(range.end);
+                }
+                Some(active) => {
+                    covered += active.end - active.start;
+                    current = Some(range);
+                }
+                None => current = Some(range),
+            }
+        }
+        covered + current.map_or(0, |range| range.end - range.start)
+    }
 
     fn artifact(symbols: Vec<GraphSymbolArtifact>) -> GraphIndexArtifact {
         GraphIndexArtifact {
@@ -2775,6 +2920,82 @@ mod tests {
         }
 
         assert_eq!(client.hot_query_index_build_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn async_parquet_search_index_matches_local_without_whole_object_read() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut graph = artifact(vec![
+            symbol("sym-a", "alpha_target"),
+            symbol("sym-b", "beta_target"),
+        ]);
+        graph.symbol_node_ids = vec![NodeId(1), NodeId(2)];
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())
+                .expect("write parquet artifact");
+        let local = ParquetClient::open(&parquet_dir).expect("open local parquet client");
+        let options = SearchOptions {
+            query: "target".to_owned(),
+            mode: SearchMode::Substring,
+            filters: SearchFilters::default(),
+            limit: 20,
+        };
+        let expected = local.search_symbols(&options).expect("local search");
+
+        let nodes = Bytes::from(std::fs::read(parquet_dir.join("nodes.parquet")).expect("nodes"));
+        let reader = RecordingRangeReader::new(nodes.clone());
+        let observations = reader.clone();
+        let remote = ParquetSearchIndex::read_async(reader)
+            .await
+            .expect("read remote search index");
+        let actual = remote.search_symbols(&options);
+
+        assert_eq!(actual.total_matches, expected.total_matches);
+        assert_eq!(actual.truncated, expected.truncated);
+        assert_eq!(actual.candidates, expected.candidates);
+        let ranges = observations.observed_ranges();
+        assert!(!ranges.is_empty());
+        assert!(covered_range_bytes(&ranges) < nodes.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn async_parquet_search_index_reads_multiple_row_groups() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let nodes_path = tempdir.path().join("nodes.parquet");
+        let batch = graph_symbol_batch();
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .build();
+        let mut writer = ArrowWriter::try_new(
+            File::create(&nodes_path).expect("create nodes parquet"),
+            batch.schema(),
+            Some(properties),
+        )
+        .expect("create nodes writer");
+        writer.write(&batch).expect("write nodes batch");
+        writer.close().expect("close nodes writer");
+
+        let nodes = Bytes::from(std::fs::read(nodes_path).expect("read nodes parquet"));
+        let metadata = ParquetRecordBatchReaderBuilder::try_new(nodes.clone())
+            .expect("read nodes metadata")
+            .metadata()
+            .clone();
+        assert_eq!(metadata.num_row_groups(), 3);
+
+        let remote = ParquetSearchIndex::read_async(RecordingRangeReader::new(nodes))
+            .await
+            .expect("read all remote row groups");
+        let actual = remote.search_symbols(&SearchOptions {
+            query: "a".to_owned(),
+            mode: SearchMode::Substring,
+            filters: SearchFilters::default(),
+            limit: 20,
+        });
+
+        assert_eq!(actual.total_matches, 3);
+        let mut actual_ids = ids(&actual);
+        actual_ids.sort();
+        assert_eq!(actual_ids, vec!["s1", "s2", "s3"]);
     }
 
     #[test]

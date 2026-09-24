@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::io::Cursor;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
@@ -418,6 +419,55 @@ async fn parquet_backend_matches_catalog_and_search_contracts() -> Result<()> {
         "artifact_unavailable",
     );
 
+    let mut missing_etag = ParquetBackendFixture::new("parquet-missing-member-etag")?;
+    let mut missing_etag_root: SilverManifest =
+        serde_json::from_slice(&silver_root_for_members(&missing_etag.declared_members)?)?;
+    missing_etag_root
+        .files
+        .iter_mut()
+        .find(|file| file.path == "nodes.parquet")
+        .context("nodes member in Silver manifest")?
+        .etag
+        .clear();
+    missing_etag.replace_silver_root(serde_json::to_vec(&missing_etag_root)?);
+    assert_retryable_backend_error(
+        call_parquet_backend(
+            &missing_etag,
+            "external_code_search",
+            &json!({
+                "query": "bet",
+                "package": PACKAGE,
+                "revision": REVISION
+            }),
+        )
+        .await,
+        "invalid_artifact_identity",
+    );
+
+    let mut mismatched_etag = ParquetBackendFixture::new("parquet-mismatched-member-etag")?;
+    let mut mismatched_etag_root: SilverManifest =
+        serde_json::from_slice(&silver_root_for_members(&mismatched_etag.declared_members)?)?;
+    mismatched_etag_root
+        .files
+        .iter_mut()
+        .find(|file| file.path == "nodes.parquet")
+        .context("nodes member in Silver manifest")?
+        .etag = "etag-from-another-object".to_owned();
+    mismatched_etag.replace_silver_root(serde_json::to_vec(&mismatched_etag_root)?);
+    assert_retryable_backend_error(
+        call_parquet_backend(
+            &mismatched_etag,
+            "external_code_search",
+            &json!({
+                "query": "bet",
+                "package": PACKAGE,
+                "revision": REVISION
+            }),
+        )
+        .await,
+        "artifact_integrity_mismatch",
+    );
+
     let corrupt_graph_manifest = ParquetBackendFixture::new("parquet-corrupt-graph-manifest")?;
     corrupt_graph_manifest.replace_object(
         &corrupt_graph_manifest.member_uri("manifest.json"),
@@ -475,9 +525,11 @@ async fn parquet_backend_reuses_warm_client_across_distinct_queries() -> Result<
     .await?;
     assert_eq!(first["candidates"][0]["entity_name"], "alpha");
 
-    let cached_nodes = find_cached_file(&fixture.root.join("cache"), "nodes.parquet")?;
+    assert!(
+        find_cached_file(&fixture.root.join("cache"), "nodes.parquet").is_err(),
+        "search should retain a decoded index without materializing nodes.parquet"
+    );
     fixture.remove_object(&fixture.member_uri("nodes.parquet"));
-    fs::remove_file(cached_nodes).context("remove materialized nodes after warming client")?;
 
     let second = handle_tool_with_code_backend(
         "external_code_search",
@@ -491,6 +543,122 @@ async fn parquet_backend_reuses_warm_client_across_distinct_queries() -> Result<
     .await?;
     assert_eq!(second["candidates"][0]["entity_name"], "beta");
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn parquet_backend_coalesces_concurrent_cold_search_loads() -> Result<()> {
+    let fixture = ParquetBackendFixture::new("parquet-concurrent-search")?;
+    *fixture
+        .fetcher
+        .range_delay
+        .lock()
+        .expect("Parquet range delay mutex should not be poisoned") =
+        Some(Duration::from_millis(10));
+    let backend = CodeBackend::new(fixture.registry.clone(), fixture.cache.clone())
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let first_args = json!({
+        "query": "alpha",
+        "package": PACKAGE,
+        "revision": REVISION
+    });
+    let second_args = json!({
+        "query": "beta",
+        "package": PACKAGE,
+        "revision": REVISION
+    });
+    let (first, second) = tokio::join!(
+        handle_tool_with_code_backend("external_code_search", &first_args, &backend),
+        handle_tool_with_code_backend("external_code_search", &second_args, &backend)
+    );
+    assert_eq!(first?["candidates"][0]["entity_name"], "alpha");
+    assert_eq!(second?["candidates"][0]["entity_name"], "beta");
+    let nodes_uri = fixture.member_uri("nodes.parquet");
+    let concurrent_range_count = fixture
+        .fetcher
+        .ranges
+        .lock()
+        .expect("Parquet range log mutex should not be poisoned")
+        .iter()
+        .filter(|(uri, _, _)| uri == &nodes_uri)
+        .count();
+
+    let baseline = ParquetBackendFixture::new("parquet-single-search")?;
+    let baseline_backend = CodeBackend::new(baseline.registry.clone(), baseline.cache.clone())
+        .map_err(|error| anyhow::anyhow!(error))?;
+    handle_tool_with_code_backend("external_code_search", &first_args, &baseline_backend).await?;
+    let baseline_nodes_uri = baseline.member_uri("nodes.parquet");
+    let baseline_range_count = baseline
+        .fetcher
+        .ranges
+        .lock()
+        .expect("Parquet range log mutex should not be poisoned")
+        .iter()
+        .filter(|(uri, _, _)| uri == &baseline_nodes_uri)
+        .count();
+
+    assert_eq!(concurrent_range_count, baseline_range_count);
+    Ok(())
+}
+
+#[tokio::test]
+async fn parquet_backend_search_does_not_materialize_the_bundle() -> Result<()> {
+    let fixture = ParquetBackendFixture::new("parquet-remote-search")?;
+    for path in [
+        "manifest.json",
+        "edges.parquet",
+        "edges_unresolved.parquet",
+        "files.parquet",
+        "file_manifests.parquet",
+        "source_files.parquet",
+    ] {
+        fixture.remove_object(&fixture.member_uri(path));
+    }
+    let backend = CodeBackend::new(fixture.registry.clone(), fixture.cache.clone())
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+    let response = handle_tool_with_code_backend(
+        "external_code_search",
+        &json!({
+            "query": "beta",
+            "package": PACKAGE,
+            "revision": REVISION
+        }),
+        &backend,
+    )
+    .await?;
+
+    assert_eq!(response["candidates"][0]["entity_name"], "beta");
+    let nodes_uri = fixture.member_uri("nodes.parquet");
+    let nodes_len = fixture
+        .declared_members
+        .get("nodes.parquet")
+        .context("nodes fixture member")?
+        .len() as u64;
+    let ranges = fixture
+        .fetcher
+        .ranges
+        .lock()
+        .expect("Parquet range log mutex should not be poisoned");
+    let node_ranges = ranges
+        .iter()
+        .filter(|(uri, _, _)| uri == &nodes_uri)
+        .collect::<Vec<_>>();
+    assert!(!node_ranges.is_empty(), "search must issue Parquet ranges");
+    assert!(node_ranges
+        .iter()
+        .all(|(_, _, etag)| etag.as_deref() == Some("etag-nodes.parquet")));
+    let covered = covered_range_bytes(
+        &node_ranges
+            .iter()
+            .map(|(_, range, _)| range.clone())
+            .collect::<Vec<_>>(),
+    );
+    assert!(covered < nodes_len, "range reads must skip object bytes");
+    assert!(
+        find_cached_file(&fixture.root.join("cache"), "nodes.parquet").is_err(),
+        "remote search must not materialize nodes.parquet in /tmp"
+    );
     Ok(())
 }
 
@@ -829,6 +997,8 @@ async fn parquet_backend_matches_read_and_edge_contracts() -> Result<()> {
 #[derive(Clone, Default)]
 struct ParquetTestFetcher {
     objects: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    ranges: Arc<Mutex<Vec<(String, Range<u64>, Option<String>)>>>,
+    range_delay: Arc<Mutex<Option<Duration>>>,
 }
 
 #[async_trait]
@@ -842,6 +1012,51 @@ impl ArtifactFetcher for ParquetTestFetcher {
             .cloned()
             .ok_or_else(|| ArtifactFetchError::new("missing Parquet test object"))?;
         Ok(Box::pin(Cursor::new(body)))
+    }
+
+    async fn fetch_range(
+        &self,
+        uri: &str,
+        range: Range<u64>,
+        expected_etag: Option<&str>,
+    ) -> Result<Vec<u8>, ArtifactFetchError> {
+        let delay = *self
+            .range_delay
+            .lock()
+            .expect("Parquet range delay mutex should not be poisoned");
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        self.ranges
+            .lock()
+            .expect("Parquet range log mutex should not be poisoned")
+            .push((
+                uri.to_owned(),
+                range.clone(),
+                expected_etag.map(str::to_owned),
+            ));
+        if let Some(expected_etag) = expected_etag {
+            let object_etag = format!("etag-{}", uri.rsplit('/').next().unwrap_or_default());
+            if expected_etag != object_etag {
+                return Err(ArtifactFetchError::integrity_mismatch(
+                    "Parquet test object ETag mismatch",
+                ));
+            }
+        }
+        let objects = self
+            .objects
+            .lock()
+            .expect("Parquet test object mutex should not be poisoned");
+        let body = objects
+            .get(uri)
+            .ok_or_else(|| ArtifactFetchError::new("missing Parquet test object"))?;
+        let start = usize::try_from(range.start)
+            .map_err(|error| ArtifactFetchError::integrity_mismatch(error.to_string()))?;
+        let end = usize::try_from(range.end)
+            .map_err(|error| ArtifactFetchError::integrity_mismatch(error.to_string()))?;
+        body.get(start..end).map(<[u8]>::to_vec).ok_or_else(|| {
+            ArtifactFetchError::integrity_mismatch("Parquet test range is outside the object")
+        })
     }
 }
 
@@ -1015,6 +1230,24 @@ impl Drop for ParquetBackendFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn covered_range_bytes(ranges: &[Range<u64>]) -> u64 {
+    let mut ranges = ranges.to_vec();
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut covered = 0_u64;
+    let mut current: Option<Range<u64>> = None;
+    for range in ranges {
+        match &mut current {
+            Some(active) if range.start <= active.end => active.end = active.end.max(range.end),
+            Some(active) => {
+                covered += active.end - active.start;
+                current = Some(range);
+            }
+            None => current = Some(range),
+        }
+    }
+    covered + current.map_or(0, |range| range.end - range.start)
 }
 
 fn find_cached_file(root: &std::path::Path, name: &str) -> Result<PathBuf> {
