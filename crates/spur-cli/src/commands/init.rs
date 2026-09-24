@@ -937,7 +937,10 @@ fn print_gitattributes_advisory_if_needed(repo_root: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpret_yes_no, materialize_pi_mcp_config, SpurConfig};
+    use super::{
+        interpret_yes_no, materialize_pi_mcp_config, recompute_brain_and_fallback, AgentRole,
+        SpurConfig,
+    };
 
     fn config_with_pi_kind(enabled: bool) -> SpurConfig {
         let mut config = SpurConfig::default();
@@ -949,6 +952,23 @@ mod tests {
         };
         config.agents.entries.push(agent);
         config
+    }
+
+    #[test]
+    fn recompute_preserves_valid_brain_preference() {
+        let mut config = SpurConfig::default();
+        for name in ["claude-code", "codex"] {
+            let mut agent = spur_acp::config::AgentConfig::with_defaults(name);
+            agent.role = AgentRole::Both;
+            config.agents.entries.push(agent);
+        }
+        config.brain.default = "codex".to_string();
+        config.brain.fallback = vec!["claude-code".to_string()];
+
+        recompute_brain_and_fallback(&mut config);
+
+        assert_eq!(config.brain.default, "codex");
+        assert_eq!(config.brain.fallback, vec!["claude-code".to_string()]);
     }
 
     #[test]

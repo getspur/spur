@@ -345,6 +345,42 @@ fn init_accepts_sparse_project_agent_override() {
 }
 
 #[test]
+fn init_does_not_copy_unchanged_sparse_user_agent() {
+    let _g = LOCK.lock().unwrap();
+    let home = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    let user_path = home.path().join(".spur/config.toml");
+    fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(repo.path().join(".spur")).unwrap();
+    let agent =
+        "[[agents.entries]]\nname='claude-code'\ncommand='claude'\ntransport='acp'\nrole='both'\n";
+    fs::write(&user_path, agent).unwrap();
+    fs::write(repo.path().join(".spur/config.toml"), agent).unwrap();
+    stub_which(repo.path());
+    stub_binary(repo.path(), "npx");
+
+    let status = spur()
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env("PATH", controlled_path(repo.path()))
+        .arg("init")
+        .status()
+        .expect("spawn spur init");
+
+    assert!(status.success());
+    let project: toml::Value =
+        toml::from_str(&fs::read_to_string(repo.path().join(".spur/config.toml")).unwrap())
+            .unwrap();
+    let entries = project["agents"]["entries"].as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["name"].as_str() != Some("claude-code")),
+        "unchanged user agent should stay inherited"
+    );
+}
+
+#[test]
 fn init_with_force_resets_agents_preserves_non_agent_config() {
     let _g = LOCK.lock().unwrap();
     let tmp = TempDir::new().unwrap();
