@@ -6,7 +6,7 @@
 
 use spur_acp::{AvailableCommand, AvailableCommandInput, CommandsConfig, DispatchKind};
 
-use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+use crate::entry::{CommandEntry, CommandSource, Dispatch};
 
 pub fn build_entry(handle: &str, cfg: &CommandsConfig, cmd: &AvailableCommand) -> CommandEntry {
     let hint = match &cmd.input {

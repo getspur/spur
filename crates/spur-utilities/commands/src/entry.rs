@@ -1,4 +1,3 @@
-use crate::action::Action;
 use spur_acp::ArgsTemplateKind;
 
 /// An entry displayed in the slash-command popup.
@@ -35,13 +34,11 @@ pub enum CommandSource {
 
 /// How a selected `CommandEntry` should be executed.
 #[derive(Debug, Clone)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "transient UI action/payload enums; instances are short-lived and never stored in bulk, boxing would churn every construction site"
-)]
 pub enum Dispatch {
-    /// Fire an `Action` directly, close the popup, do not send a message.
-    SpurLocal(Action),
+    /// A frontend-owned meta command, resolved by name at the boundary.
+    /// The TUI maps `name` (+ optional arg) to its own `Action` via a
+    /// static table (`commands::spur_local::local_dispatch`).
+    Local { name: String },
     /// Send the normalized text as a `ContentBlock::Text` to the current agent.
     /// `normalized` is the bare form with leading slash (e.g. "/help").
     PromptText { normalized: String },

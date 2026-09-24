@@ -101,14 +101,35 @@ pub async fn run(
     });
     let discovered_names: std::collections::HashSet<_> = found_names.iter().cloned().collect();
 
-    // ── Phase 2: Load existing config or start from default ────────────
-    let (mut config, existed_before) = load_or_default_config(&config_path)?;
+    // ── Phase 2: Load the target layer over its effective baseline ─────
+    let baseline = if global {
+        toml::Value::try_from(SpurConfig::default())?
+    } else {
+        spur_acp::config::layered::default_user_baseline(&repo_root)?
+    };
+    let (mut config, existed_before) = load_or_default_config(&config_path, &baseline)?;
+    let mut config_sources = vec![config_path.clone()];
+    if !global {
+        if let Some(base) = directories::BaseDirs::new() {
+            config_sources.push(base.home_dir().join(".spur/config.toml"));
+        }
+    }
+    let (mut default_is_explicit, mut fallback_is_explicit) = (false, false);
+    for source in config_sources.into_iter().filter(|path| path.exists()) {
+        let raw = std::fs::read_to_string(&source)
+            .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", source.display()))?;
+        let value: toml::Value = toml::from_str(&raw)
+            .map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", source.display()))?;
+        let brain = value.get("brain");
+        default_is_explicit |= brain.and_then(|section| section.get("default")).is_some();
+        fallback_is_explicit |= brain.and_then(|section| section.get("fallback")).is_some();
+    }
 
     // ── Phase 3: Agent convergence ─────────────────────────────────────
     config.agents.entries = merge_agents(&config.agents.entries, &discovered, force);
 
     // ── Phase 4: Recompute brain & fallback ────────────────────────────
-    recompute_brain_and_fallback(&mut config);
+    recompute_brain_and_fallback(&mut config, default_is_explicit, fallback_is_explicit);
 
     // ── Phase 5: Display discovery results ─────────────────────────────
     println!();
@@ -172,11 +193,6 @@ pub async fn run(
         }
 
         // Atomic persist.
-        let baseline = if global {
-            toml::Value::try_from(SpurConfig::default())?
-        } else {
-            spur_acp::config::layered::default_user_baseline(&repo_root)?
-        };
         let full = toml::Value::try_from(&config)?;
         let mut sparse = spur_acp::config::layered::sparse_diff(&full, &baseline);
         expose_default_context_service_section(&mut sparse, &baseline)?;
@@ -350,16 +366,30 @@ fn interpret_yes_no(input: &str) -> bool {
 // Helpers
 // ------------------------------------------------------------------
 
-fn load_or_default_config(path: &std::path::Path) -> Result<(SpurConfig, bool)> {
-    if path.exists() {
+fn load_or_default_config(
+    path: &std::path::Path,
+    baseline: &toml::Value,
+) -> Result<(SpurConfig, bool)> {
+    let mut merged = baseline
+        .as_table()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("config baseline is not a TOML table"))?;
+    let existed_before = path.exists();
+    if existed_before {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-        let config: SpurConfig = toml::from_str(&content)
+        let layer: toml::Value = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
-        Ok((config, true))
-    } else {
-        Ok((SpurConfig::default(), false))
+        let table = layer
+            .as_table()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("{} is not a TOML table", path.display()))?;
+        spur_acp::config::merge_tables(&mut merged, table);
     }
+    let config = toml::Value::Table(merged)
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("failed to build config for {}: {e}", path.display()))?;
+    Ok((config, existed_before))
 }
 
 fn expose_default_context_service_section(
@@ -417,36 +447,64 @@ fn merge_agents(
     result
 }
 
-fn recompute_brain_and_fallback(config: &mut SpurConfig) {
+fn recompute_brain_and_fallback(
+    config: &mut SpurConfig,
+    default_is_explicit: bool,
+    fallback_is_explicit: bool,
+) {
     let entries = &config.agents.entries;
 
-    let brain_name = entries
-        .iter()
-        .find(|a| a.name == "claude-code" && matches!(a.role, AgentRole::Brain | AgentRole::Both))
-        .or_else(|| {
-            entries
-                .iter()
-                .find(|a| matches!(a.role, AgentRole::Brain | AgentRole::Both))
-        })
-        .map(|a| a.name.clone())
-        .unwrap_or_else(|| {
-            if !entries.is_empty() {
-                println!();
-                println!(
-                    "  (note: no brain-capable agents registered; using {} as brain)",
-                    entries[0].name
-                );
-                entries[0].name.clone()
-            } else {
-                String::new()
-            }
+    let selected_brain_is_valid = default_is_explicit
+        && entries.iter().any(|agent| {
+            agent.name == config.brain.default
+                && matches!(agent.role, AgentRole::Brain | AgentRole::Both)
         });
+    let brain_name = if selected_brain_is_valid {
+        config.brain.default.clone()
+    } else {
+        entries
+            .iter()
+            .find(|a| {
+                a.name == "claude-code" && matches!(a.role, AgentRole::Brain | AgentRole::Both)
+            })
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|a| matches!(a.role, AgentRole::Brain | AgentRole::Both))
+            })
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| {
+                if !entries.is_empty() {
+                    println!();
+                    println!(
+                        "  (note: no brain-capable agents registered; using {} as brain)",
+                        entries[0].name
+                    );
+                    entries[0].name.clone()
+                } else {
+                    String::new()
+                }
+            })
+    };
 
-    let fallbacks: Vec<String> = entries
-        .iter()
-        .filter(|a| a.name != brain_name && matches!(a.role, AgentRole::Brain | AgentRole::Both))
-        .map(|a| a.name.clone())
-        .collect();
+    let configured_fallback_is_valid = fallback_is_explicit
+        && config.brain.fallback.iter().all(|name| {
+            name != &brain_name
+                && entries.iter().any(|agent| {
+                    agent.name == *name && matches!(agent.role, AgentRole::Brain | AgentRole::Both)
+                })
+        });
+    let fallbacks: Vec<String> = if configured_fallback_is_valid {
+        config.brain.fallback.clone()
+    } else {
+        entries
+            .iter()
+            .filter(|a| {
+                a.name != brain_name && matches!(a.role, AgentRole::Brain | AgentRole::Both)
+            })
+            .map(|a| a.name.clone())
+            .collect()
+    };
 
     config.brain.default = brain_name;
     config.brain.fallback = fallbacks;
@@ -784,33 +842,41 @@ fn ensure_gitignore_lines(path: &std::path::Path, lines: &[&str]) -> Result<usiz
     Ok(to_add.drain(..).count())
 }
 
-/// Load `.spur/config.toml`, ensure `[pm.beads] enabled = true` (preserving
-/// `auto_sync`), persist atomically. Returns `true` if the file was changed.
+/// Ensure `[pm.beads] enabled = true` without expanding a sparse config.
+/// Returns `true` if the file was changed.
 fn ensure_pm_beads_enabled(config_path: &std::path::Path) -> Result<bool> {
-    use spur_acp::config::BeadsPmConfig;
-
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", config_path.display()))?;
-    let mut config: SpurConfig = toml::from_str(&content)
+    let mut config: toml::Value = toml::from_str(&content)
         .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", config_path.display()))?;
-
-    let was_enabled = config.pm.beads.as_ref().map(|b| b.enabled).unwrap_or(false);
-    let was_explicit = config.pm.beads.is_some();
-
-    if was_enabled && was_explicit {
+    if config
+        .get("pm")
+        .and_then(|pm| pm.get("beads"))
+        .and_then(|beads| beads.get("enabled"))
+        .and_then(toml::Value::as_bool)
+        == Some(true)
+    {
         return Ok(false);
     }
-
-    let auto_sync = config
-        .pm
-        .beads
-        .as_ref()
-        .map(|b| b.auto_sync)
-        .unwrap_or(false);
-    config.pm.beads = Some(BeadsPmConfig {
-        enabled: true,
-        auto_sync,
-    });
+    let root = config
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} is not a TOML table", config_path.display()))?;
+    let pm = root
+        .entry("pm")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[pm] is not a TOML table in {}", config_path.display()))?;
+    let beads = pm
+        .entry("beads")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "[pm.beads] is not a TOML table in {}",
+                config_path.display()
+            )
+        })?;
+    beads.insert("enabled".to_owned(), toml::Value::Boolean(true));
     std::fs::write(config_path, toml::to_string_pretty(&config)?)
         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", config_path.display()))?;
     Ok(true)
@@ -937,7 +1003,10 @@ fn print_gitattributes_advisory_if_needed(repo_root: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpret_yes_no, materialize_pi_mcp_config, SpurConfig};
+    use super::{
+        ensure_pm_beads_enabled, interpret_yes_no, materialize_pi_mcp_config,
+        recompute_brain_and_fallback, AgentRole, SpurConfig,
+    };
 
     fn config_with_pi_kind(enabled: bool) -> SpurConfig {
         let mut config = SpurConfig::default();
@@ -949,6 +1018,91 @@ mod tests {
         };
         config.agents.entries.push(agent);
         config
+    }
+
+    #[test]
+    fn recompute_preserves_valid_brain_preference() {
+        let mut config = SpurConfig::default();
+        for name in ["claude-code", "codex"] {
+            let mut agent = spur_acp::config::AgentConfig::with_defaults(name);
+            agent.role = AgentRole::Both;
+            config.agents.entries.push(agent);
+        }
+        config.brain.default = "codex".to_string();
+        config.brain.fallback = vec!["claude-code".to_string()];
+
+        recompute_brain_and_fallback(&mut config, true, true);
+
+        assert_eq!(config.brain.default, "codex");
+        assert_eq!(config.brain.fallback, vec!["claude-code".to_string()]);
+    }
+
+    #[test]
+    fn recompute_preserves_explicit_empty_fallback() {
+        let mut config = SpurConfig::default();
+        for name in ["claude-code", "codex"] {
+            let mut agent = spur_acp::config::AgentConfig::with_defaults(name);
+            agent.role = AgentRole::Both;
+            config.agents.entries.push(agent);
+        }
+        config.brain.default = "codex".to_string();
+        config.brain.fallback.clear();
+
+        recompute_brain_and_fallback(&mut config, true, true);
+
+        assert_eq!(config.brain.default, "codex");
+        assert!(config.brain.fallback.is_empty());
+    }
+
+    #[test]
+    fn recompute_replaces_fallback_whose_agent_is_missing() {
+        let mut config = SpurConfig::default();
+        for name in ["claude-code", "codex"] {
+            let mut agent = spur_acp::config::AgentConfig::with_defaults(name);
+            agent.role = AgentRole::Both;
+            config.agents.entries.push(agent);
+        }
+        config.brain.default = "claude-code".to_string();
+        config.brain.fallback = vec!["kiro".to_string()];
+
+        recompute_brain_and_fallback(&mut config, true, true);
+
+        assert_eq!(config.brain.fallback, ["codex"]);
+    }
+
+    #[test]
+    fn pm_init_preserves_sparse_unrelated_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[failover]\ncooldown_minutes=10\n").unwrap();
+
+        assert!(ensure_pm_beads_enabled(&path).unwrap());
+
+        let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["failover"]["cooldown_minutes"].as_integer(), Some(10));
+        assert_eq!(value["pm"]["beads"]["enabled"].as_bool(), Some(true));
+        assert!(value.get("worktree").is_none());
+    }
+
+    #[test]
+    fn pm_init_accepts_sparse_agent_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[agents.entries]]\nname='codex'\ncapabilities=['project']\n",
+        )
+        .unwrap();
+
+        assert!(ensure_pm_beads_enabled(&path).unwrap());
+
+        let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            value["agents"]["entries"][0]["name"].as_str(),
+            Some("codex")
+        );
+        assert!(value["agents"]["entries"][0].get("command").is_none());
+        assert_eq!(value["pm"]["beads"]["enabled"].as_bool(), Some(true));
     }
 
     #[test]

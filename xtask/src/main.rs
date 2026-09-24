@@ -7,6 +7,7 @@ use std::{
 };
 
 mod coverage;
+mod hygiene;
 
 const CLI_SKILL_ASSETS: &str = "crates/spur-cli/assets/skills";
 
@@ -22,6 +23,7 @@ fn main() -> ExitCode {
     match subcommand.as_str() {
         "install" => install(extra),
         "coverage" => coverage_cmd(extra),
+        "hygiene" => hygiene_cmd(extra),
         "dist" => dist(extra),
         "" | "help" | "--help" | "-h" => {
             print_help();
@@ -94,6 +96,13 @@ fn print_help() {
     eprintln!("        diff gate (safe on the remote build VM, which has no git history)");
     eprintln!("      --gate-only: read an already-written lcov file and run the git diff");
     eprintln!("        gate, skip cargo-llvm-cov (must run locally, needs git history)");
+    eprintln!();
+    eprintln!("  hygiene");
+    eprintln!("      enforce the spur-utilities family dependency-tree rules (spec");
+    eprintln!("      2026-09-23, §5): default-features spur-mentions has no spur-acp/");
+    eprintln!("      ratatui; --features code has no ratatui/spur-tui; spur-utilities");
+    eprintln!("      depends directly on exactly spur-commands + spur-mentions.");
+    eprintln!("      Crates not scaffolded yet are skipped with a note.");
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +250,21 @@ fn install(extra: Vec<String>) -> ExitCode {
     }
     print_green_notebook_install_guidance();
     ExitCode::SUCCESS
+}
+
+/// Continuous hygiene gate entry (see `hygiene` module docs): exit code only.
+fn hygiene_cmd(extra: Vec<String>) -> ExitCode {
+    if !extra.is_empty() {
+        eprintln!("xtask: hygiene takes no options (got {extra:?})");
+        return ExitCode::FAILURE;
+    }
+    match hygiene::run_hygiene(&workspace_root()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("xtask: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn coverage_cmd(extra: Vec<String>) -> ExitCode {

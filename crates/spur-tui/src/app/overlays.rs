@@ -227,14 +227,13 @@ impl App {
         // would be dropped at the end of the arm, leaving a dangling reference.
         // This idiom intentionally trades two extra lines for a stable borrow.
         let owned_fallback;
-        let cmd_registry: &crate::commands::registry::CommandRegistry =
-            match self.session_detail.as_ref() {
-                Some(view) => &view.command_registry,
-                None => {
-                    owned_fallback = crate::commands::registry::CommandRegistry::new();
-                    &owned_fallback
-                }
-            };
+        let cmd_registry: &crate::commands::CommandRegistry = match self.session_detail.as_ref() {
+            Some(view) => &view.command_registry,
+            None => {
+                owned_fallback = crate::commands::CommandRegistry::new();
+                &owned_fallback
+            }
+        };
         let view_src = ViewSource;
         let cmd_src = CommandSource::new(cmd_registry);
         let sess_src = SessionSource::from_metadata(self.metadata_store.metadata());
@@ -299,8 +298,8 @@ impl App {
 
     pub(super) fn query_to_action(&self, query: &str) -> Option<crate::action::Action> {
         use crate::action::Action;
-        use crate::commands::registry::CommandRegistry;
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
+        use crate::commands::submit_shell::{route_with_caps, SubmitDecision};
+        use crate::commands::CommandRegistry;
 
         // IMPORTANT — DO NOT "SIMPLIFY":
         // `owned_fallback` is declared on its own line BEFORE the match so its

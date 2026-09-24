@@ -9142,6 +9142,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-commands"
+version = "1.24.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "nucleo-matcher",
+ "serde_json",
+ "spur-acp",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "spur-context"
 version = "1.24.0"
 dependencies = [
@@ -9438,6 +9451,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-mentions"
+version = "1.24.0"
+dependencies = [
+ "anyhow",
+ "filetime",
+ "ignore",
+ "nucleo-matcher",
+ "proptest",
+ "spur-graph",
+ "tempfile",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "spur-pm"
 version = "1.24.0"
 dependencies = [
@@ -9533,7 +9561,6 @@ dependencies = [
  "divan",
  "filetime",
  "futures 0.3.32",
- "ignore",
  "image 0.25.10",
  "libc",
  "mermaid-rs-renderer",
@@ -9549,12 +9576,14 @@ dependencies = [
  "serde_yml",
  "sha2 0.10.9",
  "spur-acp",
+ "spur-commands",
  "spur-context",
  "spur-core",
  "spur-cost",
  "spur-graph",
  "spur-license",
  "spur-mcp",
+ "spur-mentions",
  "spur-pm",
  "spur-telemetry",
  "tempfile",
@@ -9566,6 +9595,14 @@ dependencies = [
  "tui-textarea",
  "unicode-segmentation",
  "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "spur-utilities"
+version = "1.24.0"
+dependencies = [
+ "spur-commands",
+ "spur-mentions",
 ]
 
 [[package]]

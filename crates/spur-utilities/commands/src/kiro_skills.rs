@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use spur_acp::{AgentKind, CommandsConfig, DispatchKind};
 
-use crate::agents::build_entry;
-use crate::commands::entry::CommandEntry;
+use crate::entry::CommandEntry;
+use crate::entry_builder::build_entry;
 
 /// A discovered Kiro skill that can be invoked as `/<name>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,7 +204,7 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    use crate::commands::entry::{CommandSource, Dispatch};
+    use crate::entry::{CommandSource, Dispatch};
 
     fn write_skill(dir: &Path, name: &str, body: &str) {
         let skill_dir = dir.join(name);

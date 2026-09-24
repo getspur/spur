@@ -3,7 +3,7 @@ use spur_acp::SessionId;
 use spur_acp::{Column, ContentBlock, DatasourceEntry, DatasourceKind, Table};
 use spur_graph::validation::compute_anchor_hash;
 use spur_graph::{artifact_from_facts, build_facts, write_artifact_parquet, WriteOptions};
-use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
+use spur_tui::commands::submit_shell::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::InputBar;
 use spur_tui::mentions::{
     CodeMentionKind, CodeMentionValidationSpec, CompletionScope, IssueMentionDescriptor,
@@ -13,6 +13,78 @@ use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 const TEST_GRAPH_INDEX_VERSION: &str = "fixture-2026-05-11";
+
+#[test]
+fn returning_to_cached_root_restores_its_rows_without_rebuilding() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    std::fs::write(a.path().join("alpha_only.rs"), "a").unwrap();
+    std::fs::write(b.path().join("beta_only.rs"), "b").unwrap();
+    let mut registry = MentionRegistry::for_direct_session();
+
+    let first = registry.query(CompletionScope::PreSession, a.path(), "only", 20);
+    assert!(first.iter().any(|row| row.display == "alpha_only.rs"));
+    let other = registry.query(CompletionScope::PreSession, b.path(), "only", 20);
+    assert!(other.iter().any(|row| row.display == "beta_only.rs"));
+
+    // A is still fresh. A rebuild would see the replacement instead.
+    std::fs::remove_file(a.path().join("alpha_only.rs")).unwrap();
+    std::fs::write(a.path().join("replacement_only.rs"), "new").unwrap();
+    let again = registry.query(CompletionScope::PreSession, a.path(), "only", 20);
+    assert_eq!(again, first);
+    assert_eq!(
+        registry.query(CompletionScope::PreSession, b.path(), "only", 20),
+        other
+    );
+}
+
+#[test]
+fn cached_code_rows_hydrate_from_their_original_root() {
+    for shared_ids in [false, true] {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        for (root, version) in [(a.path(), "root-a"), (b.path(), "root-b")] {
+            std::fs::create_dir(root.join(".git")).unwrap();
+            let mut fixture = graph_fixture_json();
+            fixture["header"]["graph_index_version"] = serde_json::json!(version);
+            if !shared_ids {
+                for symbol in fixture["symbols"].as_array_mut().unwrap() {
+                    symbol["stable_symbol_id"] = serde_json::json!(format!(
+                        "{version}-{}",
+                        symbol["stable_symbol_id"].as_str().unwrap()
+                    ));
+                }
+            }
+            write_graph_fixture(&root.join("graph"), fixture);
+        }
+        let mut registry = MentionRegistry::for_direct_session().with_code_graph("graph");
+        let first = registry.query(CompletionScope::PreSession, a.path(), "Config", 10);
+        let symbol = first
+            .iter()
+            .find(|row| row.kind == MentionKind::CodeSymbol)
+            .unwrap();
+        assert_eq!(
+            registry
+                .lookup_code_payload(&symbol.uri)
+                .unwrap()
+                .display_meta
+                .graph_index_version,
+            "root-a"
+        );
+        registry.query(CompletionScope::PreSession, b.path(), "Config", 10);
+
+        let again = registry.query(CompletionScope::PreSession, a.path(), "Config", 10);
+        assert_eq!(again, first, "shared symbol IDs: {shared_ids}");
+        assert_eq!(
+            registry
+                .lookup_code_payload(&symbol.uri)
+                .unwrap()
+                .display_meta
+                .graph_index_version,
+            "root-a"
+        );
+    }
+}
 
 #[test]
 fn file_mentions_index_and_fuzzy_match() {

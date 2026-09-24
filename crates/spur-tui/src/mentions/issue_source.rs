@@ -1,17 +1,29 @@
 //! Issue/work-item `@`-mention source. Emits one entry per tracked issue
 //! snapshot supplied by the dashboard/app.
+//!
+//! sud-m3: implements the *neutral* [`spur_mentions::MentionSource`]
+//! directly (the engine builds it without a TUI adapter). TUI-only row
+//! state (atom text, priority tag, the issue preview descriptor) rides the
+//! sidecar keyed by `MentionId`, and every snapshot replace bumps the
+//! data-revision token so the engine cache key invalidates immediately.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use spur_mentions::{
+    MentionSource as NeutralMentionSource, SourceBuildError, SourceContext, SourceSnapshot,
+};
 use spur_pm::{IssueSummary, PmSource};
 
-use super::entry::{MentionEntry, MentionKind, MentionSource};
+use super::entry::{MentionEntry, MentionKind};
 use super::issue_search::push_issue_search_text;
+use super::session::SessionMentionSource;
+use super::sidecar::{split_rows, TuiMentionSidecar};
 
 const DISPLAY_CHAR_LIMIT: usize = 80;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueMentionDescriptor {
     pub id: String,
     pub title: String,
@@ -44,26 +56,43 @@ impl From<&IssueSummary> for IssueMentionDescriptor {
 
 pub struct IssueMentionSource {
     snapshot: Vec<Arc<IssueMentionDescriptor>>,
+    /// Data-revision token participating in the engine cache key: bumped by
+    /// every snapshot replace so the next query rebuilds instead of serving
+    /// the retained snapshot until the TTL expires.
+    token: u64,
+    /// Sidecar records from the most recent build, keyed by row id.
+    sidecar: TuiMentionSidecar,
 }
 
 impl IssueMentionSource {
     /// Callers must provide snapshot rows in most-recent-first order.
     /// Empty-query `@` preserves this order inside the registry's ISSUE_CAP.
     pub fn new(snapshot: Vec<IssueMentionDescriptor>) -> Self {
+        Self::with_token(snapshot, 0)
+    }
+
+    /// Construct with an explicit data-revision token; the registry stamps
+    /// `previous + 1` when swapping a session source so cache identity
+    /// changes on every replace.
+    pub(crate) fn with_token(snapshot: Vec<IssueMentionDescriptor>, token: u64) -> Self {
         Self {
             snapshot: snapshot.into_iter().map(Arc::new).collect(),
+            token,
+            sidecar: TuiMentionSidecar::new(),
         }
     }
-}
 
-impl MentionSource for IssueMentionSource {
-    fn name(&self) -> &'static str {
-        "issue"
+    /// Replace the issue snapshot in place (newest-first order), bumping the
+    /// data-revision token.
+    pub fn set_snapshot(&mut self, snapshot: Vec<IssueMentionDescriptor>) {
+        self.snapshot = snapshot.into_iter().map(Arc::new).collect();
+        self.token = self.token.wrapping_add(1);
     }
 
-    fn build(&mut self, _cwd: &Path) -> anyhow::Result<Vec<MentionEntry>> {
-        Ok(self
-            .snapshot
+    /// TUI rows for the current snapshot: the pre-sidecar shape the neutral
+    /// entries and the sidecar records split from.
+    fn tui_rows(&self) -> Vec<MentionEntry> {
+        self.snapshot
             .iter()
             .map(|descriptor| {
                 let preview = Arc::clone(descriptor);
@@ -105,7 +134,42 @@ impl MentionSource for IssueMentionSource {
                     issue_preview: Some(preview),
                 }
             })
-            .collect())
+            .collect()
+    }
+}
+
+impl NeutralMentionSource for IssueMentionSource {
+    fn key(&self) -> &str {
+        "issue"
+    }
+
+    fn source_token(&self) -> u64 {
+        self.token
+    }
+
+    fn build(
+        &mut self,
+        _root: &Path,
+        _context: &SourceContext,
+    ) -> Result<SourceSnapshot, SourceBuildError> {
+        let rows = self.tui_rows();
+        let (entries, sidecar) = split_rows(&rows);
+        self.sidecar = sidecar;
+        Ok(SourceSnapshot::new(entries, 0))
+    }
+}
+
+impl SessionMentionSource for IssueMentionSource {
+    fn slot_name(&self) -> &'static str {
+        "issue"
+    }
+
+    fn sidecar(&self) -> &TuiMentionSidecar {
+        &self.sidecar
+    }
+
+    fn datasource_hints(&self) -> Option<&HashMap<String, Arc<String>>> {
+        None
     }
 }
 
@@ -177,7 +241,8 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::mentions::{MentionKind, MentionSource};
+    use crate::mentions::sidecar::rejoin_snapshot;
+    use crate::mentions::MentionKind;
     use spur_pm::PmSource;
 
     fn descriptor(source: PmSource, id: &str) -> IssueMentionDescriptor {
@@ -195,33 +260,42 @@ mod tests {
         }
     }
 
+    fn build_neutral(source: &mut IssueMentionSource) -> SourceSnapshot {
+        source
+            .build(Path::new("."), &SourceContext::default())
+            .expect("build succeeds")
+    }
+
     #[test]
-    fn descriptors_emit_entries_with_issue_metadata() {
-        let descriptors = vec![
+    fn token_changes_when_the_snapshot_is_replaced() {
+        let mut src = IssueMentionSource::new(vec![descriptor(PmSource::Beads, "bd-1")]);
+        let first = NeutralMentionSource::source_token(&src);
+        src.set_snapshot(vec![descriptor(PmSource::Beads, "bd-2")]);
+        assert_ne!(first, NeutralMentionSource::source_token(&src));
+    }
+
+    #[test]
+    fn build_emits_neutral_entries_that_rejoin_into_tui_rows() {
+        let mut source = IssueMentionSource::new(vec![
             descriptor(PmSource::Beads, "bd-1"),
             descriptor(PmSource::GitHub, "GH-2"),
             descriptor(PmSource::Linear, "LIN-3"),
             descriptor(PmSource::Plane, "PLN-4"),
-        ];
-        let mut source = IssueMentionSource::new(descriptors);
+        ]);
+        let expected = source.tui_rows();
 
-        let entries = source.build(Path::new(".")).expect("build succeeds");
+        let snapshot = build_neutral(&mut source);
 
-        assert_eq!(entries.len(), 4);
-        assert_eq!(entries[0].kind, MentionKind::Issue);
-        assert_eq!(entries[0].uri, "issue://beads/bd-1");
-        assert_eq!(entries[1].uri, "issue://github/GH-2");
-        assert_eq!(entries[2].uri, "issue://linear/LIN-3");
-        assert_eq!(entries[3].uri, "issue://plane/PLN-4");
-        assert_eq!(entries[0].atom_text.as_deref(), Some("@bd-1"));
-        assert_eq!(entries[0].secondary.as_deref(), Some("in_progress · alice"));
-        assert_eq!(entries[0].tag.as_deref(), Some("P1"));
-        assert!(entries[0]
-            .display
-            .starts_with("bd-1 Fix mention picker matching"));
-
-        let search_text = entries[0].search_text.as_deref().expect("search text");
-        for expected in [
+        assert_eq!(snapshot.entries.len(), 4);
+        assert_eq!(snapshot.entries[0].uri, "issue://beads/bd-1");
+        assert_eq!(snapshot.entries[1].uri, "issue://github/GH-2");
+        assert_eq!(snapshot.entries[2].uri, "issue://linear/LIN-3");
+        assert_eq!(snapshot.entries[3].uri, "issue://plane/PLN-4");
+        let search_text = snapshot.entries[0]
+            .search_text
+            .as_deref()
+            .expect("search text");
+        for expected_fragment in [
             "bd-1",
             "Fix mention picker matching",
             "mentions",
@@ -231,30 +305,36 @@ mod tests {
             "in_progress",
         ] {
             assert!(
-                search_text.contains(expected),
-                "search text {search_text:?} missing {expected:?}",
+                search_text.contains(expected_fragment),
+                "search text {search_text:?} missing {expected_fragment:?}",
             );
         }
+
+        let entries = rejoin_snapshot(&snapshot.entries, source.sidecar());
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].kind, MentionKind::Issue);
+        assert_eq!(entries[0].atom_text.as_deref(), Some("@bd-1"));
+        assert_eq!(entries[0].secondary.as_deref(), Some("in_progress · alice"));
+        assert_eq!(entries[0].tag.as_deref(), Some("P1"));
+        assert!(entries[0]
+            .display
+            .starts_with("bd-1 Fix mention picker matching"));
+        assert_eq!(entries, expected);
     }
 
     #[test]
-    fn issue_entries_carry_preview_descriptor_handle() {
-        let mut source = IssueMentionSource::new(vec![
-            descriptor(PmSource::Beads, "bd-1"),
-            descriptor(PmSource::GitHub, "GH-2"),
-        ]);
+    fn rejoin_carries_the_issue_preview_descriptor_handle() {
+        let mut source = IssueMentionSource::new(vec![descriptor(PmSource::Beads, "bd-1")]);
         let first_source_preview = source.snapshot[0].clone();
 
-        let entries = source.build(Path::new(".")).expect("build succeeds");
+        let snapshot = build_neutral(&mut source);
+        let entries = rejoin_snapshot(&snapshot.entries, source.sidecar());
 
-        assert!(entries.iter().all(|entry| entry.issue_preview.is_some()));
         let preview = entries[0].issue_preview.as_ref().expect("issue preview");
         assert!(std::sync::Arc::ptr_eq(&first_source_preview, preview));
         assert_eq!(preview.id, "bd-1");
         assert_eq!(preview.title, "Fix mention picker matching");
         assert_eq!(preview.labels, vec!["mentions", "tui"]);
-        let second_preview = entries[1].issue_preview.as_ref().expect("issue preview");
-        assert_eq!(second_preview.id, "GH-2");
     }
 
     #[test]
@@ -263,7 +343,8 @@ mod tests {
         issue.title = "á".repeat(100);
         let mut source = IssueMentionSource::new(vec![issue]);
 
-        let entries = source.build(Path::new(".")).expect("build succeeds");
+        let snapshot = build_neutral(&mut source);
+        let entries = rejoin_snapshot(&snapshot.entries, source.sidecar());
 
         assert!(entries[0].display.chars().count() <= 80);
         assert!(entries[0]

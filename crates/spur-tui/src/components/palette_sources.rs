@@ -10,7 +10,7 @@ pub trait PaletteSource {
 }
 
 use crate::action::{Action, ViewId};
-use crate::commands::registry::CommandRegistry;
+use crate::commands::CommandRegistry;
 use crate::components::palette::{PaletteKind, PalettePayload};
 
 pub struct ViewSource;

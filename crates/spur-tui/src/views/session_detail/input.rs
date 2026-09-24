@@ -146,7 +146,7 @@ impl SessionDetailView {
                 .completion
                 .handle_picker_key(key, &mut self.input_bar)
                 .and_then(|accept| {
-                    crate::commands::submit_router::local_action_from_picker_accept(
+                    crate::commands::submit_shell::local_action_from_picker_accept(
                         accept,
                         &self.command_registry,
                         self.spur_agent_caps.as_deref(),
@@ -166,7 +166,7 @@ impl SessionDetailView {
                         if let Some((text, ranges, interrupt)) =
                             self.input_bar.take_submit_capture()
                         {
-                            use crate::commands::submit_router::{route_with_caps, SubmitDecision};
+                            use crate::commands::submit_shell::{route_with_caps, SubmitDecision};
                             let dec = route_with_caps(
                                 &text,
                                 &ranges,
@@ -193,20 +193,20 @@ impl SessionDetailView {
                                         mention_registry.retain_code_payloads_for_uris(
                                             ranges.iter().map(|range| range.uri.as_str()),
                                         );
-                                        blocks = crate::commands::submit_router::assemble_blocks_with_code_mentions_and_caps(
+                                        blocks = crate::commands::submit_shell::assemble_blocks_with_code_mentions_and_caps(
                                             &text,
                                             &ranges,
                                             &pending_images,
                                             &self.cwd,
                                             |uri| mention_registry.lookup_code_payload(uri),
-                                            crate::commands::submit_router::PromptBlockCaps::from_agent(
+                                            crate::commands::submit::PromptBlockCaps::from_agent(
                                                 self.spur_agent_caps.as_deref(),
                                             ),
                                         );
                                     }
                                     if has_datasource_mentions {
                                         let mention_registry = self.mention_registry.borrow();
-                                        let _ = crate::mentions::hint::prepend_datasource_hint(
+                                        let _ = crate::components::input_bar_mention_hint::prepend_datasource_hint(
                                             &mut blocks,
                                             &ranges,
                                             |uri| {
@@ -217,7 +217,7 @@ impl SessionDetailView {
                                         );
                                     }
                                     if self.role == "brain" {
-                                        let _ = crate::mentions::hint::prepend_worker_hint(
+                                        let _ = crate::components::input_bar_mention_hint::prepend_worker_hint(
                                             &mut blocks,
                                             &ranges,
                                             &self.known_worker_names,

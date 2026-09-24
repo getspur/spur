@@ -1,4 +1,4 @@
-use spur_tui::commands::registry::CommandRegistry;
+use spur_tui::commands::CommandRegistry;
 use spur_tui::components::palette::{PaletteKind, PalettePayload};
 use spur_tui::components::palette_sources::{
     CommandSource, PaletteSource, SessionSource, WorkerSource,

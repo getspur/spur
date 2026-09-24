@@ -19,6 +19,13 @@
       "args": [
         "mcp"
       ]
+    },
+    "spur-solver": {
+      "command": "spur",
+      "args": [
+        "solver",
+        "mcp"
+      ]
     }
   }
 }

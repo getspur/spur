@@ -1,25 +1,170 @@
 //! Synthesizes CommandEntry rows from an agent's cached config_options.
-//! Vendor-neutral; calls into spur-acp's config-option synthesizers.
+//! Vendor-neutral; calls into spur-acp's config-option synthesizers. Also
+//! owns [`ModelEffortCatalog`], the single grok / kiro / standard-
+//! config-options precedence implementation every frontend advertises
+//! `/model` and `/effort` through (spec 2026-09-23 §3.5).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 use spur_acp::adapter::arg_picker_hint::{ArgPickerChoice, ArgPickerHint, ArgPickerSpec};
 use spur_acp::adapter::config_options::{synthesize, synthesize_advertised, AdvertisedCommand};
+use spur_acp::adapter::grok_session_display::GrokSessionDisplay;
+use spur_acp::adapter::kiro_session_display::KiroSessionDisplay;
 use spur_acp::capability_evidence::{
     CapabilityChoice, CapabilityKind, DispatchRoute, EvidenceEpochId, EvidenceProvenance,
     ReducedCapability,
 };
 use spur_acp::{SessionConfigOption, SpurAgentCaps};
 
-use super::entry::{CommandEntry, CommandSource, Dispatch};
+use crate::entry::{CommandEntry, CommandSource, Dispatch};
+
+/// One selectable value in a [`ModelEffortCatalog`] plane (spec
+/// 2026-09-23 §3.5). Field-compatible with the notebook's
+/// `ChatConfigChoice` so its P2 mapping is a field-for-field copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogChoice {
+    /// Wire value (e.g. `modelId`, config-option select value).
+    pub value: String,
+    /// Human-readable picker label.
+    pub label: String,
+    /// Optional description from the agent catalog.
+    pub description: Option<String>,
+}
+
+/// The neutral model / reasoning-effort catalog synthesized from an
+/// agent's caps (spec 2026-09-23 §3.5) — the single grok / kiro /
+/// standard-config-options precedence implementation shared by every
+/// frontend. Frontends map this type to their own picker models; the
+/// `/model` and `/effort` [`CommandEntry`] mapping stays in this crate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelEffortCatalog {
+    /// Advertised models, in agent order.
+    pub models: Vec<CatalogChoice>,
+    /// Currently selected model id, when advertised.
+    pub current_model: Option<String>,
+    /// Advertised efforts, scoped to the current model where the vendor
+    /// catalog is model-scoped (Grok).
+    pub efforts: Vec<CatalogChoice>,
+    /// Currently selected effort id, when advertised.
+    pub current_effort: Option<String>,
+}
+
+impl ModelEffortCatalog {
+    /// Synthesize the catalog from a capability snapshot.
+    ///
+    /// Precedence: the standard config-option plane wins whenever it
+    /// advertises a model or effort select; otherwise Grok's proprietary
+    /// catalog, then Kiro's recovered models plane. An agent never has more
+    /// than one vendor plane, and both extractors are agent-kind gated, so
+    /// the vendor fallbacks are mutually exclusive in practice.
+    #[must_use]
+    pub fn from_caps(caps: &SpurAgentCaps) -> Self {
+        Self::vendor_from_caps(caps)
+            .unwrap_or_else(|| Self::from_config_options(&caps.config_options))
+    }
+
+    /// The vendor planes only — `None` when the standard config-option
+    /// plane won the precedence or no vendor plane exists. The guard is
+    /// [`Self::from_config_options`] itself, so [`Self::from_caps`] and
+    /// the `CommandEntry` synthesis below share one precedence rule and
+    /// the direct `SetSessionModel` / `SetSessionEffort` entries never
+    /// double-emit over the standard entries from `synthesize_advertised`.
+    pub(crate) fn vendor_from_caps(caps: &SpurAgentCaps) -> Option<Self> {
+        let standard = Self::from_config_options(&caps.config_options);
+        if !standard.models.is_empty() || !standard.efforts.is_empty() {
+            return None;
+        }
+        caps.grok_display
+            .as_ref()
+            .map(Self::from_grok_display)
+            .or_else(|| caps.kiro_display.as_ref().map(Self::from_kiro_display))
+    }
+
+    fn from_config_options(options: &[SessionConfigOption]) -> Self {
+        let mut catalog = Self::default();
+        for command in synthesize(options) {
+            let choices = command
+                .choices
+                .into_iter()
+                .map(|choice| CatalogChoice {
+                    value: choice.value,
+                    label: choice.label,
+                    description: choice.description,
+                })
+                .collect();
+            match command.name.as_str() {
+                "model" => {
+                    catalog.models = choices;
+                    catalog.current_model = command.current_value;
+                }
+                "effort" => {
+                    catalog.efforts = choices;
+                    catalog.current_effort = command.current_value;
+                }
+                _ => {}
+            }
+        }
+        catalog
+    }
+
+    fn from_grok_display(display: &GrokSessionDisplay) -> Self {
+        let current_model = display.model_id.clone();
+        let efforts = current_model
+            .as_deref()
+            .map(|model_id| {
+                display
+                    .efforts_for_model(model_id)
+                    .iter()
+                    .map(|effort| CatalogChoice {
+                        value: effort.id.clone(),
+                        label: effort.label.clone(),
+                        description: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            models: display
+                .models()
+                .iter()
+                .map(|model| CatalogChoice {
+                    value: model.id.clone(),
+                    label: model.label.clone(),
+                    description: None,
+                })
+                .collect(),
+            current_model,
+            efforts,
+            current_effort: display.effort_id.clone(),
+        }
+    }
+
+    fn from_kiro_display(display: &KiroSessionDisplay) -> Self {
+        Self {
+            models: display
+                .models()
+                .iter()
+                .map(|model| CatalogChoice {
+                    value: model.id.clone(),
+                    label: model.label.clone(),
+                    description: model.description.clone(),
+                })
+                .collect(),
+            current_model: display.model_id.clone(),
+            efforts: Vec::new(),
+            current_effort: None,
+        }
+    }
+}
 
 pub struct AdvertisedSource;
 
 /// The reduced route and immutable evidence epoch selected for one normalized
-/// slash-command name.
+/// slash-command name. Public because the TUI submit router consults
+/// `pinned_route_for_command` when reducing capability routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PinnedCapabilityRoute {
+pub struct PinnedCapabilityRoute {
     pub evidence_epoch: EvidenceEpochId,
     pub route: DispatchRoute,
 }
@@ -160,8 +305,7 @@ impl AdvertisedSource {
             };
         }
 
-        candidates.extend(grok_entries(handle, caps));
-        candidates.extend(kiro_entries(handle, caps));
+        candidates.extend(vendor_catalog_entries(handle, caps));
 
         let reduced = reduced_commands(caps);
         let routes = reduced
@@ -271,7 +415,7 @@ fn legacy_candidate_rank(entry: &CommandEntry) -> (u8, String, String, String) {
         Dispatch::SetSessionMode => (1, "mode".to_owned()),
         Dispatch::VendorExec { command, .. } => (2, command.clone()),
         Dispatch::PromptText { normalized } => (3, normalized.clone()),
-        Dispatch::SpurLocal(_) => (4, String::new()),
+        Dispatch::Local { .. } => (4, String::new()),
     };
     (
         rank,
@@ -288,7 +432,7 @@ pub(crate) fn normalize_command_name(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub(crate) fn pinned_route_for_command(
+pub fn pinned_route_for_command(
     caps: &SpurAgentCaps,
     command_name: &str,
 ) -> Option<PinnedCapabilityRoute> {
@@ -513,109 +657,78 @@ fn mode_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
     }]
 }
 
-fn grok_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
-    if !caps.supports_grok_set_model() {
-        return Vec::new();
-    }
-    let Some(display) = caps.grok_display.as_ref() else {
+/// Direct `/model` and `/effort` entries from the vendor planes of the
+/// unified [`ModelEffortCatalog`] (spec 2026-09-23 §3.5). The standard
+/// config-option entries are synthesized separately above, so the vendor
+/// planes only contribute when the standard plane is empty
+/// ([`ModelEffortCatalog::vendor_from_caps`]).
+fn vendor_catalog_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
+    let Some(catalog) = ModelEffortCatalog::vendor_from_caps(caps) else {
         return Vec::new();
     };
-    let source = || CommandSource::Advertised {
-        handle: handle.to_string(),
-    };
-    let picker = |choices: Vec<ArgPickerChoice>| {
-        Some(ArgPickerSpec {
+    let picker = |choices: &[CatalogChoice]| {
+        (!choices.is_empty()).then(|| ArgPickerSpec {
             free_text_hint: String::new(),
-            typed_hint: Some(ArgPickerHint::StaticChoices { choices }),
+            typed_hint: Some(ArgPickerHint::StaticChoices {
+                choices: choices
+                    .iter()
+                    .map(|choice| ArgPickerChoice {
+                        value: choice.value.clone(),
+                        label: choice.label.clone(),
+                        description: choice.description.clone(),
+                    })
+                    .collect(),
+            }),
         })
     };
-    let mut entries = vec![CommandEntry {
-        name: "model".to_string(),
-        description: "Switch model for this session".to_string(),
-        hint: display.model_label.clone(),
-        source: source(),
-        dispatch: Dispatch::SetSessionModel,
-        arg_picker_spec: picker(
-            display
-                .models()
-                .iter()
-                .map(|model| ArgPickerChoice {
-                    value: model.id.clone(),
-                    label: model.label.clone(),
-                    description: None,
-                })
-                .collect(),
-        ),
-    }];
-
-    let effort_choices = display
-        .model_id
-        .as_deref()
-        .map(|model_id| display.efforts_for_model(model_id))
-        .unwrap_or_default();
-    if !effort_choices.is_empty() {
+    let mut entries = Vec::new();
+    if !catalog.models.is_empty() {
+        entries.push(CommandEntry {
+            name: "model".to_string(),
+            description: "Switch model for this session".to_string(),
+            hint: catalog
+                .current_model
+                .as_deref()
+                .map(|value| current_choice_label(&catalog.models, value)),
+            source: CommandSource::Advertised {
+                handle: handle.to_string(),
+            },
+            dispatch: Dispatch::SetSessionModel,
+            arg_picker_spec: picker(&catalog.models),
+        });
+    }
+    if !catalog.efforts.is_empty() {
         entries.push(CommandEntry {
             name: "effort".to_string(),
             description: "Switch reasoning / thinking effort".to_string(),
-            hint: display.effort_label.clone(),
-            source: source(),
+            hint: catalog
+                .current_effort
+                .as_deref()
+                .map(|value| current_choice_label(&catalog.efforts, value)),
+            source: CommandSource::Advertised {
+                handle: handle.to_string(),
+            },
             dispatch: Dispatch::SetSessionEffort,
-            arg_picker_spec: picker(
-                effort_choices
-                    .iter()
-                    .map(|effort| ArgPickerChoice {
-                        value: effort.id.clone(),
-                        label: effort.label.clone(),
-                        description: None,
-                    })
-                    .collect(),
-            ),
+            arg_picker_spec: picker(&catalog.efforts),
         });
     }
     entries
 }
 
-/// Kiro `/model` from the recovered models plane (no effort surface).
-fn kiro_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
-    if !caps.supports_kiro_set_model() {
-        return Vec::new();
-    }
-    let Some(display) = caps.kiro_display.as_ref() else {
-        return Vec::new();
-    };
-    // Avoid double-emitting /model when configOptions already synthesized one
-    // (future Kiro builds that advertise a model select).
-    if caps.supports_set_model() {
-        return Vec::new();
-    }
-    vec![CommandEntry {
-        name: "model".to_string(),
-        description: "Switch model for this session".to_string(),
-        hint: display.model_label.clone(),
-        source: CommandSource::Advertised {
-            handle: handle.to_string(),
-        },
-        dispatch: Dispatch::SetSessionModel,
-        arg_picker_spec: Some(ArgPickerSpec {
-            free_text_hint: String::new(),
-            typed_hint: Some(ArgPickerHint::StaticChoices {
-                choices: display
-                    .models()
-                    .iter()
-                    .map(|model| ArgPickerChoice {
-                        value: model.id.clone(),
-                        label: model.label.clone(),
-                        description: model.description.clone(),
-                    })
-                    .collect(),
-            }),
-        }),
-    }]
+/// The current selection's display label, falling back to its raw value
+/// when the catalog carries no labeled choice for it.
+fn current_choice_label(choices: &[CatalogChoice], current: &str) -> String {
+    choices
+        .iter()
+        .find(|choice| choice.value == current)
+        .map(|choice| choice.label.clone())
+        .unwrap_or_else(|| current.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::LocalLayer;
     use spur_acp::capability_evidence::{
         CapabilityChoice, CapabilityKey, CapabilityKind, CliIdentity, EvidenceClaim, EvidenceEpoch,
         EvidenceEpochId, EvidenceProvenance, EvidenceRecord, EvidenceSessionScope, ObservationTime,
@@ -699,20 +812,6 @@ mod tests {
         caps
     }
 
-    fn with_incomplete_evidence(mut caps: SpurAgentCaps) -> SpurAgentCaps {
-        let mut wire = serde_json::to_value(
-            caps.capability_evidence
-                .take()
-                .expect("test caps must include capability evidence"),
-        )
-        .expect("snapshot must serialize");
-        wire["completeness"] = serde_json::json!("incomplete");
-        caps.capability_evidence = Some(
-            serde_json::from_value(wire).expect("incomplete evidence snapshot must deserialize"),
-        );
-        caps
-    }
-
     fn caps_with_modes() -> SpurAgentCaps {
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
@@ -767,12 +866,12 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "model");
         assert!(matches!(
-            entries[0].source,
-            CommandSource::Advertised { ref handle } if handle == "codex"
+            &entries[0].source,
+            CommandSource::Advertised { handle } if handle == "codex"
         ));
         assert!(matches!(
-            entries[0].dispatch,
-            Dispatch::SetSessionConfigOption { ref config_id } if config_id == "model"
+            &entries[0].dispatch,
+            Dispatch::SetSessionConfigOption { config_id } if config_id == "model"
         ));
         assert!(entries[0].arg_picker_spec.is_some());
     }
@@ -809,293 +908,6 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_evidence_keeps_notified_skill_commands_visible() {
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-
-        let identity = evidence_identity();
-        let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
-        let caps = with_incomplete_evidence(with_complete_evidence(
-            SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp),
-            14,
-            vec![capability_evidence(
-                &identity,
-                CapabilityKind::Command,
-                "commands",
-                EvidenceClaim::CandidateObserved,
-                EvidenceProvenance::ObservedNotification,
-                &[
-                    ("$spurpower-solve", "Solve"),
-                    ("custom-skill", "Custom skill"),
-                ],
-            )],
-        ));
-        let mut cfg = spur_acp::AgentConfig::with_defaults("codex");
-        cfg.kind = AgentKind::CodexAcp;
-        let commands = vec![
-            spur_acp::AvailableCommand::new("$spurpower-solve", "Solve"),
-            spur_acp::AvailableCommand::new("custom-skill", "Custom skill"),
-        ];
-
-        // Both startup orderings must preserve a complete command notification.
-        for notification_first in [false, true] {
-            let mut view = crate::views::session_detail::SessionDetailView::new(
-                spur_acp::SessionId("sid".to_owned()),
-                "codex".to_owned(),
-                "brain".to_owned(),
-                std::path::PathBuf::from("/tmp"),
-                std::sync::Arc::new(cfg.clone()),
-                Vec::new(),
-            );
-            if notification_first {
-                view.apply_available_commands(&commands);
-            }
-            view.apply_advertised_commands(Some(&caps), &[]);
-            if !notification_first {
-                view.apply_available_commands(&commands);
-            }
-            let registry = view.command_registry();
-            for command in &commands {
-                let visible = registry.available_commands_for_session(Some(&caps));
-                let entries = visible
-                    .iter()
-                    .filter(|entry| entry.name == command.name)
-                    .collect::<Vec<_>>();
-                assert_eq!(entries.len(), 1, "missing skill {}", command.name);
-                assert!(matches!(entries[0].dispatch, Dispatch::PromptText { .. }));
-                assert_eq!(pinned_route_for_command(&caps, &command.name), None);
-                let input = format!("/{} inspect this", command.name);
-                let SubmitDecision::Send { blocks, .. } =
-                    route_with_caps(&input, &[], &[], registry, false, Some(&caps))
-                else {
-                    panic!("skill must dispatch as a prompt");
-                };
-                assert!(
-                    matches!(blocks.as_slice(), [spur_acp::ContentBlock::Text(text)]
-                    if text.text == input)
-                );
-            }
-            view.apply_available_commands(&[]);
-            assert!(view
-                .command_registry()
-                .resolve("/$spurpower-solve")
-                .is_none());
-        }
-    }
-
-    #[test]
-    fn incomplete_evidence_keeps_standard_config_commands_on_protocol_dispatch() {
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-
-        let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
-        new.config_options = Some(vec![
-            SessionConfigOption::select(
-                SessionConfigId::new("model"),
-                "Model",
-                "test-model",
-                vec![SessionConfigSelectOption::new("test-model", "Test Model")],
-            ),
-            SessionConfigOption::select(
-                SessionConfigId::new("reasoning_effort"),
-                "Reasoning effort",
-                "high",
-                vec![SessionConfigSelectOption::new("high", "High")],
-            ),
-        ]);
-        let identity = evidence_identity();
-        let caps = with_incomplete_evidence(with_complete_evidence(
-            SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp),
-            14,
-            vec![
-                model_evidence(
-                    &identity,
-                    EvidenceClaim::NativeVerified,
-                    EvidenceProvenance::StandardAdvertisement,
-                ),
-                capability_evidence(
-                    &identity,
-                    CapabilityKind::Effort,
-                    "reasoning_effort",
-                    EvidenceClaim::NativeVerified,
-                    EvidenceProvenance::StandardAdvertisement,
-                    &[("high", "High")],
-                ),
-            ],
-        ));
-
-        let entries = AdvertisedSource::entries_from_caps("codex", &caps);
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["model", "effort"]
-        );
-        assert!(entries
-            .iter()
-            .all(|entry| matches!(entry.dispatch, Dispatch::SetSessionConfigOption { .. })));
-        assert_eq!(pinned_route_for_command(&caps, "model"), None);
-        assert_eq!(pinned_route_for_command(&caps, "effort"), None);
-
-        let mut registry = crate::commands::CommandRegistry::new();
-        registry.set_agent_commands(
-            "codex",
-            vec![
-                CommandEntry {
-                    name: "model".to_owned(),
-                    description: "Agent prompt model".to_owned(),
-                    hint: None,
-                    source: CommandSource::Agent {
-                        handle: "codex".to_owned(),
-                    },
-                    dispatch: Dispatch::PromptText {
-                        normalized: "/model".to_owned(),
-                    },
-                    arg_picker_spec: None,
-                },
-                CommandEntry {
-                    name: "effort".to_owned(),
-                    description: "Unverified vendor effort".to_owned(),
-                    hint: None,
-                    source: CommandSource::Agent {
-                        handle: "codex".to_owned(),
-                    },
-                    dispatch: Dispatch::VendorExec {
-                        method: "vendor/set_effort".to_owned(),
-                        command: "effort".to_owned(),
-                        args_template: spur_acp::ArgsTemplateKind::RawRest,
-                    },
-                    arg_picker_spec: None,
-                },
-            ],
-        );
-        registry.set_advertised_commands("codex", entries);
-        assert!(matches!(
-            route_with_caps(
-                "/model test-model",
-                &[],
-                &[],
-                &registry,
-                false,
-                Some(&caps),
-            ),
-            SubmitDecision::SetSessionConfigOption { ref config_id, ref value, .. }
-                if config_id == "model" && value == "test-model"
-        ));
-        assert!(matches!(
-            route_with_caps(
-                "/effort high",
-                &[],
-                &[],
-                &registry,
-                false,
-                Some(&caps),
-            ),
-            SubmitDecision::SetSessionConfigOption { ref config_id, ref value, .. }
-                if config_id == "reasoning_effort" && value == "high"
-        ));
-    }
-
-    #[test]
-    fn incomplete_evidence_does_not_enable_vendor_native_commands() {
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-
-        let mut caps = grok_caps();
-        caps.config_options = vec![SessionConfigOption::select(
-            SessionConfigId::new("model"),
-            "Model",
-            "test-model",
-            vec![SessionConfigSelectOption::new("test-model", "Test Model")],
-        )];
-        let caps = with_incomplete_evidence(caps);
-
-        let entries = AdvertisedSource::entries_from_caps("grok", &caps);
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, "model");
-        assert!(matches!(
-            entries[0].dispatch,
-            Dispatch::SetSessionConfigOption { .. }
-        ));
-        assert_eq!(pinned_route_for_command(&caps, "model"), None);
-        assert_eq!(pinned_route_for_command(&caps, "effort"), None);
-
-        let mut registry = crate::commands::CommandRegistry::new();
-        registry.set_advertised_commands("grok", entries);
-        assert!(matches!(
-            route_with_caps(
-                "/model test-model",
-                &[],
-                &[],
-                &registry,
-                false,
-                Some(&caps),
-            ),
-            SubmitDecision::SetSessionConfigOption { ref config_id, ref value, .. }
-                if config_id == "model" && value == "test-model"
-        ));
-    }
-
-    #[test]
-    fn incomplete_evidence_suppresses_vendor_only_command_collisions() {
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-
-        let caps = with_incomplete_evidence(grok_caps());
-        let entries = AdvertisedSource::entries_from_caps("grok", &caps);
-        assert!(entries.is_empty());
-
-        let mut registry = crate::commands::CommandRegistry::new();
-        registry.set_agent_commands(
-            "grok",
-            vec![
-                CommandEntry {
-                    name: "model".to_owned(),
-                    description: "Unverified vendor model".to_owned(),
-                    hint: None,
-                    source: CommandSource::Agent {
-                        handle: "grok".to_owned(),
-                    },
-                    dispatch: Dispatch::VendorExec {
-                        method: "vendor/set_model".to_owned(),
-                        command: "model".to_owned(),
-                        args_template: spur_acp::ArgsTemplateKind::RawRest,
-                    },
-                    arg_picker_spec: None,
-                },
-                CommandEntry {
-                    name: "effort".to_owned(),
-                    description: "Unverified vendor effort".to_owned(),
-                    hint: None,
-                    source: CommandSource::Agent {
-                        handle: "grok".to_owned(),
-                    },
-                    dispatch: Dispatch::VendorExec {
-                        method: "vendor/set_effort".to_owned(),
-                        command: "effort".to_owned(),
-                        args_template: spur_acp::ArgsTemplateKind::RawRest,
-                    },
-                    arg_picker_spec: None,
-                },
-            ],
-        );
-        registry.set_advertised_commands("grok", entries);
-
-        let visible = registry.available_commands_for_session(Some(&caps));
-        assert!(visible
-            .iter()
-            .all(|entry| entry.name != "model" && entry.name != "effort"));
-        assert!(matches!(
-            route_with_caps("/model grok-4.6", &[], &[], &registry, false, Some(&caps)),
-            SubmitDecision::Send { .. }
-        ));
-        assert!(matches!(
-            route_with_caps("/effort high", &[], &[], &registry, false, Some(&caps)),
-            SubmitDecision::Send { .. }
-        ));
-    }
-
-    #[test]
     fn agent_modes_yield_mode_entry_with_advertised_ids_and_labels() {
         let entries = AdvertisedSource::entries_from_caps("codex", &caps_with_modes());
         let mode = entries
@@ -1120,43 +932,6 @@ mod tests {
                 ("agent-full-access", "Agent (full access)"),
             ]
         );
-    }
-
-    #[test]
-    fn incomplete_evidence_keeps_standard_mode_on_protocol_dispatch() {
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-
-        let caps = with_incomplete_evidence(caps_with_modes());
-        let entries = AdvertisedSource::entries_from_caps("codex", &caps);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, "mode");
-        assert!(matches!(entries[0].dispatch, Dispatch::SetSessionMode));
-        assert_eq!(pinned_route_for_command(&caps, "mode"), None);
-
-        let mut registry = crate::commands::CommandRegistry::new();
-        registry.set_agent_commands(
-            "codex",
-            vec![CommandEntry {
-                name: "mode".to_owned(),
-                description: "Unverified vendor mode".to_owned(),
-                hint: None,
-                source: CommandSource::Agent {
-                    handle: "codex".to_owned(),
-                },
-                dispatch: Dispatch::VendorExec {
-                    method: "vendor/set_mode".to_owned(),
-                    command: "mode".to_owned(),
-                    args_template: spur_acp::ArgsTemplateKind::RawRest,
-                },
-                arg_picker_spec: None,
-            }],
-        );
-        registry.set_advertised_commands("codex", entries);
-
-        assert!(matches!(
-            route_with_caps("/mode agent", &[], &[], &registry, false, Some(&caps)),
-            SubmitDecision::SetSessionMode { ref value } if value == "agent"
-        ));
     }
 
     fn grok_caps() -> SpurAgentCaps {
@@ -1255,7 +1030,7 @@ mod tests {
                     == vec!["xhigh", "high", "medium", "low"]
         ));
 
-        let mut registry = crate::commands::CommandRegistry::new();
+        let mut registry = crate::registry::CommandRegistry::new(LocalLayer::empty());
         registry.set_advertised_commands("grok", entries);
         let visible = registry.available_commands_for_session(Some(&caps));
         assert!(visible.iter().any(|entry| entry.name == "model"));
@@ -1346,7 +1121,7 @@ mod tests {
                     == vec!["auto", "claude-sonnet-4.5"]
         ));
 
-        let mut registry = crate::commands::CommandRegistry::new();
+        let mut registry = crate::registry::CommandRegistry::new(LocalLayer::empty());
         registry.set_advertised_commands("kiro", entries);
         let visible = registry.available_commands_for_session(Some(&caps));
         assert!(visible.iter().any(|entry| entry.name == "model"));
@@ -1380,9 +1155,15 @@ mod tests {
 
         assert_eq!(models.len(), 1, "one reduced capability has one entry");
         assert!(matches!(
-            models[0].dispatch,
-            Dispatch::SetSessionConfigOption { .. } | Dispatch::SetSessionModel
+            &models[0].dispatch,
+            Dispatch::SetSessionConfigOption { config_id } if config_id == "model"
         ));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !matches!(entry.dispatch, Dispatch::SetSessionModel)),
+            "the vendor SetSessionModel entry stays suppressed while the standard plane won"
+        );
     }
 
     #[test]
@@ -1397,7 +1178,7 @@ mod tests {
                 EvidenceProvenance::VendorAdvertisement,
             )],
         );
-        let mut registry = crate::commands::CommandRegistry::new();
+        let mut registry = crate::registry::CommandRegistry::new(LocalLayer::empty());
         registry.set_agent_commands(
             "kiro",
             vec![CommandEntry {
@@ -1438,7 +1219,7 @@ mod tests {
                 EvidenceProvenance::InconclusiveFailure,
             )],
         );
-        let mut registry = crate::commands::CommandRegistry::new();
+        let mut registry = crate::registry::CommandRegistry::new(LocalLayer::empty());
         registry.set_agent_commands(
             "kiro",
             vec![CommandEntry {

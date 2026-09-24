@@ -1,0 +1,14 @@
+[package]
+name = "spur-utilities"
+description = "Facade crate re-exporting the spur-utilities family (spur-commands, spur-mentions)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+spur-mentions = { workspace = true }
+spur-commands = { workspace = true }
+
+[lints]
+workspace = true

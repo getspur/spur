@@ -1,0 +1,21 @@
+[package]
+name = "spur-commands"
+description = "Neutral slash-command model, registry, and synthesis shared by every spur frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+spur-acp = { workspace = true }
+nucleo-matcher = { workspace = true }
+base64 = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
