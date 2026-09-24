@@ -556,6 +556,7 @@ impl App {
                         self.metadata_store.clear_last_active();
                         self.persist_metadata("cleared last_active");
                     }
+                    self.cancel_pending_permission();
                     self.session_detail = Some(view);
                 }
 
@@ -703,6 +704,7 @@ impl App {
                 //  - Shutdown: terminal; reset is moot.
                 if matches!(reason, BrainRetireReason::UserClear) {
                     tracing::info!("BrainRetired{{UserClear}}: defensive view reset");
+                    self.cancel_pending_permission();
                     if let Some(ref mut detail) = self.session_detail {
                         detail.reset_for_clear();
                     }

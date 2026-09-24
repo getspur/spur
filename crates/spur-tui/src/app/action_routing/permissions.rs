@@ -46,12 +46,23 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // A zero countdown renders the untimed hint for an unbounded wait.
+        let countdown = PENDING_PERMISSION_DEADLINE
+            .map_or(0, |limit| u8::try_from(limit.as_secs()).unwrap_or(u8::MAX));
         if let Some(ref mut detail) = self.session_detail {
-            detail.push_permission_with_details(&title, &details, 30, option_count);
+            detail.push_permission_with_details(&title, &details, countdown, option_count);
         }
 
         let deadline = PENDING_PERMISSION_DEADLINE.map(|limit| std::time::Instant::now() + limit);
         self.pending_permission = Some((request, deadline));
+        self.dirty = true;
+    }
+
+    /// Revoke the reply before its conversation view is replaced or cleared.
+    pub(in crate::app) fn cancel_pending_permission(&mut self) {
+        // Dropping the sender makes the ACP handler cancel without selecting an option.
+        drop(self.pending_permission.take());
+        self.clear_pending_permission_trace();
         self.dirty = true;
     }
 

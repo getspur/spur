@@ -135,6 +135,7 @@ impl App {
                 };
 
                 if send_ok {
+                    self.cancel_pending_permission();
                     self.brain_status = BrainStatus::Idle;
                     if let Some(ref mut detail) = self.session_detail {
                         detail.reset_for_clear();
@@ -228,6 +229,7 @@ impl App {
                 {
                     view.restore_draft(&entry.draft);
                 }
+                self.cancel_pending_permission();
                 self.session_detail = Some(view);
                 self.navigate_to(ViewId::SessionDetail(spur_session_id));
                 if let Some(ref tx) = self.user_input_tx {
