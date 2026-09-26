@@ -1,4 +1,4 @@
-use spur_jev::client::{JevTransport, MockTransport};
+use spur_jev::client::{JevTransport as _, MockTransport};
 use spur_jev::wire::{
     Answer, JevRequest, JevResponse, Question, DEFAULT_MODEL, MAX_CHOICE_OPTIONS, MAX_SCORE_LEVELS,
 };
