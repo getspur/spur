@@ -1,0 +1,516 @@
+//! Brain-side MCP adapter for deterministic Jev pre-compilation.
+
+use std::{collections::BTreeMap, sync::Arc};
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use spur_mcp::{ErrorCode, McpError, ToolCallContext, ToolDefinition, ToolModule, ToolResponse};
+
+use crate::{
+    battery::generate_routing_battery,
+    client::{HttpJevTransport, JevError, JevTransport},
+    compile::compile_family,
+    gate::{AmbiguityReport, DecisionReview, Gate},
+    provenance::JevProvenance,
+    snapshot::CatalogSnapshot,
+    wire::{Answer, JevRequest, Question, DEFAULT_MODEL},
+};
+
+const INVALID_PARAMS_CODE: i32 = -32602;
+const METHOD_NOT_FOUND_CODE: i32 = -32601;
+const INTERNAL_ERROR_CODE: i32 = -32603;
+const TOOL_NAME: &str = "jev_compile";
+
+/// Brain-side adapter that exposes Jev as a pre-compiler, never as a solver.
+#[derive(Clone)]
+pub struct JevMcpModule {
+    snapshot: CatalogSnapshot,
+    transport: Option<Arc<dyn JevTransport>>,
+    unavailable_reason: Option<Arc<str>>,
+}
+
+impl JevMcpModule {
+    /// Creates a live module with an injected transport.
+    #[must_use]
+    pub fn new<T>(snapshot: CatalogSnapshot, transport: T) -> Self
+    where
+        T: JevTransport + 'static,
+    {
+        Self {
+            snapshot,
+            transport: Some(Arc::new(transport)),
+            unavailable_reason: None,
+        }
+    }
+
+    /// Creates a list-only module whose calls return a typed unavailable error.
+    #[must_use]
+    pub fn catalog_only(snapshot: CatalogSnapshot) -> Self {
+        Self {
+            snapshot,
+            transport: None,
+            unavailable_reason: Some(Arc::from("JEV_API_KEY is not set")),
+        }
+    }
+
+    /// Uses [`HttpJevTransport`] when `JEV_API_KEY` is present and falls back
+    /// to the catalog-only adapter otherwise.
+    #[must_use]
+    pub fn from_env(snapshot: CatalogSnapshot) -> Self {
+        match HttpJevTransport::from_env() {
+            Ok(transport) => Self::new(snapshot, transport),
+            Err(error) => Self {
+                snapshot,
+                transport: None,
+                unavailable_reason: Some(Arc::from(error.to_string())),
+            },
+        }
+    }
+
+    fn live_transport(&self) -> Result<&dyn JevTransport, McpError> {
+        self.transport.as_deref().ok_or_else(|| {
+            McpError::new(
+                ErrorCode(INTERNAL_ERROR_CODE),
+                self.unavailable_reason
+                    .as_deref()
+                    .unwrap_or("Jev transport is unavailable")
+                    .to_owned(),
+                Some(json!({
+                    "code": "solver_unavailable",
+                    "service": "jev",
+                    "required_env": "JEV_API_KEY"
+                })),
+            )
+        })
+    }
+
+    async fn compile(&self, input: JevCompileRequest) -> Result<JevCompileResult, McpError> {
+        if input.intent.trim().is_empty() {
+            return Err(invalid_params("`intent` must not be empty"));
+        }
+
+        let snapshot = filter_snapshot(&self.snapshot, input.family_hint.as_deref())?;
+        let questions = generate_routing_battery(
+            &input.intent,
+            &input.data,
+            &snapshot,
+            snapshot.language_version,
+        )
+        .map_err(|error| invalid_params(error.to_string()))?;
+        let request = JevRequest {
+            state: json!({
+                "intent": input.intent,
+                "data": input.data,
+                "family_hint": input.family_hint,
+            }),
+            model: DEFAULT_MODEL.to_owned(),
+            questions,
+        };
+
+        let response = self
+            .live_transport()?
+            .send(&request)
+            .await
+            .map_err(transport_error)?;
+        validate_response(&request.questions, &response.answers)?;
+
+        let review = DecisionReview::from_answers(&response.answers, &["data_complete"]);
+        let provenance = JevProvenance::from_response(&response, &review);
+        match review.gate {
+            Gate::Open => {
+                let compiled = compile_family(&response.answers, &snapshot, &request.state["data"])
+                    .map_err(|error| invalid_response(error.to_string()))?;
+                Ok(JevCompileResult {
+                    gate: GateStatus::Open,
+                    ambiguity: None,
+                    request: Some(compiled),
+                    provenance,
+                })
+            }
+            Gate::Blocked(ambiguity) => Ok(JevCompileResult {
+                gate: GateStatus::Blocked,
+                ambiguity: Some(ambiguity),
+                request: None,
+                provenance,
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolModule for JevMcpModule {
+    fn tools(&self) -> Vec<ToolDefinition> {
+        vec![tool_definition()]
+    }
+
+    async fn call(
+        &self,
+        ctx: ToolCallContext<'_>,
+        name: &str,
+        args: Value,
+    ) -> Result<ToolResponse, McpError> {
+        if name != TOOL_NAME {
+            return Err(McpError::new(
+                ErrorCode(METHOD_NOT_FOUND_CODE),
+                format!("Unknown tool: {name}"),
+                None,
+            ));
+        }
+        let input = serde_json::from_value(args)
+            .map_err(|error| invalid_params(format!("invalid `{TOOL_NAME}` request: {error}")))?;
+        let result = serde_json::to_value(self.compile(input).await?).map_err(|error| {
+            McpError::internal_error(
+                format!("could not serialize `{TOOL_NAME}` response: {error}"),
+                None,
+            )
+        })?;
+        Ok(ToolResponse::json_text(ctx.request_id_value(), result))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JevCompileRequest {
+    intent: String,
+    data: Value,
+    #[serde(default)]
+    family_hint: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GateStatus {
+    Open,
+    Blocked,
+}
+
+#[derive(Debug, Serialize)]
+struct JevCompileResult {
+    gate: GateStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ambiguity: Option<AmbiguityReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request: Option<Value>,
+    provenance: JevProvenance,
+}
+
+fn filter_snapshot(
+    snapshot: &CatalogSnapshot,
+    family_hint: Option<&str>,
+) -> Result<CatalogSnapshot, McpError> {
+    let Some(family_hint) = family_hint else {
+        return Ok(snapshot.clone());
+    };
+    if family_hint.trim().is_empty() {
+        return Err(invalid_params("`family_hint` must not be empty"));
+    }
+    let rules = snapshot
+        .rules
+        .iter()
+        .filter(|rule| rule.family == family_hint)
+        .cloned()
+        .collect::<Vec<_>>();
+    if rules.is_empty() {
+        return Err(invalid_params(format!(
+            "unknown or unavailable solver family `{family_hint}`"
+        )));
+    }
+    Ok(CatalogSnapshot {
+        language_version: snapshot.language_version,
+        rules,
+    })
+}
+
+fn validate_response(
+    questions: &BTreeMap<String, Question>,
+    answers: &BTreeMap<String, Answer>,
+) -> Result<(), McpError> {
+    if answers.keys().ne(questions.keys()) {
+        return Err(invalid_response(
+            "answer identifiers do not exactly match the deterministic battery",
+        ));
+    }
+    for (name, question) in questions {
+        let answer = &answers[name];
+        let valid = match (question, answer) {
+            (Question::Noul { .. }, Answer::Noul { .. })
+            | (Question::Score { .. }, Answer::Score { .. }) => true,
+            (
+                Question::Choice { criteria, .. },
+                Answer::Choice {
+                    choice,
+                    probabilities,
+                    ..
+                },
+            ) => {
+                criteria.contains_key(choice)
+                    && probabilities.keys().all(|key| criteria.contains_key(key))
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(invalid_response(format!(
+                "answer `{name}` does not match its question contract"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: TOOL_NAME.to_owned(),
+        description: "Pre-compile natural-language intent and structured data into a confidence-gated solver request using the deterministic Jev battery. This tool never invokes Z3. Consume an open-gate request ONLY through solve_rule_spec and solve_rules for family requests, or solve_constraint_check and solve_constraints for generic requests; never execute or trust it directly."
+            .to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Natural-language constraint intent to route."
+                },
+                "data": {
+                    "description": "Structured scene or facts used to compile the solver request."
+                },
+                "family_hint": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional exact solver-family hint used only to narrow routing candidates."
+                }
+            },
+            "required": ["intent", "data"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn invalid_params(message: impl Into<String>) -> McpError {
+    McpError::new(ErrorCode(INVALID_PARAMS_CODE), message.into(), None)
+}
+
+fn invalid_response(message: impl Into<String>) -> McpError {
+    McpError::new(
+        ErrorCode(INTERNAL_ERROR_CODE),
+        message.into(),
+        Some(json!({"code": "invalid_jev_response"})),
+    )
+}
+
+fn transport_error(error: JevError) -> McpError {
+    let code = if matches!(error, JevError::MissingApiKey) {
+        "solver_unavailable"
+    } else {
+        "jev_transport"
+    };
+    McpError::new(
+        ErrorCode(INTERNAL_ERROR_CODE),
+        error.to_string(),
+        Some(json!({"code": code, "service": "jev"})),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, ffi::OsString, process::Command, sync::Arc};
+
+    use serde_json::{json, Value};
+    use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext, ToolRegistry};
+    use spur_solver::{mcp::SolverMcpModule, service::SolverService};
+
+    use super::JevMcpModule;
+    use crate::{
+        client::MockTransport,
+        snapshot::{CatalogSnapshot, RuleCard},
+        wire::{Answer, JevResponse, Usage},
+    };
+
+    fn context() -> ToolCallContext<'static> {
+        ToolCallContext::new(ServerKind::Brain, ToolAuthority::Brain, None, None)
+    }
+
+    fn result_json(response: &spur_mcp::JsonRpcResponse) -> Value {
+        assert!(
+            response.error.is_none(),
+            "unexpected MCP error: {:?}",
+            response.error
+        );
+        let text = response
+            .result
+            .as_ref()
+            .and_then(|result| result["content"][0]["text"].as_str())
+            .expect("MCP JSON text result");
+        serde_json::from_str(text).expect("parse MCP JSON text")
+    }
+
+    fn z3_available() -> bool {
+        let binary = std::env::var_os("SPUR_Z3_BIN").unwrap_or_else(|| OsString::from("z3"));
+        Command::new(binary)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn snapshot() -> CatalogSnapshot {
+        CatalogSnapshot {
+            language_version: 1,
+            rules: vec![RuleCard {
+                rule_id: "layout.containment".to_owned(),
+                family: "design".to_owned(),
+                summary: "Keep one axis-aligned rectangle inside another.".to_owned(),
+            }],
+        }
+    }
+
+    fn recorded_response() -> JevResponse {
+        JevResponse {
+            model: "jev-1.13.0".to_owned(),
+            answers: BTreeMap::from([
+                ("data_complete".to_owned(), Answer::Noul { noul: 0.95 }),
+                (
+                    "route_rule".to_owned(),
+                    Answer::Choice {
+                        choice: "layout.containment".to_owned(),
+                        probabilities: BTreeMap::from([("layout.containment".to_owned(), 1.0)]),
+                        confidence: 1.0,
+                    },
+                ),
+                (
+                    "solve_mode".to_owned(),
+                    Answer::Choice {
+                        choice: "verify".to_owned(),
+                        probabilities: BTreeMap::from([("verify".to_owned(), 1.0)]),
+                        confidence: 1.0,
+                    },
+                ),
+            ]),
+            usage: Usage {
+                input_tokens: 829,
+                output_tokens: 136,
+            },
+        }
+    }
+
+    fn recorded_data() -> Value {
+        json!({
+            "subjects": ["child", "parent"],
+            "scene": {
+                "viewport": {"width": 390, "height": 844},
+                "nodes": {
+                    "parent": {"rect": {"x": 0, "y": 0, "width": 100, "height": 100}},
+                    "child": {"rect": {"x": 76, "y": 0, "width": 24, "height": 24}}
+                }
+            },
+            "unknowns": []
+        })
+    }
+
+    fn generic_containment_preflight() -> Value {
+        json!({
+            "vars": [
+                {"type": "int_range", "name": "child_x", "min": 0, "max": 390},
+                {"type": "int_range", "name": "child_width", "min": 0, "max": 390},
+                {"type": "int_range", "name": "parent_width", "min": 0, "max": 390}
+            ],
+            "constraints": [
+                {"id": "recorded_child_x", "expr": {"kind": "op", "op": "eq", "args": [
+                    {"kind": "var", "name": "child_x"}, {"kind": "int", "value": 76}
+                ]}},
+                {"id": "recorded_child_width", "expr": {"kind": "op", "op": "eq", "args": [
+                    {"kind": "var", "name": "child_width"}, {"kind": "int", "value": 24}
+                ]}},
+                {"id": "recorded_parent_width", "expr": {"kind": "op", "op": "eq", "args": [
+                    {"kind": "var", "name": "parent_width"}, {"kind": "int", "value": 100}
+                ]}},
+                {"id": "contained_right_edge", "expr": {"kind": "op", "op": "le", "args": [
+                    {"kind": "op", "op": "add", "args": [
+                        {"kind": "var", "name": "child_x"},
+                        {"kind": "var", "name": "child_width"}
+                    ]},
+                    {"kind": "var", "name": "parent_width"}
+                ]}}
+            ],
+            "persist": false
+        })
+    }
+
+    #[tokio::test]
+    async fn recorded_containment_replays_from_jev_compile_through_solver_tools() {
+        if !z3_available() {
+            eprintln!("skipping Jev MCP containment replay: Z3 binary is unavailable");
+            return;
+        }
+
+        let registry = ToolRegistry::builder()
+            .with(JevMcpModule::new(
+                snapshot(),
+                MockTransport::new(recorded_response()),
+            ))
+            .expect("register Jev module")
+            .with(SolverMcpModule::new(Arc::new(SolverService::new())))
+            .expect("register solver module")
+            .build();
+
+        let compiled = result_json(
+            &registry
+                .call_json_tool(
+                    context(),
+                    "jev_compile",
+                    json!({
+                        "intent": "verify the child remains inside its parent",
+                        "data": recorded_data(),
+                        "family_hint": "design"
+                    }),
+                )
+                .await,
+        );
+        assert_eq!(compiled["gate"], "open");
+        assert_eq!(compiled["provenance"]["served_model_version"], "jev-1.13.0");
+        assert_eq!(compiled["request"]["family"], "design");
+        assert_eq!(
+            compiled["request"]["rules"][0]["rule_id"],
+            "layout.containment"
+        );
+
+        let checked = result_json(
+            &registry
+                .call_json_tool(
+                    context(),
+                    "solve_constraint_check",
+                    generic_containment_preflight(),
+                )
+                .await,
+        );
+        assert_eq!(checked["valid"], true);
+
+        let solved = result_json(
+            &registry
+                .call_json_tool(context(), "solve_rules", compiled["request"].clone())
+                .await,
+        );
+        assert_eq!(solved["status"], "sat");
+        assert_eq!(solved["outcome"], "pass");
+    }
+
+    #[tokio::test]
+    async fn catalog_only_module_returns_typed_unavailable_error() {
+        let registry = ToolRegistry::builder()
+            .with(JevMcpModule::catalog_only(snapshot()))
+            .expect("register Jev catalog module")
+            .build();
+        let response = registry
+            .call_json_tool(
+                context(),
+                "jev_compile",
+                json!({"intent": "check containment", "data": recorded_data()}),
+            )
+            .await;
+        let error = response.error.expect("catalog-only call must fail");
+        assert_eq!(error.code, i64::from(super::INTERNAL_ERROR_CODE));
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data["code"].as_str()),
+            Some("solver_unavailable")
+        );
+    }
+}

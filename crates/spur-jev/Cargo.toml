@@ -1,0 +1,23 @@
+[package]
+name = "spur-jev"
+description = "Typed Jev wire protocol and transports for SPUR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+spur-mcp.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+spur-solver.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

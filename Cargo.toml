@@ -4,6 +4,7 @@ members = [
     "crates/spur-acp",
     "crates/spur-blob-store",
     "crates/spur-mcp",
+    "crates/spur-jev",
     "crates/spur-solver",
     "crates/spur-core",
     "crates/spur-pm",
@@ -138,6 +139,7 @@ spur-acp = { path = "crates/spur-acp" }
 spur-commands = { path = "crates/spur-utilities/commands" }
 spur-blob-store = { path = "crates/spur-blob-store" }
 spur-mcp = { path = "crates/spur-mcp" }
+spur-jev = { path = "crates/spur-jev" }
 spur-solver = { path = "crates/spur-solver" }
 spur-core = { path = "crates/spur-core", default-features = false }
 spur-pm = { path = "crates/spur-pm" }
