@@ -115,15 +115,19 @@ pub fn generate_routing_battery(
     ]))
 }
 
+/// Recursively sorts JSON object keys before rebuilding each object.
+///
+/// Determinism must not depend on the `serde_json` feature graph.
 fn canonicalize(value: &Value) -> Value {
     match value {
         Value::Array(values) => Value::Array(values.iter().map(canonicalize).collect()),
-        Value::Object(values) => Value::Object(
-            values
+        Value::Object(values) => {
+            let sorted = values
                 .iter()
                 .map(|(key, value)| (key.clone(), canonicalize(value)))
-                .collect::<Map<_, _>>(),
-        ),
+                .collect::<BTreeMap<String, Value>>();
+            Value::Object(sorted.into_iter().collect::<Map<_, _>>())
+        }
         scalar => scalar.clone(),
     }
 }

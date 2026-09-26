@@ -1,0 +1,442 @@
+{
+  "cases": [
+    {
+      "case": "B1_non_overlap_valid",
+      "kind": "family",
+      "family": "design",
+      "answers": {
+        "route_rule": {"choice": "layout.non_overlap", "confidence": 1.0},
+        "solve_mode": {"choice": "verify", "confidence": 1.0},
+        "data_complete": {"noul": 0.9}
+      },
+      "gating_nouls": ["data_complete"],
+      "data": {
+        "subjects": ["first", "second"],
+        "parameters": {"minimum_gap": 24},
+        "scene": {
+          "viewport": {"width": 390, "height": 844},
+          "nodes": {
+            "first": {"rect": {"x": 0, "y": 0, "width": 24, "height": 24}},
+            "second": {"rect": {"x": 48, "y": 0, "width": 24, "height": 24}}
+          }
+        },
+        "unknowns": []
+      },
+      "expected": {"status": "sat", "outcome": "pass"}
+    },
+    {
+      "case": "B2_non_overlap_violation",
+      "kind": "family",
+      "family": "design",
+      "answers": {
+        "route_rule": {"choice": "layout.non_overlap", "confidence": 1.0},
+        "solve_mode": {"choice": "verify", "confidence": 0.99},
+        "data_complete": {"noul": 0.88}
+      },
+      "gating_nouls": ["data_complete"],
+      "data": {
+        "subjects": ["first", "second"],
+        "parameters": {"minimum_gap": 24},
+        "scene": {
+          "viewport": {"width": 390, "height": 844},
+          "nodes": {
+            "first": {"rect": {"x": 0, "y": 0, "width": 24, "height": 24}},
+            "second": {"rect": {"x": 47, "y": 0, "width": 24, "height": 24}}
+          }
+        },
+        "unknowns": []
+      },
+      "expected": {
+        "status": "unsat",
+        "outcome": "fail",
+        "diagnostic": "design.overlap",
+        "unsat_core": ["design_rule_0_layout_non_overlap"]
+      }
+    },
+    {
+      "case": "B3_cumulative_capacity_valid",
+      "kind": "family",
+      "family": "scheduling",
+      "answers": {
+        "route_rule": {"choice": "scheduling.cumulative_capacity", "confidence": 0.99},
+        "solve_mode": {"choice": "verify", "confidence": 0.99},
+        "data_complete": {"noul": 0.91}
+      },
+      "gating_nouls": ["data_complete"],
+      "data": {
+        "subjects": ["m1"],
+        "parameters": {},
+        "facts": {
+          "horizon": 4,
+          "jobs": {
+            "a": {
+              "release": 0,
+              "deadline": 4,
+              "durations": {"m1": 2},
+              "eligible_machines": ["m1"],
+              "demands": {"cpu": 1},
+              "assignment": {"machine": "m1", "start": 0}
+            },
+            "b": {
+              "release": 0,
+              "deadline": 4,
+              "durations": {"m1": 2},
+              "eligible_machines": ["m1"],
+              "demands": {"cpu": 1},
+              "assignment": {"machine": "m1", "start": 2}
+            }
+          },
+          "machines": {"m1": {"capacities": {"cpu": 1}}},
+          "precedence": []
+        },
+        "unknowns": []
+      },
+      "expected": {"status": "sat", "outcome": "pass"}
+    },
+    {
+      "case": "B4_quota_capacity_valid",
+      "kind": "family",
+      "family": "resource",
+      "answers": {
+        "route_rule": {"choice": "resource.quota_capacity", "confidence": 1.0},
+        "solve_mode": {"choice": "verify", "confidence": 1.0},
+        "data_complete": {"noul": 0.95}
+      },
+      "gating_nouls": ["data_complete"],
+      "data": {
+        "subjects": ["team", "api"],
+        "parameters": {"resources": ["cpu"]},
+        "facts": {
+          "workloads": {
+            "api": {
+              "replicas": 3,
+              "requests": {"cpu": 500},
+              "limits": {"cpu": 500},
+              "domain_counts": {}
+            }
+          },
+          "pools": {},
+          "quotas": {"team": {"resources": {"cpu": 1500}}}
+        },
+        "unknowns": []
+      },
+      "expected": {"status": "sat", "outcome": "pass"}
+    },
+    {
+      "case": "B5_unique_valid",
+      "kind": "family",
+      "family": "data_integrity",
+      "answers": {
+        "route_rule": {"choice": "data_integrity.unique", "confidence": 1.0},
+        "solve_mode": {"choice": "verify", "confidence": 1.0},
+        "data_complete": {"noul": 0.83}
+      },
+      "gating_nouls": ["data_complete"],
+      "data": {
+        "subjects": ["record_key"],
+        "parameters": {},
+        "facts": {
+          "relations": {
+            "records": {
+              "fields": {"key": {"kind": "integer", "minimum": 0, "maximum": 1000}},
+              "rows": {
+                "first": {"active": true, "cells": {"key": {"present": true, "value": 1}}},
+                "second": {"active": true, "cells": {"key": {"present": true, "value": 2}}},
+                "null_key": {"active": true, "cells": {"key": {"present": false, "value": null}}}
+              }
+            }
+          },
+          "unique_constraints": {
+            "record_key": {"relation": "records", "fields": ["key"]}
+          },
+          "foreign_keys": {},
+          "cardinality_constraints": {},
+          "value_ranges": {},
+          "conditional_requirements": {},
+          "aggregate_balances": {},
+          "consistency_relations": {},
+          "temporal_constraints": {}
+        },
+        "unknowns": []
+      },
+      "expected": {"status": "sat", "outcome": "pass"}
+    },
+    {
+      "case": "B6_transition_allowed_valid",
+      "kind": "family",
+      "family": "workflow",
+      "answers": {
+        "route_rule": {"choice": "workflow.transition_allowed", "confidence": 1.0},
+        "solve_mode": {"choice": "verify", "confidence": 1.0},
+        "data_complete": {"noul": 0.94}
+      },
+      "gating_nouls": ["data_complete"],
+      "data": {
+        "subjects": ["approval"],
+        "parameters": {},
+        "facts": {
+          "horizon": 2,
+          "state_domain": ["Draft", "Review", "Approved", "Rejected"],
+          "event_domain": ["submit", "approve", "reject"],
+          "initial_states": ["Draft"],
+          "safe_states": ["Draft", "Review", "Approved"],
+          "target_states": ["Approved"],
+          "enabled_transitions": [
+            {"step": 0, "from": "Draft", "event": "submit", "to": "Review"},
+            {"step": 1, "from": "Review", "event": "approve", "to": "Approved"},
+            {"step": 1, "from": "Review", "event": "reject", "to": "Rejected"}
+          ],
+          "traces": {
+            "approval": {
+              "states": ["Draft", "Review", "Approved"],
+              "events": ["submit", "approve"]
+            }
+          }
+        },
+        "unknowns": []
+      },
+      "expected": {"status": "sat", "outcome": "pass"}
+    },
+    {
+      "case": "C1_assignment_synthesize",
+      "kind": "family",
+      "family": "scheduling",
+      "answers": {
+        "route_rule": {"choice": "scheduling.assignment_exactly_once", "confidence": 1.0},
+        "solve_mode": {"choice": "synthesize", "confidence": 0.99},
+        "data_complete": {"noul": 0.78}
+      },
+      "gating_nouls": ["data_complete"],
+      "data": {
+        "subjects": ["a"],
+        "parameters": {},
+        "facts": {
+          "horizon": 4,
+          "jobs": {
+            "a": {
+              "release": 0,
+              "deadline": 4,
+              "durations": {"m1": 2, "m2": 2},
+              "eligible_machines": ["m1", "m2"],
+              "demands": {"cpu": 1},
+              "assignment": null
+            }
+          },
+          "machines": {
+            "m1": {"capacities": {"cpu": 1}},
+            "m2": {"capacities": {"cpu": 1}}
+          },
+          "precedence": []
+        },
+        "unknowns": [{"kind": "assignment", "job": "a"}]
+      },
+      "expected": {"status": "sat", "outcome": "solution"}
+    },
+    {
+      "case": "C2_assignment_verify",
+      "kind": "family",
+      "family": "scheduling",
+      "answers": {
+        "route_rule": {"choice": "scheduling.assignment_exactly_once", "confidence": 1.0},
+        "solve_mode": {"choice": "verify", "confidence": 1.0},
+        "data_complete": {"noul": 0.94}
+      },
+      "gating_nouls": ["data_complete"],
+      "data": {
+        "subjects": ["a"],
+        "parameters": {},
+        "facts": {
+          "horizon": 4,
+          "jobs": {
+            "a": {
+              "release": 0,
+              "deadline": 4,
+              "durations": {"m1": 2, "m2": 2},
+              "eligible_machines": ["m1", "m2"],
+              "demands": {"cpu": 1},
+              "assignment": {"machine": "m1", "start": 0}
+            }
+          },
+          "machines": {
+            "m1": {"capacities": {"cpu": 1}},
+            "m2": {"capacities": {"cpu": 1}}
+          },
+          "precedence": []
+        },
+        "unknowns": []
+      },
+      "expected": {"status": "sat", "outcome": "pass"}
+    },
+    {
+      "case": "D1_enum_label",
+      "kind": "bprime",
+      "answers": {
+        "x_kind": {"choice": "int_range", "confidence": 1.0},
+        "y_kind": {"choice": "enum", "confidence": 1.0},
+        "required_label": {"choice": "large", "confidence": 1.0}
+      },
+      "template": {
+        "vars": [
+          {"type": {"$choice": "x_kind"}, "name": "x", "min": 0, "max": 10},
+          {"type": {"$choice": "y_kind"}, "name": "tier", "values": ["small", "large"]}
+        ],
+        "constraints": [
+          {
+            "id": "doubled_x_floor",
+            "expr": {
+              "kind": "op",
+              "op": "ge",
+              "args": [
+                {
+                  "kind": "op",
+                  "op": "mul",
+                  "args": [
+                    {"kind": "int", "value": 2},
+                    {"kind": "var", "name": "x"}
+                  ]
+                },
+                {"kind": "int", "value": 8}
+              ]
+            }
+          },
+          {
+            "id": "tier_required",
+            "expr": {
+              "kind": "enum_label",
+              "var": "tier",
+              "label": {"$choice": "required_label"}
+            }
+          }
+        ]
+      },
+      "expected": {"status": "sat", "model": {"x": 4, "tier": "large"}}
+    },
+    {
+      "case": "D2_hard_soft_objective",
+      "kind": "bprime",
+      "answers": {
+        "floor_is_hard": {"noul": 0.99},
+        "cap_is_soft": {"noul": 0.97},
+        "objective": {"choice": "minimize", "confidence": 1.0}
+      },
+      "gating_nouls": ["floor_is_hard", "cap_is_soft"],
+      "template": {
+        "vars": [{"type": "int_range", "name": "x", "min": 0, "max": 10}],
+        "constraints": [
+          {
+            "id": "floor",
+            "soft": {"$noul_below": {"question": "floor_is_hard", "threshold": 0.5}},
+            "expr": {
+              "kind": "op",
+              "op": "ge",
+              "args": [
+                {
+                  "kind": "op",
+                  "op": "mul",
+                  "args": [
+                    {"kind": "int", "value": 3},
+                    {"kind": "var", "name": "x"}
+                  ]
+                },
+                {"kind": "int", "value": 12}
+              ]
+            }
+          },
+          {
+            "id": "cap",
+            "soft": {"$noul_at_least": {"question": "cap_is_soft", "threshold": 0.5}},
+            "weight": 1,
+            "expr": {
+              "kind": "op",
+              "op": "le",
+              "args": [
+                {"kind": "var", "name": "x"},
+                {"kind": "int", "value": 4}
+              ]
+            }
+          }
+        ],
+        "objectives": [
+          {"op": {"$choice": "objective"}, "expr": {"kind": "var", "name": "x"}}
+        ]
+      },
+      "expected": {
+        "status": "sat",
+        "model": {"x": 4},
+        "termination": "complete",
+        "objective_value": 4,
+        "objective_bound_kind": "finite",
+        "objective_bound_exact": "4",
+        "soft_satisfied": [true]
+      }
+    },
+    {
+      "case": "D3_multi_constraint",
+      "kind": "bprime",
+      "answers": {
+        "sum_is_hard": {"noul": 0.98},
+        "distinct_is_hard": {"noul": 0.97},
+        "pref_is_soft": {"noul": 0.89},
+        "pref_weight": {"choice": "2", "confidence": 1.0}
+      },
+      "gating_nouls": ["sum_is_hard", "distinct_is_hard", "pref_is_soft"],
+      "template": {
+        "vars": [
+          {"type": "int_range", "name": "a", "min": 0, "max": 20},
+          {"type": "int_range", "name": "b", "min": 0, "max": 20}
+        ],
+        "constraints": [
+          {
+            "id": "sum_twenty",
+            "soft": {"$noul_below": {"question": "sum_is_hard", "threshold": 0.5}},
+            "expr": {
+              "kind": "op",
+              "op": "eq",
+              "args": [
+                {
+                  "kind": "op",
+                  "op": "add",
+                  "args": [
+                    {"kind": "var", "name": "a"},
+                    {"kind": "var", "name": "b"}
+                  ]
+                },
+                {"kind": "int", "value": 20}
+              ]
+            }
+          },
+          {
+            "id": "distinct",
+            "soft": {"$noul_below": {"question": "distinct_is_hard", "threshold": 0.5}},
+            "expr": {
+              "kind": "op",
+              "op": "ne",
+              "args": [
+                {"kind": "var", "name": "a"},
+                {"kind": "var", "name": "b"}
+              ]
+            }
+          },
+          {
+            "id": "a_high",
+            "soft": {"$noul_at_least": {"question": "pref_is_soft", "threshold": 0.5}},
+            "weight": {"$choice_int": "pref_weight"},
+            "expr": {
+              "kind": "op",
+              "op": "ge",
+              "args": [
+                {"kind": "var", "name": "a"},
+                {"kind": "int", "value": 15}
+              ]
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": "sat",
+        "model": {"a": 15, "b": 5},
+        "soft_satisfied": [true]
+      }
+    }
+  ]
+}
