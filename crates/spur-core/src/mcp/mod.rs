@@ -128,6 +128,33 @@ fn brain_tool_registry_with_local_projects_and_repo_root(
             shared_solver_service(repo_root),
         ))?
         .with_alias("code_search", "code_symbol_search")?;
+    if std::env::var("SPUR_JEV_ENABLED").as_deref() == Ok("1") {
+        let catalog = spur_solver::rules::manifest_registry();
+        let executable_rule_ids = spur_solver::rules::manifest_executable_rule_ids();
+        let rules = catalog
+            .rules()
+            .iter()
+            .filter(|rule| executable_rule_ids.iter().any(|id| id == rule.id()))
+            .map(|rule| {
+                let serialized = serde_json::to_value(rule).unwrap_or_default();
+                let summary = serialized
+                    .get("summary")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| rule.primitive())
+                    .to_owned();
+                spur_jev::snapshot::RuleCard {
+                    rule_id: rule.id().to_owned(),
+                    family: rule.family().to_owned(),
+                    summary,
+                }
+            })
+            .collect();
+        let snapshot = spur_jev::snapshot::CatalogSnapshot {
+            language_version: catalog.schema_version(),
+            rules,
+        };
+        builder = builder.with(spur_jev::mcp::JevMcpModule::from_env(snapshot))?;
+    }
     if let Some(context_service_client) = context_service_client(context_service_config) {
         builder = builder.with(context_service_client)?;
     }

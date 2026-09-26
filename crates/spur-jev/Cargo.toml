@@ -12,6 +12,7 @@ async-trait.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+spur-mcp.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
