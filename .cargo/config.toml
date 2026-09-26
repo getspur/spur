@@ -2,7 +2,7 @@
 # Force frame pointers for accurate stack unwinding during profiling.
 # Required by perf (Linux) and greatly improves DTrace (macOS) output quality.
 rustflags = ["-C", "force-frame-pointers=yes"]
-target-dir = "/Volumes/Project/build/spur/target"
+#target-dir = "/Volumes/Project/build/spur/target"
 # scripts/spur-cargo injects the sccache worktree wrapper for local Unix-like
 # builds. Do not set rustc-wrapper here: cargo-dist and Windows CI inherit this
 # file and cannot execute the shell wrapper.
