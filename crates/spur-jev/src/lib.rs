@@ -2,5 +2,8 @@
 
 pub mod battery;
 pub mod client;
+pub mod compile;
+pub mod gate;
+pub mod provenance;
 pub mod snapshot;
 pub mod wire;
