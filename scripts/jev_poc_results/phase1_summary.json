@@ -1,0 +1,368 @@
+[
+  {
+    "case": "case1_design_containment_valid",
+    "expect": {
+      "rule": "layout.containment",
+      "mode": "verify",
+      "outcome": "pass"
+    },
+    "model": "jev-1.13.0",
+    "latency_ms": 452.5,
+    "usage": {
+      "input_tokens": 829,
+      "output_tokens": 136
+    },
+    "routed": {
+      "choice": "layout.containment",
+      "confidence": 1.0,
+      "probabilities": {
+        "data_integrity.unique": 0.0,
+        "scheduling.precedence_finish_start": 0.0,
+        "layout.containment": 1.0,
+        "resource.quota_capacity": 0.0,
+        "layout.non_overlap": 0.0,
+        "scheduling.cumulative_capacity": 0.0
+      }
+    },
+    "mode": "verify",
+    "mode_conf": 1.0,
+    "data_complete_noul": 0.95,
+    "weakest_decision": 0.95,
+    "gate": "open",
+    "compiled": {
+      "family": "design",
+      "mode": "verify",
+      "rules": [
+        {
+          "rule_id": "layout.containment",
+          "subjects": [
+            "child",
+            "parent"
+          ]
+        }
+      ],
+      "scene": {
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "nodes": {
+          "parent": {
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 100,
+              "height": 100
+            }
+          },
+          "child": {
+            "rect": {
+              "x": 76,
+              "y": 0,
+              "width": 24,
+              "height": 24
+            }
+          }
+        }
+      },
+      "unknowns": []
+    },
+    "compiled_path": "/tmp/jev_poc/case1_design_containment_valid.json"
+  },
+  {
+    "case": "case2_scheduling_precedence_valid",
+    "expect": {
+      "rule": "scheduling.precedence_finish_start",
+      "mode": "verify",
+      "outcome": "pass",
+      "predecessor": "a"
+    },
+    "model": "jev-1.13.0",
+    "latency_ms": 455.5,
+    "usage": {
+      "input_tokens": 1025,
+      "output_tokens": 169
+    },
+    "routed": {
+      "choice": "scheduling.precedence_finish_start",
+      "confidence": 0.98,
+      "probabilities": {
+        "scheduling.precedence_finish_start": 0.99,
+        "resource.quota_capacity": 0.0,
+        "scheduling.cumulative_capacity": 0.0,
+        "layout.non_overlap": 0.01,
+        "data_integrity.unique": 0.0,
+        "layout.containment": 0.0
+      }
+    },
+    "mode": "verify",
+    "mode_conf": 0.97,
+    "data_complete_noul": 0.74,
+    "predecessor": {
+      "choice": "a",
+      "confidence": 0.05,
+      "probabilities": {
+        "b": 0.47,
+        "a": 0.53
+      }
+    },
+    "weakest_decision": 0.05,
+    "gate": "blocked",
+    "compiled": {
+      "family": "scheduling",
+      "mode": "verify",
+      "rules": [
+        {
+          "rule_id": "scheduling.precedence_finish_start",
+          "subjects": [
+            "a",
+            "b"
+          ]
+        }
+      ],
+      "facts": {
+        "horizon": 5,
+        "jobs": {
+          "a": {
+            "release": 0,
+            "deadline": 5,
+            "durations": {
+              "m1": 2
+            },
+            "eligible_machines": [
+              "m1"
+            ],
+            "demands": {
+              "cpu": 1
+            },
+            "assignment": {
+              "machine": "m1",
+              "start": 0
+            }
+          },
+          "b": {
+            "release": 0,
+            "deadline": 5,
+            "durations": {
+              "m2": 2
+            },
+            "eligible_machines": [
+              "m2"
+            ],
+            "demands": {
+              "cpu": 1
+            },
+            "assignment": {
+              "machine": "m2",
+              "start": 2
+            }
+          }
+        },
+        "machines": {
+          "m1": {
+            "capacities": {
+              "cpu": 1
+            }
+          },
+          "m2": {
+            "capacities": {
+              "cpu": 1
+            }
+          }
+        },
+        "precedence": [
+          {
+            "before": "a",
+            "after": "b",
+            "minimum_lag": 0
+          }
+        ]
+      },
+      "unknowns": []
+    },
+    "compiled_path": "/tmp/jev_poc/case2_scheduling_precedence_valid.json"
+  },
+  {
+    "case": "case3_design_containment_overflow",
+    "expect": {
+      "rule": "layout.containment",
+      "mode": "verify",
+      "outcome": "fail",
+      "diagnostic": "design.outside_parent"
+    },
+    "model": "jev-1.13.0",
+    "latency_ms": 447.9,
+    "usage": {
+      "input_tokens": 829,
+      "output_tokens": 136
+    },
+    "routed": {
+      "choice": "layout.containment",
+      "confidence": 1.0,
+      "probabilities": {
+        "layout.containment": 1.0,
+        "layout.non_overlap": 0.0,
+        "data_integrity.unique": 0.0,
+        "resource.quota_capacity": 0.0,
+        "scheduling.cumulative_capacity": 0.0,
+        "scheduling.precedence_finish_start": 0.0
+      }
+    },
+    "mode": "verify",
+    "mode_conf": 1.0,
+    "data_complete_noul": 0.95,
+    "weakest_decision": 0.95,
+    "gate": "open",
+    "compiled": {
+      "family": "design",
+      "mode": "verify",
+      "rules": [
+        {
+          "rule_id": "layout.containment",
+          "subjects": [
+            "child",
+            "parent"
+          ]
+        }
+      ],
+      "scene": {
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "nodes": {
+          "parent": {
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 100,
+              "height": 100
+            }
+          },
+          "child": {
+            "rect": {
+              "x": 77,
+              "y": 0,
+              "width": 24,
+              "height": 24
+            }
+          }
+        }
+      },
+      "unknowns": []
+    },
+    "compiled_path": "/tmp/jev_poc/case3_design_containment_overflow.json"
+  },
+  {
+    "case": "case4_generic_bprime",
+    "expect": {
+      "var_kind": "int_range",
+      "op": "ge",
+      "hard": true,
+      "status": "sat"
+    },
+    "model": "jev-1.13.0",
+    "latency_ms": 446.3,
+    "usage": {
+      "input_tokens": 670,
+      "output_tokens": 140
+    },
+    "var_kind": "int_range",
+    "var_kind_conf": 1.0,
+    "op": "ge",
+    "op_conf": 1.0,
+    "hard_noul": 0.98,
+    "weakest_decision": 0.98,
+    "gate": "open",
+    "compiled": {
+      "vars": [
+        {
+          "type": "int_range",
+          "name": "x",
+          "min": 0,
+          "max": 10
+        }
+      ],
+      "constraints": [
+        {
+          "id": "throughput_floor",
+          "expr": {
+            "kind": "op",
+            "op": "ge",
+            "args": [
+              {
+                "kind": "op",
+                "op": "mul",
+                "args": [
+                  {
+                    "kind": "int",
+                    "value": 3
+                  },
+                  {
+                    "kind": "var",
+                    "name": "x"
+                  }
+                ]
+              },
+              {
+                "kind": "int",
+                "value": 12
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "compiled_path": "/tmp/jev_poc/case4_generic_bprime.json"
+  },
+  {
+    "case": "case5_ambiguity_calibration",
+    "expect": {
+      "gate": "blocked"
+    },
+    "model": "jev-1.13.0",
+    "latency_ms": 494.4,
+    "usage": {
+      "input_tokens": 675,
+      "output_tokens": 135
+    },
+    "routed": {
+      "choice": "layout.non_overlap",
+      "confidence": 0.98,
+      "probabilities": {
+        "data_integrity.unique": 0.0,
+        "scheduling.precedence_finish_start": 0.0,
+        "resource.quota_capacity": 0.0,
+        "scheduling.cumulative_capacity": 0.0,
+        "layout.containment": 0.02,
+        "layout.non_overlap": 0.98
+      }
+    },
+    "mode": "verify",
+    "mode_conf": 0.35,
+    "data_complete_noul": 0.32,
+    "weakest_decision": 0.32,
+    "gate": "blocked",
+    "compiled": {
+      "family": "design",
+      "mode": "verify",
+      "rules": [
+        {
+          "rule_id": "layout.non_overlap",
+          "subjects": [
+            "child",
+            "parent"
+          ]
+        }
+      ],
+      "scene": {
+        "viewport": {
+          "width": 390,
+          "height": 844
+        }
+      },
+      "unknowns": []
+    },
+    "compiled_path": "/tmp/jev_poc/case5_ambiguity_calibration.json"
+  }
+]

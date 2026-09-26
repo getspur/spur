@@ -1,0 +1,948 @@
+{
+  "suites": {
+    "BC": [
+      {
+        "case": "B1_non_overlap_valid",
+        "expect": {
+          "rule": "layout.non_overlap",
+          "mode": "verify",
+          "outcome": "pass"
+        },
+        "routed": "layout.non_overlap",
+        "route_conf": 1.0,
+        "mode": "verify",
+        "mode_conf": 1.0,
+        "data_complete": 0.9,
+        "weakest": 0.9,
+        "gate": "open",
+        "latency_ms": 490.2,
+        "tokens": 877,
+        "compiled": {
+          "family": "design",
+          "mode": "verify",
+          "rules": [
+            {
+              "rule_id": "layout.non_overlap",
+              "subjects": [
+                "first",
+                "second"
+              ],
+              "parameters": {
+                "minimum_gap": 24
+              }
+            }
+          ],
+          "scene": {
+            "viewport": {
+              "width": 390,
+              "height": 844
+            },
+            "nodes": {
+              "first": {
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "width": 24,
+                  "height": 24
+                }
+              },
+              "second": {
+                "rect": {
+                  "x": 48,
+                  "y": 0,
+                  "width": 24,
+                  "height": 24
+                }
+              }
+            }
+          },
+          "unknowns": []
+        }
+      },
+      {
+        "case": "B2_non_overlap_violation",
+        "expect": {
+          "rule": "layout.non_overlap",
+          "mode": "verify",
+          "outcome": "fail",
+          "diagnostic": "design.overlap"
+        },
+        "routed": "layout.non_overlap",
+        "route_conf": 1.0,
+        "mode": "verify",
+        "mode_conf": 0.99,
+        "data_complete": 0.88,
+        "weakest": 0.88,
+        "gate": "open",
+        "latency_ms": 487.1,
+        "tokens": 877,
+        "compiled": {
+          "family": "design",
+          "mode": "verify",
+          "rules": [
+            {
+              "rule_id": "layout.non_overlap",
+              "subjects": [
+                "first",
+                "second"
+              ],
+              "parameters": {
+                "minimum_gap": 24
+              }
+            }
+          ],
+          "scene": {
+            "viewport": {
+              "width": 390,
+              "height": 844
+            },
+            "nodes": {
+              "first": {
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "width": 24,
+                  "height": 24
+                }
+              },
+              "second": {
+                "rect": {
+                  "x": 47,
+                  "y": 0,
+                  "width": 24,
+                  "height": 24
+                }
+              }
+            }
+          },
+          "unknowns": []
+        }
+      },
+      {
+        "case": "B3_cumulative_capacity_valid",
+        "expect": {
+          "rule": "scheduling.cumulative_capacity",
+          "mode": "verify",
+          "outcome": "pass"
+        },
+        "routed": "scheduling.cumulative_capacity",
+        "route_conf": 0.99,
+        "mode": "verify",
+        "mode_conf": 0.99,
+        "data_complete": 0.91,
+        "weakest": 0.91,
+        "gate": "open",
+        "latency_ms": 467.3,
+        "tokens": 965,
+        "compiled": {
+          "family": "scheduling",
+          "mode": "verify",
+          "rules": [
+            {
+              "rule_id": "scheduling.cumulative_capacity",
+              "subjects": [
+                "m1"
+              ],
+              "parameters": {}
+            }
+          ],
+          "facts": {
+            "horizon": 4,
+            "jobs": {
+              "a": {
+                "release": 0,
+                "deadline": 4,
+                "durations": {
+                  "m1": 2
+                },
+                "eligible_machines": [
+                  "m1"
+                ],
+                "demands": {
+                  "cpu": 1
+                },
+                "assignment": {
+                  "machine": "m1",
+                  "start": 0
+                }
+              },
+              "b": {
+                "release": 0,
+                "deadline": 4,
+                "durations": {
+                  "m1": 2
+                },
+                "eligible_machines": [
+                  "m1"
+                ],
+                "demands": {
+                  "cpu": 1
+                },
+                "assignment": {
+                  "machine": "m1",
+                  "start": 2
+                }
+              }
+            },
+            "machines": {
+              "m1": {
+                "capacities": {
+                  "cpu": 1
+                }
+              }
+            },
+            "precedence": []
+          },
+          "unknowns": []
+        }
+      },
+      {
+        "case": "B4_quota_capacity_valid",
+        "expect": {
+          "rule": "resource.quota_capacity",
+          "mode": "verify",
+          "outcome": "pass",
+          "dimension": "cpu"
+        },
+        "routed": "resource.quota_capacity",
+        "route_conf": 1.0,
+        "mode": "verify",
+        "mode_conf": 1.0,
+        "data_complete": 0.95,
+        "weakest": 0.95,
+        "gate": "open",
+        "latency_ms": 450.8,
+        "tokens": 913,
+        "dimension": "cpu",
+        "compiled": {
+          "family": "resource",
+          "mode": "verify",
+          "rules": [
+            {
+              "rule_id": "resource.quota_capacity",
+              "subjects": [
+                "team",
+                "api"
+              ],
+              "parameters": {
+                "resources": [
+                  "cpu"
+                ]
+              }
+            }
+          ],
+          "facts": {
+            "workloads": {
+              "api": {
+                "replicas": 3,
+                "requests": {
+                  "cpu": 500
+                },
+                "limits": {
+                  "cpu": 500
+                },
+                "domain_counts": {}
+              }
+            },
+            "pools": {},
+            "quotas": {
+              "team": {
+                "resources": {
+                  "cpu": 1500
+                }
+              }
+            }
+          },
+          "unknowns": []
+        }
+      },
+      {
+        "case": "B5_unique_valid",
+        "expect": {
+          "rule": "data_integrity.unique",
+          "mode": "verify",
+          "outcome": "pass"
+        },
+        "routed": "data_integrity.unique",
+        "route_conf": 1.0,
+        "mode": "verify",
+        "mode_conf": 1.0,
+        "data_complete": 0.83,
+        "weakest": 0.83,
+        "gate": "open",
+        "latency_ms": 452.1,
+        "tokens": 1012,
+        "compiled": {
+          "family": "data_integrity",
+          "mode": "verify",
+          "rules": [
+            {
+              "rule_id": "data_integrity.unique",
+              "subjects": [
+                "record_key"
+              ],
+              "parameters": {}
+            }
+          ],
+          "facts": {
+            "relations": {
+              "records": {
+                "fields": {
+                  "key": {
+                    "kind": "integer",
+                    "minimum": 0,
+                    "maximum": 1000
+                  }
+                },
+                "rows": {
+                  "first": {
+                    "active": true,
+                    "cells": {
+                      "key": {
+                        "present": true,
+                        "value": 1
+                      }
+                    }
+                  },
+                  "second": {
+                    "active": true,
+                    "cells": {
+                      "key": {
+                        "present": true,
+                        "value": 2
+                      }
+                    }
+                  },
+                  "null_key": {
+                    "active": true,
+                    "cells": {
+                      "key": {
+                        "present": false,
+                        "value": null
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "unique_constraints": {
+              "record_key": {
+                "relation": "records",
+                "fields": [
+                  "key"
+                ]
+              }
+            },
+            "foreign_keys": {},
+            "cardinality_constraints": {},
+            "value_ranges": {},
+            "conditional_requirements": {},
+            "aggregate_balances": {},
+            "consistency_relations": {},
+            "temporal_constraints": {}
+          },
+          "unknowns": []
+        }
+      },
+      {
+        "case": "B6_transition_allowed_valid",
+        "expect": {
+          "rule": "workflow.transition_allowed",
+          "mode": "verify",
+          "outcome": "pass"
+        },
+        "routed": "workflow.transition_allowed",
+        "route_conf": 1.0,
+        "mode": "verify",
+        "mode_conf": 1.0,
+        "data_complete": 0.94,
+        "weakest": 0.94,
+        "gate": "open",
+        "latency_ms": 388.2,
+        "tokens": 999,
+        "compiled": {
+          "family": "workflow",
+          "mode": "verify",
+          "rules": [
+            {
+              "rule_id": "workflow.transition_allowed",
+              "subjects": [
+                "approval"
+              ],
+              "parameters": {}
+            }
+          ],
+          "facts": {
+            "horizon": 2,
+            "state_domain": [
+              "Draft",
+              "Review",
+              "Approved",
+              "Rejected"
+            ],
+            "event_domain": [
+              "submit",
+              "approve",
+              "reject"
+            ],
+            "initial_states": [
+              "Draft"
+            ],
+            "safe_states": [
+              "Draft",
+              "Review",
+              "Approved"
+            ],
+            "target_states": [
+              "Approved"
+            ],
+            "enabled_transitions": [
+              {
+                "step": 0,
+                "from": "Draft",
+                "event": "submit",
+                "to": "Review"
+              },
+              {
+                "step": 1,
+                "from": "Review",
+                "event": "approve",
+                "to": "Approved"
+              },
+              {
+                "step": 1,
+                "from": "Review",
+                "event": "reject",
+                "to": "Rejected"
+              }
+            ],
+            "traces": {
+              "approval": {
+                "states": [
+                  "Draft",
+                  "Review",
+                  "Approved"
+                ],
+                "events": [
+                  "submit",
+                  "approve"
+                ]
+              }
+            }
+          },
+          "unknowns": []
+        }
+      },
+      {
+        "case": "C1_assignment_synthesize",
+        "expect": {
+          "rule": "scheduling.assignment_exactly_once",
+          "mode": "synthesize",
+          "outcome": "solution"
+        },
+        "routed": "scheduling.assignment_exactly_once",
+        "route_conf": 1.0,
+        "mode": "synthesize",
+        "mode_conf": 0.99,
+        "data_complete": 0.78,
+        "weakest": 0.78,
+        "gate": "open",
+        "latency_ms": 452.5,
+        "tokens": 903,
+        "compiled": {
+          "family": "scheduling",
+          "mode": "synthesize",
+          "rules": [
+            {
+              "rule_id": "scheduling.assignment_exactly_once",
+              "subjects": [
+                "a"
+              ],
+              "parameters": {}
+            }
+          ],
+          "facts": {
+            "horizon": 4,
+            "jobs": {
+              "a": {
+                "release": 0,
+                "deadline": 4,
+                "durations": {
+                  "m1": 2,
+                  "m2": 2
+                },
+                "eligible_machines": [
+                  "m1",
+                  "m2"
+                ],
+                "demands": {
+                  "cpu": 1
+                },
+                "assignment": null
+              }
+            },
+            "machines": {
+              "m1": {
+                "capacities": {
+                  "cpu": 1
+                }
+              },
+              "m2": {
+                "capacities": {
+                  "cpu": 1
+                }
+              }
+            },
+            "precedence": []
+          },
+          "unknowns": [
+            {
+              "kind": "assignment",
+              "job": "a"
+            }
+          ]
+        }
+      },
+      {
+        "case": "C2_assignment_verify",
+        "expect": {
+          "rule": "scheduling.assignment_exactly_once",
+          "mode": "verify",
+          "outcome": "pass"
+        },
+        "routed": "scheduling.assignment_exactly_once",
+        "route_conf": 1.0,
+        "mode": "verify",
+        "mode_conf": 1.0,
+        "data_complete": 0.94,
+        "weakest": 0.94,
+        "gate": "open",
+        "latency_ms": 468.7,
+        "tokens": 899,
+        "compiled": {
+          "family": "scheduling",
+          "mode": "verify",
+          "rules": [
+            {
+              "rule_id": "scheduling.assignment_exactly_once",
+              "subjects": [
+                "a"
+              ],
+              "parameters": {}
+            }
+          ],
+          "facts": {
+            "horizon": 4,
+            "jobs": {
+              "a": {
+                "release": 0,
+                "deadline": 4,
+                "durations": {
+                  "m1": 2,
+                  "m2": 2
+                },
+                "eligible_machines": [
+                  "m1",
+                  "m2"
+                ],
+                "demands": {
+                  "cpu": 1
+                },
+                "assignment": {
+                  "machine": "m1",
+                  "start": 0
+                }
+              }
+            },
+            "machines": {
+              "m1": {
+                "capacities": {
+                  "cpu": 1
+                }
+              },
+              "m2": {
+                "capacities": {
+                  "cpu": 1
+                }
+              }
+            },
+            "precedence": []
+          },
+          "unknowns": []
+        }
+      }
+    ],
+    "D": [
+      {
+        "case": "D1_enum_label",
+        "expect": {
+          "y_kind": "enum",
+          "label": "large",
+          "status": "sat"
+        },
+        "decisions": {
+          "y_kind": "enum",
+          "required_label": "large",
+          "x_kind": "int_range"
+        },
+        "confidences": {
+          "y_kind": 1.0,
+          "required_label": 1.0,
+          "x_kind": 1.0
+        },
+        "weakest": 1.0,
+        "gate": "open",
+        "latency_ms": 442.9,
+        "tokens": 666,
+        "compiled": {
+          "vars": [
+            {
+              "type": "int_range",
+              "name": "x",
+              "min": 0,
+              "max": 10
+            },
+            {
+              "type": "enum",
+              "name": "tier",
+              "values": [
+                "small",
+                "large"
+              ]
+            }
+          ],
+          "constraints": [
+            {
+              "id": "doubled_x_floor",
+              "expr": {
+                "kind": "op",
+                "op": "ge",
+                "args": [
+                  {
+                    "kind": "op",
+                    "op": "mul",
+                    "args": [
+                      {
+                        "kind": "int",
+                        "value": 2
+                      },
+                      {
+                        "kind": "var",
+                        "name": "x"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "int",
+                    "value": 8
+                  }
+                ]
+              }
+            },
+            {
+              "id": "tier_required",
+              "expr": {
+                "kind": "enum_label",
+                "var": "tier",
+                "label": "large"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "case": "D2_hard_soft_objective",
+        "expect": {
+          "floor_hard": true,
+          "cap_soft": true,
+          "objective": "minimize",
+          "optimum": 4
+        },
+        "decisions": {
+          "floor_is_hard": 0.99,
+          "cap_is_soft": 0.97,
+          "objective": "minimize"
+        },
+        "confidences": {
+          "floor_is_hard": 0.99,
+          "cap_is_soft": 0.97,
+          "objective": 1.0
+        },
+        "weakest": 0.97,
+        "gate": "open",
+        "latency_ms": 458.0,
+        "tokens": 482,
+        "compiled": {
+          "vars": [
+            {
+              "type": "int_range",
+              "name": "x",
+              "min": 0,
+              "max": 10
+            }
+          ],
+          "constraints": [
+            {
+              "id": "floor",
+              "soft": false,
+              "expr": {
+                "kind": "op",
+                "op": "ge",
+                "args": [
+                  {
+                    "kind": "op",
+                    "op": "mul",
+                    "args": [
+                      {
+                        "kind": "int",
+                        "value": 3
+                      },
+                      {
+                        "kind": "var",
+                        "name": "x"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "int",
+                    "value": 12
+                  }
+                ]
+              }
+            },
+            {
+              "id": "cap",
+              "soft": true,
+              "weight": 1,
+              "expr": {
+                "kind": "op",
+                "op": "le",
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "x"
+                  },
+                  {
+                    "kind": "int",
+                    "value": 4
+                  }
+                ]
+              }
+            }
+          ],
+          "objectives": [
+            {
+              "op": "minimize",
+              "expr": {
+                "kind": "var",
+                "name": "x"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "case": "D3_multi_constraint",
+        "expect": {
+          "sum_hard": true,
+          "distinct_hard": true,
+          "pref_soft": true,
+          "weight": 2,
+          "status": "sat"
+        },
+        "decisions": {
+          "sum_is_hard": 0.98,
+          "distinct_is_hard": 0.97,
+          "pref_is_soft": 0.89,
+          "pref_weight": "2"
+        },
+        "confidences": {
+          "sum_is_hard": 0.98,
+          "distinct_is_hard": 0.97,
+          "pref_is_soft": 0.89,
+          "pref_weight": 1.0
+        },
+        "weakest": 0.89,
+        "gate": "open",
+        "latency_ms": 470.8,
+        "tokens": 501,
+        "compiled": {
+          "vars": [
+            {
+              "type": "int_range",
+              "name": "a",
+              "min": 0,
+              "max": 20
+            },
+            {
+              "type": "int_range",
+              "name": "b",
+              "min": 0,
+              "max": 20
+            }
+          ],
+          "constraints": [
+            {
+              "id": "sum_twenty",
+              "soft": false,
+              "expr": {
+                "kind": "op",
+                "op": "eq",
+                "args": [
+                  {
+                    "kind": "op",
+                    "op": "add",
+                    "args": [
+                      {
+                        "kind": "var",
+                        "name": "a"
+                      },
+                      {
+                        "kind": "var",
+                        "name": "b"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "int",
+                    "value": 20
+                  }
+                ]
+              }
+            },
+            {
+              "id": "distinct",
+              "soft": false,
+              "expr": {
+                "kind": "op",
+                "op": "ne",
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "a"
+                  },
+                  {
+                    "kind": "var",
+                    "name": "b"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "a_high",
+              "soft": true,
+              "weight": 2,
+              "expr": {
+                "kind": "op",
+                "op": "ge",
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "a"
+                  },
+                  {
+                    "kind": "int",
+                    "value": 15
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "E": {
+      "repeats": [
+        {
+          "run": 1,
+          "route": "scheduling.cumulative_capacity",
+          "route_conf": 0.99,
+          "same_direction_noul": 0.73,
+          "hard_noul": 0.44,
+          "latency_ms": 417.4,
+          "tokens": 723
+        },
+        {
+          "run": 2,
+          "route": "scheduling.cumulative_capacity",
+          "route_conf": 0.99,
+          "same_direction_noul": 0.69,
+          "hard_noul": 0.45,
+          "latency_ms": 453.4,
+          "tokens": 723
+        },
+        {
+          "run": 3,
+          "route": "scheduling.cumulative_capacity",
+          "route_conf": 0.99,
+          "same_direction_noul": 0.76,
+          "hard_noul": 0.43,
+          "latency_ms": 450.3,
+          "tokens": 723
+        },
+        {
+          "run": 4,
+          "route": "scheduling.cumulative_capacity",
+          "route_conf": 0.99,
+          "same_direction_noul": 0.76,
+          "hard_noul": 0.42,
+          "latency_ms": 387.0,
+          "tokens": 723
+        },
+        {
+          "run": 5,
+          "route": "scheduling.cumulative_capacity",
+          "route_conf": 0.99,
+          "same_direction_noul": 0.79,
+          "hard_noul": 0.43,
+          "latency_ms": 438.0,
+          "tokens": 723
+        }
+      ],
+      "route_stable": true,
+      "route_spread": {
+        "scheduling.cumulative_capacity": 5
+      }
+    },
+    "F": {
+      "questions_in_one_call": 12,
+      "latency_ms": 468.2,
+      "tokens": {
+        "input_tokens": 2840,
+        "output_tokens": 748
+      },
+      "per_intent": {
+        "B1_non_overlap_valid": {
+          "routed": "layout.non_overlap",
+          "conf": 1.0,
+          "complete": 0.54
+        },
+        "B2_non_overlap_violation": {
+          "routed": "layout.non_overlap",
+          "conf": 1.0,
+          "complete": 0.55
+        },
+        "B3_cumulative_capacity_valid": {
+          "routed": "scheduling.cumulative_capacity",
+          "conf": 0.99,
+          "complete": 0.79
+        },
+        "B4_quota_capacity_valid": {
+          "routed": "resource.quota_capacity",
+          "conf": 1.0,
+          "complete": 0.92
+        },
+        "B5_unique_valid": {
+          "routed": "data_integrity.unique",
+          "conf": 1.0,
+          "complete": 0.45
+        },
+        "B6_transition_allowed_valid": {
+          "routed": "workflow.transition_allowed",
+          "conf": 1.0,
+          "complete": 0.76
+        }
+      }
+    }
+  }
+}
